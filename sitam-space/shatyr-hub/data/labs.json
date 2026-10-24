@@ -1,0 +1,1154 @@
+[
+  {
+    "description": "",
+    "focus": [
+      "Research"
+    ],
+    "location": "",
+    "name": "Statistics",
+    "slug": "statistics",
+    "heads": [
+      {
+        "name": "Amine Sbai",
+        "role": "lead"
+      }
+    ]
+  },
+  {
+    "name": "Robotics Lab",
+    "year_founded": 2025,
+    "founders": [
+      "Koichi Kaganezawa"
+    ],
+    "description": "The Robotics Laboratory is a place where students learn by building. They work with microcontrollers, sensors, motors, and circuit design, and put them together into working robots. Alongside teaching, the lab develops practical robotic solutions, from custom electronics to control systems. A part of this work uses reinforcement learning (RL) to train robots to handle tasks through trial and error, first in simulation and then on real hardware. The aim is simple: give students hands-on skills in electronics and programming, and create robots that actually work.",
+    "focus": [
+      "Research",
+      "Academic / Education"
+    ],
+    "logo": "https://drive.google.com/open?id=15eaPGRM84VTEvLevQBnqdBNUj1NPTCjI",
+    "website": null,
+    "social_media": [
+      {
+        "platform": "Instagram",
+        "url": "https://www.instagram.com/robolab_sdu"
+      }
+    ],
+    "location": "I-03,I-03/1,I-03/2",
+    "student_lead": "Kerimbek Bekzhan Computer Science 4 year student 87075472175",
+    "deputy_student_lead": "Sabyrzhan Assylbek 4  Computer Science 4 year student  87774391867",
+    "completed_projects": [
+      "XLE robot(rigid object robotic manipulation)"
+    ],
+    "ongoing_projects": [
+      "Research on XLe robot(rigid object robotic manipulation)",
+      "Vertical Hydroponics System",
+      "Horizontal Hydroponics System",
+      "Research about CV navigation with TurtleBot"
+    ],
+    "organized_events": [
+      "Industrial Practice Collaboration with Alash Electronics",
+      "Industrial Practice Collaboration with USTEM Foundation"
+    ],
+    "seminars": [
+      "Presentation StartUp projects about hydroponics."
+    ],
+    "courses": [
+      "Workshops about IOT,electronics"
+    ],
+    "external_events": [
+      "RoboCup",
+      "Shaiqas",
+      "RoboCon"
+    ],
+    "notable_alumni": [
+      "Dias Kabdualiev Alash Electronics,Caravan Resources group - AI engineer"
+    ],
+    "sdu_alumni_contributors": [],
+    "current_partners": [
+      "Alash Electronics",
+      "USTEM Foundation"
+    ],
+    "prospective_partners": [
+      "Unitree"
+    ],
+    "grants": [],
+    "awards": [
+      "RoboCup Central Asia - 2 place",
+      "RoboCon Republic - 1 place."
+    ],
+    "presenters": [
+      "Kerimbek Bekzhan 4th year student 87075472175  Kazakh, Russian, English"
+    ],
+    "orgs_kz": [
+      "USTEM Foundation",
+      "Eltex Alatau",
+      "Alash electronics"
+    ],
+    "orgs_global": [
+      "REV Robotics",
+      "Unitree robotics",
+      "FIRST Robotics",
+      "Nvidia",
+      "Boston Dynamics"
+    ],
+    "events_kz": [],
+    "events_global": [
+      "Events of NVIDIA",
+      "Events of Boston Dynamics",
+      "Events of UNITREE"
+    ],
+    "goals": [
+      "Create a system of labarotory which will teach upcoming students and create projects."
+    ],
+    "required_support": [
+      "Financial",
+      "mentorship of teachers"
+    ],
+    "resource_gaps": [
+      "PC with GPU(for RL)",
+      "UPS(5kw)-2pc",
+      "Soldering Stations",
+      "Network Switch",
+      "WhiteBoard",
+      "Courses about RL",
+      "Robots for RL education(Humanoid,Quadruped robots)",
+      "3D printer filaments(except PLA)"
+    ],
+    "team_members": [
+      "Kartbayev Bereket - Hardware engineer , 3 year",
+      "Kanatov Raibek - CV  engineer , 3 year",
+      "Rakhymberdi Dariga - Project Manager , 3 year",
+      "Sovet Mansur - Hardware engineer , 2 year",
+      "Ushkempir Zanggar - Software engineer, 2 year"
+    ],
+    "previous_leads": [
+      "Koichi Kaganezawa (2025-2026)"
+    ],
+    "photo_files": [],
+    "photo_archive_link": "https://drive.google.com/drive/folders/19oW8kmjJBE6IEE8d5LL-lrlmAlj0b31Q?usp=sharing",
+    "visitor_walkthrough": "usually presenting about education program",
+    "live_demo": null,
+    "demo_stand": "No live demo available yet (presentation slides only).",
+    "action_plan_link": "https://drive.google.com/open?id=13FIDI5DmraT30vogBbiS4Gb8_F-Xs4xN",
+    "slug": "robotics-lab",
+    "heads": [
+      {
+        "name": "Inkar Baidaly",
+        "email": "ingkar.baidaly@sdu.edu.kz",
+        "role": "lead"
+      }
+    ]
+  },
+  {
+    "description": "",
+    "focus": [
+      "Courses",
+      "Industry & Commercial Projects"
+    ],
+    "location": "",
+    "name": "RedHat Laboratory",
+    "slug": "redhat-laboratory",
+    "heads": [
+      {
+        "name": "Manbay Shakhnazar-Sultan",
+        "email": "s.manbay@sdu.edu.kz",
+        "role": "lead"
+      }
+    ]
+  },
+  {
+    "name": "MCM Lab",
+    "year_founded": 2023,
+    "founders": [
+      "Yerimbet Aitzhanov"
+    ],
+    "description": "The MCM Lab is dedicated to preparing students for mathematics olympiads and supporting students and their supervisors in conducting research projects.",
+    "focus": [
+      "Research"
+    ],
+    "logo": null,
+    "website": null,
+    "social_media": [],
+    "location": "F02",
+    "student_lead": "Yenlik Turarbay, 4th-year undergraduate, Mathematics; 230101008@sdu.edu.kz",
+    "deputy_student_lead": null,
+    "completed_projects": [
+      "Research Practice for Master's students (2024–2026): 10 Master's students completed supervised research projects in the lab.",
+      "Olympiad preparation programme: the lab trains students for university mathematics olympiads."
+    ],
+    "ongoing_projects": [
+      "Research Practice for Master's students",
+      "Fractional differential equations",
+      "Controllability of degenerate parabolic systems"
+    ],
+    "organized_events": [
+      "Weekly research meetings of students with their supervisors in fractional calculus and control theory; regular research seminars for students"
+    ],
+    "seminars": [
+      "Introduction to fractional calculus and fractional differential equations – undergraduate (3rd–4th year) and Master's students.",
+      "Introduction to mathematical control theory – undergraduate and Master's students.",
+      "How to start research in mathematics (reading papers, writing in LaTeX) – undergraduate students."
+    ],
+    "courses": [],
+    "external_events": [
+      "International Mathematics Competition for University Students (IMC, Bulgaria)",
+      "Republican Student Olympiad in Mathematics (Kazakhstan)",
+      "SEEMOUS (South Eastern European Mathematical Olympiad for University Students); international conferences in analysis, differential equations and control theory."
+    ],
+    "notable_alumni": [
+      "Amir Zhangirbayev, PhD student"
+    ],
+    "sdu_alumni_contributors": [],
+    "current_partners": [
+      "Institute of Mathematics and Mathematical Modeling"
+    ],
+    "prospective_partners": [
+      "Al-Farabi Kazakh National University; Nazarbayev University"
+    ],
+    "grants": [],
+    "awards": [
+      "Olympiad preparation programme (2025–2026): the SDU University team, trained in the lab under the supervision of N. Kakharman, was awarded the 3rd Prize in the team competition of the Republican Student Subject Olympiad in Mathematics (Nazarbayev University, Astana, April 11–12, 2026)."
+    ],
+    "presenters": [
+      "Yenlik Turarbay, 4th year, 230101008@sdu.edu.kz, Languages: Kazakh, Russian, English"
+    ],
+    "orgs_kz": [
+      "International Mathematical Union (IMU)",
+      "American Mathematical Society (AMS)",
+      "European Mathematical Society (EMS)",
+      "Society for Industrial and Applied Mathematics (SIAM)",
+      "International Federation of Automatic Control (IFAC)",
+      "IEEE Control Systems Society"
+    ],
+    "orgs_global": [
+      "Nazarbayev University",
+      "Institute of Mathematics and Mathematical Modeling"
+    ],
+    "events_kz": [
+      "Traditional International April Mathematical Conference (Institute of Mathematics and Mathematical Modeling, Almaty)",
+      "International Conference on Analysis and Applied Mathematics (ICAAM)",
+      "Republican Student Olympiad in Mathematics."
+    ],
+    "events_global": [
+      "International Congress of Mathematicians (ICM)",
+      "International Conference on Fractional Differentiation and Its Applications (ICFDA)",
+      "IEEE Conference on Decision and Control (CDC)",
+      "International Mathematics Competition for University Students (IMC)."
+    ],
+    "goals": [
+      "Publication of student research results in peer-reviewed journals; participation of students in international and national olympiads; presentation of student work at conferences; expanding the regular student seminar; attracting more undergraduate students to research."
+    ],
+    "required_support": [],
+    "resource_gaps": [
+      "Workstation(s) for numerical simulations and computations, with the following minimum specifications: GPU: NVIDIA GeForce RTX 5060 Ti 16 GB or better (with CUDA support); CPU: AMD Ryzen 7 7700 / Ryzen 7 9700X, or an equivalent Intel Core i7 processor or better; RAM: 64 GB DDR5 minimum (128 GB preferred); Storage: 512 GB NVMe SSD or larger."
+    ],
+    "team_members": [
+      "Bayan Bekbolat, Research Supervisor (Fractional Calculus), Associate Professor",
+      "Amine Sbai, Research Supervisor (Control Theory), Assistant Professor",
+      "Nurbek Kakharman, Olympiad Coach (Mathematics Olympiad Preparation), Associate Professor"
+    ],
+    "previous_leads": [
+      "Yerimbet Aitzhanov (2023-2025)",
+      "Amir Zhangirbayev (2025-2026)"
+    ],
+    "photo_files": [
+      "https://drive.google.com/open?id=1d7azE7LrVIq8Q8Qj6wmc99zNyiDTgPhc",
+      "https://drive.google.com/open?id=1gKwUwoBh67fGqyNT1dN_tu3Q3N_8DouQ",
+      "https://drive.google.com/open?id=1Rv-Io1JyuVy7zOepkSQk2UCKIIAUY8wE",
+      "https://drive.google.com/open?id=1KVr1HWu9NqMq9fPV_wEn8zijimdqqT8M"
+    ],
+    "photo_archive_link": null,
+    "visitor_walkthrough": "Short introduction to the lab: research directions (fractional calculus, control theory) and olympiad preparation (2 min).\nPresentation by a student of their current research project at the whiteboard or on the monitor (3–4 min).\nOverview of the olympiad programme and students' results (2 min).\nQuestions from guests (1–2 min).",
+    "live_demo": "The lab works in theoretical mathematics, so there are no hardware prototypes",
+    "demo_stand": "No live demo available yet (presentation slides only).",
+    "action_plan_link": "https://drive.google.com/open?id=1nizTrSVzS_1MYrKiCy8aIJcFcAB9b6oX",
+    "slug": "mcm-lab",
+    "heads": [
+      {
+        "name": "Madina Kalaman",
+        "role": "lead",
+        "title": "Senior lecturer"
+      }
+    ]
+  },
+  {
+    "description": "",
+    "focus": [
+      "Research",
+      "Courses"
+    ],
+    "location": "",
+    "name": "Physics Lab",
+    "slug": "physics-lab",
+    "heads": [
+      {
+        "name": "Kalieva Asem Abaevna",
+        "role": "lead"
+      }
+    ]
+  },
+  {
+    "description": "",
+    "focus": [
+      "Courses",
+      "Industry & Commercial Projects"
+    ],
+    "location": "F06",
+    "name": "Multimedia Studio (F 06)",
+    "slug": "multimedia-studio-f06",
+    "heads": [
+      {
+        "name": "Marat Urmanov",
+        "email": "marat.urmanov@sdu.edu.kz",
+        "role": "lead"
+      }
+    ]
+  },
+  {
+    "description": "",
+    "focus": [
+      "Courses",
+      "Industry & Commercial Projects"
+    ],
+    "location": "1109",
+    "name": "Multimedia 3D Lab (1109)",
+    "slug": "multimedia-3d-lab-1109",
+    "heads": [
+      {
+        "name": "Aziza Yusupova",
+        "role": "lead"
+      }
+    ]
+  },
+  {
+    "name": "Multimedia Lab",
+    "year_founded": 2015,
+    "rebranded": "Founded in 2015 as 3D Lab; renamed Multimedia Lab in 2021",
+    "founders": [
+      "Madina Alimanova"
+    ],
+    "description": "The Multimedia Sciences (MMS) Lab is a creative and technology-focused space at SDU University, dedicated to developing students’ practical skills in design, multimedia, digital technologies, and creative project development. The lab provides an environment where students can learn, experiment, collaborate, and turn their ideas into real projects.\n\nMain Focus Areas:\n\n- UX/UI & Graphic Design — user-centered design, visual communication, branding, typography, and digital interfaces.\n- 3D Design & Manufacturing — 3D modeling, CAD/CAM, 3D printing, laser cutting, and prototyping.\n- Multimedia & Creative Technologies — digital content creation, visual storytelling, interactive media, and emerging technologies.\n- Project-Based Learning — developing real-world projects from concept and research to prototype and final presentation.\n- Creative Community & Events — workshops, exhibitions, competitions, festivals, and collaborative activities for students.\n- Innovation & Entrepreneurship — supporting students in developing creative ideas, prototypes, and technology-based projects.",
+    "focus": [
+      "Academic / Education",
+      "Industry & Commercial Projects"
+    ],
+    "logo": "https://drive.google.com/open?id=11VbypRTbcXZx8MmH7h8DV3QeRoBMvlp8",
+    "website": null,
+    "social_media": [
+      {
+        "platform": "Instagram",
+        "url": "https://www.instagram.com/sdu.mms/"
+      }
+    ],
+    "location": "Technopark F06, I109, I block(?)",
+    "student_lead": "Murat Rassul Zamiruly, MMS 4 year, +7 776 791 8708/@Fortschrtt",
+    "deputy_student_lead": null,
+    "completed_projects": [
+      "Alpamys",
+      "The Great Picture (Multimedia Advertisement)",
+      "SDU Inclusion centre (books for children)"
+    ],
+    "ongoing_projects": [
+      "Small Photolithogrpahic Device and subprojects",
+      "Sound Factory (Game)",
+      "Seal Way (Game)",
+      "SDU Store (merch)"
+    ],
+    "organized_events": [
+      "Multimedia Fest 2023",
+      "Design For Manufacturing Fest 2023",
+      "Multimedia Fest 2024",
+      "Multimedia Fest 2025",
+      "Inktober 2025",
+      "Winter Game Jam 2026",
+      "Inktober 2026",
+      "Multimedia Fest 2026"
+    ],
+    "seminars": [
+      "Graphic Design — basic design skills, composition, typography, and visual communication for students.",
+      "UX/UI Design — creating user-friendly interfaces and digital products for beginners.",
+      "Branding — developing logos, visual identity, and simple brand concepts for student projects.",
+      "3D Design & Prototyping — basic 3D modeling, 3D printing, and creating physical prototypes.",
+      "Creative Workshops — practical sessions where students develop and present their own creative projects."
+    ],
+    "courses": [
+      "Graphic Design — Students, teachers, and beginners — 6 weeks",
+      "UX/UI Design — Students and beginners — 6 weeks",
+      "Branding & Visual Identity — Students, entrepreneurs, and beginners — 4 weeks",
+      "3D Design & Prototyping — Students and beginners interested in digital fabrication — 6 weeks"
+    ],
+    "external_events": [
+      "Turkey game jam",
+      "Siberian game jam",
+      "Satpaev game jam",
+      "Ludum dare",
+      "GNTK",
+      "3D challenge",
+      "art battle",
+      "Global game jam",
+      "Demo day",
+      "Animation fest",
+      "Geek fest",
+      "Bayqonur film fest"
+    ],
+    "notable_alumni": [
+      "The laboratory’s first graduating cohort completed the program this year. Many alumni are currently working in creative fields, including 3D modeling, graphic design, motion design, and related areas."
+    ],
+    "sdu_alumni_contributors": [],
+    "current_partners": [],
+    "prospective_partners": [
+      "with other universities"
+    ],
+    "grants": [],
+    "awards": [
+      "PunkVerse GameJam 2025 (Best Narrative)",
+      "PunkVerse GameJam 2025 (Best Game Design)",
+      "KBTU Global GameJam 2024 (Best Game)",
+      "SDU Winter GameJam 2026 (2 place)",
+      "SDU Winter GameJam 2026 (1 place)"
+    ],
+    "presenters": [
+      "Murat Rassul Zamiruly, 2006, +7 776 791 8708, Kz, Rus, Eng"
+    ],
+    "orgs_kz": [
+      "MMS Fest"
+    ],
+    "orgs_global": [],
+    "events_kz": [],
+    "events_global": [],
+    "goals": [
+      "MMS Fest"
+    ],
+    "required_support": [
+      "Administrative support, financial support for equipment and events, PR and media support, technical support, and opportunities for mentorship and collaboration with industry partners."
+    ],
+    "resource_gaps": [
+      "We are still finalizing the Budget Plan. A detailed list of the required equipment, software, and other resources will be provided in the linked Budget Plan",
+      "https://docs.google.com/spreadsheets/d/1IXoZ0IiK0nVwhkbm9YU0pDVOuRL9cBJhEfdGqWS08SE/edit?usp=sharing"
+    ],
+    "team_members": [
+      "Marat Urmanov, Educational Program Coordinator, 2026",
+      "Aziza Yussupova, TA, Lab Head, 2025",
+      "Murat Rassul, Lead Assistant, 2025",
+      "Rakhmetulla Bekzada, 2026",
+      "Amanova Adel, 2026",
+      "Kozhakhmetov Zhanibek, 2026"
+    ],
+    "previous_leads": [
+      "Madina Alimanova 2015 - 2019",
+      "Marat Urmanov 2019 - 2021",
+      "Shyngys Adilkhan 2021 - 2026"
+    ],
+    "photo_files": [
+      "https://drive.google.com/open?id=1B3oq5ILumjbTjPSKnqfhdj9TcTmv0kQL",
+      "https://drive.google.com/open?id=13_uXwscuWw0qxQ4VYmXk2UQqfiwX6x1L",
+      "https://drive.google.com/open?id=1GLic5VFc0358h8210ymXM3XvEntXM6wV",
+      "https://drive.google.com/open?id=1lFwCNUIL00hNv5r4J3u_7irWB7nCwq-c",
+      "https://drive.google.com/open?id=1je3jnzAEA6VaDFqePOu01Pi9NL0zI1rV",
+      "https://drive.google.com/open?id=17QJTWaxMa8jPfxvojpZSVr2n_NUu9yPp",
+      "https://drive.google.com/open?id=1a_b08WCmWPDp4s3AGDaufOxvnwxGIroR",
+      "https://drive.google.com/open?id=1bPfrMtXTqSJK5uULsqvZ8IHrjY3lSv8v",
+      "https://drive.google.com/open?id=1BeIezv7MnkQZzZZqaZb9QxPnEtmSdC_y",
+      "https://drive.google.com/open?id=1iYYAw86lKjUg0T1zoEeTNUs0IPmKvEGr"
+    ],
+    "photo_archive_link": "https://drive.google.com/drive/folders/1Q_UTfabHFqcr166n7EbtPU5VLJuIr74x?usp=sharing",
+    "visitor_walkthrough": "First, we will introduce the BA program in Multimedia Sciences, highlighting its main areas of study and opportunities for students. Next, we will take a closer look at the laboratory: what students do there, what they learn, and how the laboratory helps them develop practical and creative skills. Finally, we will showcase some of the projects created by our students and demonstrate how they apply their knowledge in practice.",
+    "live_demo": "Games -> Film/CGI Projects ->  3D Prints",
+    "demo_stand": "Projects are ready, but need 10–15 minutes of setup/startup time.",
+    "action_plan_link": "https://drive.google.com/open?id=1qZqIY2AlGNiCx1yhho6aXSyeVKAxwwCF",
+    "slug": "multimedia-lab",
+    "heads": [
+      {
+        "name": "Aziza Yusupova",
+        "role": "lead",
+        "title": "TA, Lab Head"
+      },
+      {
+        "name": "Marat Urmanov",
+        "email": "marat.urmanov@sdu.edu.kz",
+        "role": "co_lead",
+        "title": "MSc in Computer Science"
+      }
+    ]
+  },
+  {
+    "description": "",
+    "focus": [
+      "Courses",
+      "Industry & Commercial Projects"
+    ],
+    "location": "",
+    "name": "Fortinet",
+    "slug": "fortinet",
+    "heads": [
+      {
+        "name": "Manbay Shakhnazar-Sultan",
+        "email": "s.manbay@sdu.edu.kz",
+        "role": "lead"
+      }
+    ]
+  },
+  {
+    "name": "Distributed Systems and Computing Lab",
+    "year_founded": 2021,
+    "founders": [
+      "Kamila Orynbekova",
+      "Andrey Bogdanchikov"
+    ],
+    "description": "It was designed for research and practical activities and was established to enhance the quality and volume of research in the field of big data analysis.",
+    "focus": [
+      "Research",
+      "Academic / Education"
+    ],
+    "logo": "https://drive.google.com/open?id=1gvXJpE0K2IvyOM2dXYFkSerC756VmPSJ",
+    "website": "https://dsc.ailab-sdu.com",
+    "social_media": [],
+    "location": "G107/1",
+    "student_lead": "Assylbek Sabyrzhan  (id: 230107096) tel. +7 777 439 1867",
+    "deputy_student_lead": "Dariga Kazak (id: 230107138) tel. +7 771 281 8932",
+    "completed_projects": [],
+    "ongoing_projects": [],
+    "organized_events": [],
+    "seminars": [],
+    "courses": [],
+    "external_events": [],
+    "notable_alumni": [],
+    "sdu_alumni_contributors": [],
+    "current_partners": [],
+    "prospective_partners": [],
+    "grants": [],
+    "awards": [],
+    "presenters": [],
+    "orgs_kz": [],
+    "orgs_global": [],
+    "events_kz": [],
+    "events_global": [],
+    "goals": [],
+    "required_support": [],
+    "resource_gaps": [],
+    "team_members": [],
+    "previous_leads": [
+      "Yernar Akhmetbek (2025-2026)"
+    ],
+    "photo_files": [],
+    "photo_archive_link": null,
+    "visitor_walkthrough": null,
+    "live_demo": null,
+    "demo_stand": "No live demo available yet (presentation slides only).",
+    "action_plan_link": null,
+    "slug": "distributed-systems-and-computing-lab",
+    "heads": [
+      {
+        "name": "Orynbekova Kamila",
+        "email": "kamila.orynbekova@sdu.edu.kz",
+        "role": "lead"
+      }
+    ]
+  },
+  {
+    "name": "SDU Data Analytics Lab",
+    "year_founded": 2025,
+    "founders": [
+      "Bakhtiyor Meraliyev",
+      "Aziza Nazarbayeva",
+      "Zhanserik Sauatbek",
+      "Meruyert Salizhanova"
+    ],
+    "description": "MADRID Lab (Machine learning, Analytics, Data Research & Intelligent Decisions) is an SDU University research lab that develops data-driven methods to support well-grounded decisions. The lab brings together students and researchers working on real data problems: building models, testing them rigorously, and understanding when results can be trusted. Focus areas: machine learning, analytics, data research, and intelligent decision-making, with applications in clinical prediction, NLP and text analysis, computer vision, HR and learning analytics, and environmental modelling. Students join the lab for research projects, theses and internships.",
+    "focus": [
+      "Research",
+      "Academic / Education"
+    ],
+    "logo": "https://drive.google.com/open?id=13yc61pL_UkTBzXmkqWuOgFQtbRa9fBFa",
+    "website": "https://datalab.sdutechnopark.kz/",
+    "social_media": [
+      {
+        "platform": "GitHub",
+        "url": "https://github.com/SDU-Data-Analytics-Lab/"
+      },
+      {
+        "platform": "LinkedIn",
+        "url": "https://www.linkedin.com/in/data-analytics-lab-661a07437/"
+      }
+    ],
+    "location": "SDU Technopark",
+    "student_lead": "Aknur Mansurkhan, 4th-year BSc Computer Science student, https://www.linkedin.com/in/aknur-m-ba809a330/",
+    "deputy_student_lead": "Aisulu Igimbayeva, 4th-year BSc Information Systems student, https://www.linkedin.com/in/aisigim/",
+    "completed_projects": [
+      "Using Machine Learning to Predict Arterial Hypertension From a Clinical Dataset (ICECCO 2026)",
+      "Search Trees: A Review and Comparative Study (WPMC 2025)",
+      "Attrition Rate Measuring in HR Analytics Using ML (ICECCO 2023)",
+      "ML as an Effective Tool for HR Management in Higher Education (ICECCO 2023)",
+      "Computer Vision Supported Investigation on Anxiety-Success Relationship in Education (IEEE SIST 2021)",
+      "Content Analysis of Suicide Texts From Social Media Using NLP and ML (IEEE SIST 2021)",
+      "ML Models for Predicting Forest Fires in Australia (2020)"
+    ],
+    "ongoing_projects": [
+      "Suicide-risk detection from social media text (NLP, Kazakh/Russian data collection; multimodal extension)",
+      "Student dropout analysis and prediction (learning analytics)",
+      "Leakage-aware explainable AI for hypertension staging (accepted, AICT 2026)",
+      "Digital and clinical biomarkers for Parkinson's disease (SYNERGY-PD)",
+      "Kazakh language NLP: semantic word-guessing game Жасырын Сөз"
+    ],
+    "organized_events": [
+      "Recruitment interviews for new members of the Data Analytics Lab (Freedom program participants)(2026)",
+      "Seminars and trainings for the previous year's Freedom Data Analytics Lab participants(2025)"
+    ],
+    "seminars": [
+      "Intro to Machine Learning with Python, for 1st–2nd year students",
+      "Honest model evaluation: data leakage and validation, for students doing research or theses",
+      "Writing and publishing your first research paper, for undergraduates"
+    ],
+    "courses": [
+      "Applied Machine Learning with Python, for 1st-3rd year students, 8 weeks",
+      "Research Methods for Data Science (from data to paper), for undergraduates, 6 weeks"
+    ],
+    "external_events": [
+      "Digital Bridge",
+      "Astana Hub AI and Data Science hackathons",
+      "Decentrathon",
+      "GovTech Camp",
+      "Freedom Holding data and AI challenges",
+      "IEEE conferences and student research competitions",
+      "NeurIPS",
+      "ICML",
+      "KDD and other major international AI/ML events"
+    ],
+    "notable_alumni": [
+      "N/A at the moment. The laboratory was established recently, and information about former members' current companies and positions is still being collected and updated."
+    ],
+    "sdu_alumni_contributors": [
+      "To be identified in cooperation with the SDU Alumni Office, Technopark and faculty network. We are particularly interested in SDU alumni working in Data Science, Machine Learning, Data Engineering, AI research, healthcare analytics and technology companies who could contribute through mentorship, workshops, research collaboration or industry projects."
+    ],
+    "current_partners": [
+      "SDU Technopark and SDU University faculty/research units.",
+      "Freedom Holding Corp. — collaboration through SDU Data Science/Data Bootcamp educational and industry-oriented initiatives.",
+      "The laboratory also collaborates with researchers, academic supervisors and domain experts on individual research projects."
+    ],
+    "prospective_partners": [
+      "Astana Hub; ISSAI at Nazarbayev University; Freedom Holding Corp. and its ecosystem companies; healthcare and clinical organizations in Kazakhstan; National Center for the Development of Higher Education; Ministry of Science and Higher Education of the Republic of Kazakhstan; technology companies working in AI, Data Science and Data Engineering.",
+      "Internationally, the lab is interested in collaboration with university research laboratories, IEEE communities, ACM communities and research groups working in applied machine learning, trustworthy AI, NLP, healthcare AI and learning analytics."
+    ],
+    "grants": [],
+    "awards": [
+      "Freedom Ecosystem Challenge 2026 (SDU University × Freedom Holding Corp., 17.05.2026): lab members won 1st place in all three tracks (Freedom Holding Corp., Freedom Insurance, Freedom Finance); prizes: 500,000 ₸, 250,000 ₸, 100,000 ₸"
+    ],
+    "presenters": [
+      "Aknur Mansurkhan - Student Lead, 4th-year BSc Computer Science student Languages: Kazakh, Russian, English Contact: https://www.linkedin.com/in/aknur-m-ba809a330/",
+      "Aisulu Igimbayeva - Deputy Student Lead, 4th-year BSc Information Systems student Languages: Kazakh, Russian, English Contact: https://www.linkedin.com/in/aisigim/",
+      "Other research assistants can participate in presentations depending on the project being demonstrated."
+    ],
+    "orgs_kz": [
+      "Astana Hub",
+      "ISSAI (Nazarbayev University)",
+      "Ministry of Digital Development",
+      "Ministry of Science and Higher Education"
+    ],
+    "orgs_global": [
+      "IEEE",
+      "ACM",
+      "Google DeepMind",
+      "Hugging Face"
+    ],
+    "events_kz": [
+      "ICECCO",
+      "SIDe",
+      "Decentrathon",
+      "GovTech Camp"
+    ],
+    "events_global": [
+      "NeurIPS",
+      "ICML",
+      "KDD",
+      "AICT"
+    ],
+    "goals": [
+      "The main goals of MADRID Lab for the coming year are to strengthen its research infrastructure, increase high-quality research output, expand collaboration with industry and academic institutions, and create a sustainable student research ecosystem.",
+      "Publish research in peer-reviewed IEEE/Scopus-indexed conferences and journals.",
+      "Develop 3–5 active research projects with reproducible datasets, code and documentation.",
+      "Increase student participation in research, theses and research assistantships.",
+      "Establish regular internal research seminars and technical workshops.",
+      "Build stronger partnerships with industry, healthcare organizations and other research laboratories.",
+      "Apply for external research grants and industry-sponsored projects.",
+      "Improve the laboratory's computing infrastructure for machine learning experiments.",
+      "Develop demonstration-ready AI/analytics prototypes for visitors, partners and university events.",
+      "Strengthen the laboratory's national and international research visibility."
+    ],
+    "required_support": [
+      "Access to dedicated high-performance computing infrastructure for machine learning and data-intensive research, including at least one shared GPU workstation for approximately five active researchers working on deep learning, NLP, computer vision, LLM-based projects and reproducible experiments for academic publications.",
+      "Financial support for research conferences, publication fees and student participation in competitions, including registration fees, travel support and other research-related expenses where applicable.",
+      "Support for cloud computing, AI/API credits and research software subscriptions, including OpenAI API, Anthropic Claude API, Meta Threads API-related infrastructure, GPU cloud services and other tools required for research, data processing and experimentation.",
+      "Data storage and research infrastructure support, including SSD/NAS storage for datasets, trained models, experiment outputs and secure backups.",
+      "Assistance in establishing collaborations with companies, government organizations, healthcare institutions, research centers and international academic groups.",
+      "Support with grant applications and externally funded research projects, including identification of relevant funding opportunities and assistance with proposal preparation.",
+      "Administrative assistance for research agreements, data-access agreements, ethics-related documentation and collaboration documents, particularly for projects involving external datasets or institutional partners.",
+      "PR and communications support for promoting laboratory research, publications, events, achievements and student opportunities through university communication channels.",
+      "Support for organizing workshops, seminars, research meetups, guest lectures and internal training sessions for students and researchers.",
+      "A dedicated laboratory/workspace suitable for research activities, team meetings and project demonstrations, with appropriate workstations, monitors and basic peripherals such as mice and mouse pads."
+    ],
+    "resource_gaps": [
+      "Priority equipment and resource needs:",
+      "1 high-performance AI/ML workstation for deep learning, LLM/NLP, computer vision and large-scale data analysis. Preferably equipped with a modern NVIDIA GPU with at least 24 GB VRAM, 64–128 GB RAM, a high-performance multi-core CPU, and at least 2–4 TB SSD storage. This workstation would serve as a shared computing resource for laboratory research projects and paper-related experiments.",
+      "5 computer mice and 5 mouse pads for student research workstations.",
+      "Cloud/API research budget for a team of approximately 5 researchers, including:",
+      "OpenAI / ChatGPT API credits",
+      "Anthropic Claude API credits",
+      "Meta Threads API access and related infrastructure for research involving public social-media data",
+      "additional cloud/API credits when required for NLP, LLM and data-collection experiments.",
+      "Cloud computing or GPU credits for computationally intensive experiments.",
+      "Additional SSD/NAS storage for datasets, trained models, experiment outputs and backups.",
+      "Shared software/research subscriptions where required for academic projects and publication-related work."
+    ],
+    "team_members": [
+      "Bakhtiyor Meraliyev, Founder, Professor",
+      "Aziza Nazarbayeva, Founder, Head of Lab",
+      "Aknur Mansurkhan, Student Lead",
+      "Aisulu Igimbayeva, Deputy Student Lead",
+      "Abilmansur Alibekov, Research Assistant",
+      "Akbike Zhurymbay, Research Assistant",
+      "Aruzhan Iliyas, Research Assistant"
+    ],
+    "previous_leads": [
+      "Zhanserik Sauatbek (2025-2026)",
+      "Meruyert Salizhanova (2025-2026)"
+    ],
+    "photo_files": [
+      "https://drive.google.com/open?id=14qRRB2xty9ake-EKtn-iFfrMeae7G-_Z",
+      "https://drive.google.com/open?id=1Jhu1H3Gp5gq6Iy9WUHq6QKz509gfTxNM",
+      "https://drive.google.com/open?id=1pYxicPhd-OYrMPiuMcoSM6qD16WkHLIe",
+      "https://drive.google.com/open?id=1kB9vUtIFvHjwoASv_oyhIX2KdKCKx5EY",
+      "https://drive.google.com/open?id=1juWGjWMOxI9E9vM268b_etckjWM2RBtN",
+      "https://drive.google.com/open?id=1MAXz40rbOpJ-kWZ6xfzVm3RS1WVOPUON",
+      "https://drive.google.com/open?id=1WUfVziJjAgUvYtaDOncaagpXn_4GrPoK",
+      "https://drive.google.com/open?id=1daHGBWaSJ7vwKOVm6VbuE9XnVLzP34Fv"
+    ],
+    "photo_archive_link": "https://drive.google.com/drive/folders/121CZHmJbNHGOGXW_rT3GPjCNPe0m9q9f?usp=sharing",
+    "visitor_walkthrough": "1) Introduction to MADRID Lab -> 1 minute\nBriefly introduce the laboratory's mission: Machine Learning, Analytics, Data Research & Intelligent Decisions, and explain how the lab connects student research with real-world data problems.\n\n2) Research areas and team -> 1 minute\nPresent the main research directions: clinical prediction, NLP and text analysis, learning analytics, computer vision, HR analytics and environmental modelling.\n\n3) Selected research projects -> 2-3 minutes\nPresent 2–3 representative projects, such as explainable machine learning for arterial hypertension, suicide-risk detection using NLP, and student dropout analytics.\n\n4) Live technical demonstration -> 2-3 minutes\nShow a prepared ML pipeline or dashboard using anonymized/sample data: data input → model prediction → model evaluation → explainability/SHAP results.\n\n5) Research output and opportunities -> 1-2 minutes\nShow publications, conferences, the laboratory website and GitHub, and briefly explain opportunities for student research, theses, internships and external collaboration.",
+    "live_demo": "1. Explainable AI for Clinical Prediction\nDemo flow: anonymized/sample clinical data → preprocessing → trained ML model → predicted risk/stage → SHAP-based explanation showing the most influential features → discussion of model validation and data leakage.\n\n2. Student Analytics / Dropout Analysis\nDemo flow: anonymized student dataset → overview of key variables → exploratory dashboard → prediction/analysis → identification of important factors → visualization of results.\n\n3. NLP Research Pipeline\nDemo flow: sample text → preprocessing/tokenization → NLP model → classification or semantic analysis → visualization/interpretation of model output.\n\n4. MADRID Lab Research Platform\nDemo flow: laboratory website → team → research areas → publications → current projects/openings → GitHub repositories.\n\nFor visitor demonstrations, prepared synthetic or anonymized datasets should be used instead of sensitive research data.",
+    "demo_stand": "Projects are ready, but need 10–15 minutes of setup/startup time.",
+    "action_plan_link": "https://drive.google.com/open?id=1vi87CidIIt8eL52_COWzHZ1a6t9z4J7l",
+    "slug": "data-analytics-lab",
+    "heads": [
+      {
+        "name": "Nazarbayeva Aziza",
+        "role": "lead",
+        "title": "Head of MADRID Lab"
+      },
+      {
+        "name": "Aruzhan Narikbayeva",
+        "role": "co_lead",
+        "title": "Co-Lead of MADRID Lab"
+      }
+    ]
+  },
+  {
+    "description": "",
+    "focus": [
+      "Research",
+      "Courses"
+    ],
+    "location": "",
+    "name": "Cybersecurity Laboratory",
+    "slug": "cybersecurity-laboratory",
+    "heads": [
+      {
+        "name": "Manbay Shakhnazar-Sultan",
+        "email": "s.manbay@sdu.edu.kz",
+        "role": "lead"
+      }
+    ]
+  },
+  {
+    "description": "",
+    "focus": [
+      "Courses"
+    ],
+    "location": "",
+    "name": "CISCO Networking Academy",
+    "slug": "cisco-networking-academy",
+    "heads": [
+      {
+        "name": "Manbay Shakhnazar-Sultan",
+        "email": "s.manbay@sdu.edu.kz",
+        "role": "lead"
+      }
+    ]
+  },
+  {
+    "description": "",
+    "focus": [
+      "Research",
+      "Courses"
+    ],
+    "location": "",
+    "name": "Microelectronics (Chip lab)",
+    "slug": "microelectronics-chip-lab",
+    "heads": [
+      {
+        "name": "Imankulova Binara Bakytzhanovna",
+        "email": "binara.imankulova@sdu.edu.kz",
+        "role": "lead"
+      }
+    ]
+  },
+  {
+    "description": "",
+    "focus": [
+      "Research"
+    ],
+    "location": "",
+    "name": "Applied Mathematics",
+    "slug": "applied-mathematics",
+    "heads": [
+      {
+        "name": "Alexey Kavokin",
+        "email": "aleksei.kavokin@sdu.edu.kz",
+        "role": "lead"
+      },
+      {
+        "name": "Symbat Duisen",
+        "email": "symbat.duisen@sdu.edu.kz",
+        "role": "co_lead"
+      }
+    ]
+  },
+  {
+    "name": "Analysis",
+    "year_founded": 2026,
+    "founders": [
+      "Nursultan Kuanyshov"
+    ],
+    "description": "The laboratory is located in a standard classroom equipped with desks, chairs, a projector, and a whiteboard. Its primary purpose is to support research in mathematical analysis and to host various academic activities related to this field.",
+    "focus": [
+      "Research",
+      "Academic / Education"
+    ],
+    "logo": null,
+    "website": null,
+    "social_media": [],
+    "location": "F302",
+    "student_lead": null,
+    "deputy_student_lead": null,
+    "completed_projects": [],
+    "ongoing_projects": [
+      "Science Club"
+    ],
+    "organized_events": [],
+    "seminars": [],
+    "courses": [
+      "Advanced Topics in Mathematical Analysis — Senior Undergraduate and Graduate Students — 12 weeks"
+    ],
+    "external_events": [
+      "Competition for Student Research Projects — an annual competition in which university students present and defend their research projects."
+    ],
+    "notable_alumni": [],
+    "sdu_alumni_contributors": [],
+    "current_partners": [],
+    "prospective_partners": [
+      "IMMM and KazNU"
+    ],
+    "grants": [],
+    "awards": [],
+    "presenters": [
+      "Bayan Bekbolat"
+    ],
+    "orgs_kz": [
+      "Institute of Mathematics and Mathematical Modeling (IMMM)",
+      "Kazakhstan Mathematical Society",
+      "National Academy of Sciences of the Republic of Kazakhstan under the President of the Republic of Kazakhstan"
+    ],
+    "orgs_global": [
+      "International Mathematical Union (IMU)",
+      "American Mathematical Society (AMS)",
+      "European Mathematical Society (EMS)",
+      "Society for Industrial and Applied Mathematics (SIAM)"
+    ],
+    "events_kz": [
+      "Traditional International April Mathematical Conference",
+      "Congress of Mathematicians of Kazakhstan",
+      "International Conference and Workshop on Mathematics and Artificial Intelligence",
+      "International ISAAC Congress on Analysis, Applications and Computation"
+    ],
+    "events_global": [
+      "International Congress of Mathematicians (ICM)",
+      "International Congress on Industrial and Applied Mathematics (ICIAM)",
+      "International ISAAC Congress on Analysis, Applications and Computation",
+      "Joint Mathematics Meetings (JMM)"
+    ],
+    "goals": [
+      "Strengthen the collaboration between the Analysis Lab and the Science Club.",
+      "Attract more undergraduate and graduate students to activities related to mathematical analysis.",
+      "Organize regular seminars, problem-solving sessions, and research-oriented workshops.",
+      "Conduct motivational meetings with experienced researchers and invited speakers.",
+      "Involve students in research projects and prepare them for national research competitions and academic conferences.",
+      "Establish collaboration with mathematical research institutions and international researchers.",
+      "Improve the laboratory’s facilities by acquiring appropriate equipment, software, and educational resources."
+    ],
+    "required_support": [
+      "Financial"
+    ],
+    "resource_gaps": [
+      "An interactive smartboard or upgraded projector",
+      "A printer and scanner",
+      "Improved furniture suitable for seminars and collaborative work"
+    ],
+    "team_members": [],
+    "previous_leads": [],
+    "photo_files": [],
+    "photo_archive_link": null,
+    "visitor_walkthrough": "As the laboratory is currently located in a standard classroom, a formal visitor walkthrough has not yet been developed. The space needs to be equipped with appropriate facilities, technology, and visual materials before a structured laboratory tour can be offered.",
+    "live_demo": "As the laboratory is currently located in a standard classroom, a formal visitor walkthrough has not yet been developed. The space needs to be equipped with appropriate facilities, technology, and visual materials before a structured laboratory tour can be offered.",
+    "demo_stand": null,
+    "action_plan_link": "https://drive.google.com/open?id=1XWY71RlIVMzBgqgRPZrQF0th2rya66of",
+    "slug": "analysis",
+    "heads": [
+      {
+        "name": "Bayan Bekbolat",
+        "email": "bayan.bekbolat@sdu.edu.kz",
+        "role": "lead",
+        "title": "Associate Professor"
+      },
+      {
+        "name": "Akniyet Mussakhan",
+        "role": "co_lead",
+        "title": "Instructor"
+      }
+    ]
+  },
+  {
+    "description": "",
+    "focus": [
+      "Research"
+    ],
+    "location": "",
+    "name": "Algebra",
+    "slug": "algebra",
+    "heads": [
+      {
+        "name": "Bekzat Zhakhayev",
+        "email": "bekzat.zhakhayev@sdu.edu.kz",
+        "role": "lead"
+      }
+    ]
+  },
+  {
+    "name": "Artificial Intelligence Laboratory (AI)",
+    "year_founded": 2023,
+    "founders": [
+      "Meraryslan Meraliyev"
+    ],
+    "description": "SDU AI Lab is an artificial intelligence research and innovation hub at the School of Information Technologies and Applied Mathematics, SDU University, bringing together students, researchers, faculty, and industry partners to develop practical AI-driven solutions. The Lab focuses on artificial intelligence, machine learning, deep learning, generative AI, while giving students hands-on experience through research, real-world projects, hackathons, competitions, workshops, and industry collaboration.",
+    "focus": [
+      "Research",
+      "Academic / Education",
+      "Industry & Commercial Projects"
+    ],
+    "logo": "https://drive.google.com/open?id=1rTm7X1Q9jqvlB2g2dbsimcV59bbSKBW-",
+    "website": "https://cair.sdu.edu.kz/en",
+    "social_media": [
+      {
+        "platform": "LinkedIn",
+        "url": "https://www.linkedin.com/company/ai-laboratory-sdu/"
+      },
+      {
+        "platform": "GitHub",
+        "url": "https://github.com/ailab-sdu"
+      },
+      {
+        "platform": "Instagram",
+        "url": "https://www.instagram.com/sdu_ai_lab"
+      }
+    ],
+    "location": "I105, I07",
+    "student_lead": "Adilet Batyrbayev 4th year Computer Science +77067050814",
+    "deputy_student_lead": null,
+    "completed_projects": [
+      "intelib kz",
+      "SDU chatbot",
+      "SmartRecruiter",
+      "Violence Detection"
+    ],
+    "ongoing_projects": [
+      "CampusTour",
+      "CareerQuest"
+    ],
+    "organized_events": [],
+    "seminars": [
+      "Building AI Projects from Idea to Prototype",
+      "Introduction to Artificial Intelligence & Machine Learning — Students and beginners interested in AI",
+      "Deep Learning & Neural Networks — Computer Science, Data Science, and AI students",
+      "Generative AI & Large Language Models (LLMs) — Students, faculty, researchers, and industry professionals",
+      "Data Engineering & Big Data Technologies — Students interested in data pipelines, databases, Spark, Kafka, and Airflow"
+    ],
+    "courses": [
+      "Introduction to Artificial Intelligence & Machine Learning - beginners - 1month",
+      "AI Project Development: From Idea to Prototype — students teams — 6–8 weeks",
+      "MLOps & AI Deployment — Advanced students and junior AI/ML engineers — 4 weeks"
+    ],
+    "external_events": [
+      "Hackathons realted to AI, Datathons",
+      "AWS workshops",
+      "Decentrathon",
+      "AI Sana exhibition"
+    ],
+    "notable_alumni": [
+      "Bauyrzhan Nurzhanov  + AI engineer",
+      "Mukhtar Rabayev + Master degree abroad",
+      "Agytai Mukhatai + Kaspi"
+    ],
+    "sdu_alumni_contributors": [],
+    "current_partners": [
+      "qcloudy"
+    ],
+    "prospective_partners": [
+      "Freedom AI labs",
+      "NVIDIA — GPU computing, deep learning, certification programs, technical workshops, and research support",
+      "OpenAI — generative AI, LLM-based projects, education, and applied AI research",
+      "Yandex — AI/ML education, expert talks, internships, competitions, and student community development"
+    ],
+    "grants": [],
+    "awards": [
+      "Freedom Hackaton 2nd place 2025"
+    ],
+    "presenters": [
+      "Adilet Batyrbayev Kazakh, Russian, English",
+      "Kudaiberdi Zainiyev Kazakh, English",
+      "Nurdaulet Sagnadin Kazakh, Russian, English",
+      "Assylbek Sabyrzhan Kazakh, Russian, English"
+    ],
+    "orgs_kz": [
+      "Astana Hub — technology ecosystem supporting AI, startups, research, education, hackathons, and innovation programs in Kazakhstan.",
+      "Alem.ai International Center for Artificial Intelligence — national platform focused on AI development, research, education, and collaboration.",
+      "Nazarbayev University / Institute of Smart Systems and Artificial Intelligence (ISSAI) — research in AI, machine learning, NLP, computer vision, and intelligent systems.",
+      "Freedom Holding Corp. — industry partner with strong potential for applied AI, data science, data engineering, student projects, and internships."
+    ],
+    "orgs_global": [
+      "OpenAI — generative AI, large language models, AI research, and developer technologies.",
+      "NVIDIA — GPU computing, deep learning, AI infrastructure, research, and professional education.",
+      "Google DeepMind — fundamental and applied artificial intelligence research.",
+      "Microsoft Research / Microsoft AI — AI research, cloud-based AI systems, and applied machine learning.",
+      "Meta AI — open-source AI models, computer vision, NLP, and generative AI research."
+    ],
+    "events_kz": [
+      "AI & Digital Bridge — one of Kazakhstan's major international technology forums connecting AI, business, research, startups, investors, and government.",
+      "Astana AI Week / AI Month — a series of AI-focused conferences, workshops, hackathons, startup activities, and educational events connecting academia, industry, and government.",
+      "Decentrathon — nationwide technology and AI hackathon conducted across multiple cities in Kazakhstan."
+    ],
+    "events_global": [
+      "NeurIPS — Conference on Neural Information Processing Systems — one of the leading global conferences in machine learning and artificial intelligence.",
+      "ICML — International Conference on Machine Learning — a major international conference focused on machine learning research.",
+      "CVPR — Conference on Computer Vision and Pattern Recognition — one of the world's leading conferences in computer vision and deep learning.",
+      "ICLR — International Conference on Learning Representations — major research conference focused on deep learning and representation learning.",
+      "NVIDIA GTC — global conference focused on AI, GPU computing, robotics, generative AI, and accelerated computing."
+    ],
+    "goals": [
+      "The main goals are to establish SDU AI Lab as a strong university center for AI research, student innovation, and industry collaboration; develop 5–10 high-quality AI projects and research initiatives; increase student participation in national and international hackathons and conferences; establish partnerships with leading companies and research organizations ; support students in publishing research papers and developing startup-ready AI products; organize regular workshops, seminars, and AI courses; and create opportunities for internships, mentorship, research collaboration, and employment."
+    ],
+    "required_support": [
+      "Administrative support — assistance with partnerships, agreements, official events, competitions, and external collaborations.",
+      "Financial support — budget for conferences, hackathons, research activities, software, cloud services, and project development.",
+      "Infrastructure support — dedicated AI Lab workspace, reliable high-speed internet, networking infrastructure, and secure access to computing equipment.",
+      "Academic support — involvement of faculty members as research mentors and supervisors for student projects.",
+      "Industry networking — assistance in establishing partnerships with technology companies, research institutions, and international universities.",
+      "PR & Media support — promotion of AI Lab projects, achievements, events, and partnerships through SDU's website and social media.",
+      "International collaboration support — assistance with participation in conferences, research programs, competitions, and exchange opportunities."
+    ],
+    "resource_gaps": [
+      "Central GPU server / compute cluster for shared training of large AI and deep learning models.",
+      "Additional GPU workstations and GPUs for simultaneous student and research projects.",
+      "High-capacity centralized storage / NAS for datasets, models, research results, and backups.",
+      "High-speed networking infrastructure (10 GbE or higher) between AI Lab workstations and servers.",
+      "Cloud computing credits for AWS, Google Cloud, Azure, and GPU cloud platforms.",
+      "OpenAI / LLM API credits for generative AI research and student projects.",
+      "Professional AI and data software licenses where required."
+    ],
+    "team_members": [
+      "Dilnaz Suleimenova Head",
+      "Adilet Batyrbayev Research Assistant",
+      "Aizere Dauletbayeva Product Manager, Data Scientist",
+      "Akhan Not specified",
+      "Alibek Omirzak Research Assistant",
+      "Amir Kaiyrbek ML Engineer",
+      "Amir Tukhtakhunov Dev ops intern",
+      "Anuar Alimzhan Dev/De Assistant",
+      "Assylbek Sabyrzhan DevOps Engineer",
+      "Bauyrzhan Nurzhanov AI Engineer",
+      "Bauyrzhan Ulanuly Software assistant",
+      "Beket Nurzhanov Lead AI Engineer",
+      "Bekzhan Robotics Lead",
+      "Berik Satybaldy AI/ML engineer",
+      "Kanatov Raibek Assistent",
+      "Kudaiberdi Zainiev Software Engineer",
+      "Madi Zhassymbek Assistent",
+      "Marjan Mamatova Data engineer",
+      "Nurdaulet Sagnadin Software Engineer",
+      "Saltanat Tugayeva AI / ML Engineer",
+      "Sultan Mukashev Retired DevOps/SWE",
+      "Tolebi Aitenov iOS developer, UX/UI designer",
+      "Turebekuly Dastan AI engineer",
+      "Aisha Amirkyzy"
+    ],
+    "previous_leads": [
+      "Meraryslan Meraliyev (2023-2025)",
+      "Yernar Akhmetbek (2025-2026)"
+    ],
+    "photo_files": [],
+    "photo_archive_link": "https://drive.google.com/drive/folders/10bBwaIjAQEYqWxsuE_891IhnTck97OGJ?usp=drive_link",
+    "visitor_walkthrough": "we show them intelib kz\nSDU chatbot \nSmart Recruiter",
+    "live_demo": "intelib kz\nSDU chatbot \nSmart Recruite\nwebsite platforms",
+    "demo_stand": "Projects are ready, but need 10–15 minutes of setup/startup time.",
+    "action_plan_link": "https://drive.google.com/open?id=1YSRp3AdvofVuOW7BcRWv6Fu2nvRRDfzO",
+    "slug": "ai-lab",
+    "heads": [
+      {
+        "name": "Suleimenova Dilnaz",
+        "role": "lead",
+        "title": "Teacher-Assistant"
+      }
+    ]
+  },
+  {
+    "description": "",
+    "focus": [
+      "Courses",
+      "Industry & Commercial Projects"
+    ],
+    "location": "",
+    "name": "Cloud Computing",
+    "slug": "cloud-computing",
+    "heads": [
+      {
+        "name": "Manbay Shakhnazar-Sultan",
+        "email": "s.manbay@sdu.edu.kz",
+        "role": "lead"
+      }
+    ]
+  },
+  {
+    "description": "",
+    "focus": [
+      "Research",
+      "Courses"
+    ],
+    "location": "",
+    "name": "IOT Laboratory",
+    "slug": "iot-laboratory",
+    "heads": [
+      {
+        "name": "Imankulova Binara Bakytzhanovna",
+        "email": "binara.imankulova@sdu.edu.kz",
+        "role": "lead"
+      }
+    ]
+  },
+  {
+    "description": "",
+    "focus": [
+      "Research"
+    ],
+    "location": "",
+    "name": "Computer Vision",
+    "slug": "computer-vision",
+    "heads": []
+  }
+]

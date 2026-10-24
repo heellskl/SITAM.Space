@@ -1,0 +1,6478 @@
+-- SITAM SPACE — update an ALREADY SET UP database to v10 (safe to run more than once).
+-- Supabase → SQL Editor → New query → paste this whole file → Run.
+create schema if not exists sitam_meta;
+create table if not exists sitam_meta.applied_migrations (version text primary key, name text not null, applied_at timestamptz not null default now());
+
+-- ════════ 20261023100000_sitam_v9_5_no_email_codes ════════
+-- SITAM SPACE v9.5 — registration without e-mail codes.
+-- People did not receive the confirmation codes, so new accounts are confirmed at once:
+-- a BEFORE INSERT trigger on auth.users fills email_confirmed_at. The site then signs the person in
+-- with the password they just chose. Roles, profile fields and handle_new_user stay exactly as before.
+-- Note: this means the site no longer proves that a person owns the e-mail they typed.
+begin;
+
+create or replace function public.auto_confirm_signup()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if new.email is not null and new.email_confirmed_at is null then
+    new.email_confirmed_at := now();
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists auto_confirm_signup on auth.users;
+create trigger auto_confirm_signup
+  before insert on auth.users
+  for each row execute function public.auto_confirm_signup();
+
+-- Accounts that registered but got stuck on the code step: confirm them so they can sign in
+-- (only those that already have a SITAM profile, i.e. passed the registration rules).
+update auth.users u
+   set email_confirmed_at = now()
+ where u.email_confirmed_at is null
+   and exists (select 1 from public.profiles p where p.id = u.id);
+
+commit;
+
+insert into sitam_meta.applied_migrations (version, name) values ('20261023100000', 'sitam_v9_5_no_email_codes') on conflict do nothing;
+
+-- ════════ 20261023120000_sitam_v9_6_coordinator_match ════════
+-- SITAM SPACE v9.6 — coordinator e-mails match reliably.
+-- An address typed into coordinator_emails by hand (Table Editor) could carry spaces, and a profile could
+-- miss its e-mail; then the coordinator was not recognised. Now addresses are trimmed + lower-cased on save,
+-- and the check compares trimmed, lower-case e-mails from the profile AND the sign-in account.
+begin;
+
+-- clean what is already there
+delete from public.coordinator_emails a
+ using public.coordinator_emails b
+ where a.email <> b.email and lower(trim(a.email)) = lower(trim(b.email)) and a.email <> lower(trim(a.email));
+update public.coordinator_emails set email = lower(trim(email)) where email <> lower(trim(email));
+
+create or replace function public.normalize_coordinator_email()
+returns trigger language plpgsql as $$
+begin
+  new.email := lower(trim(new.email));
+  return new;
+end;
+$$;
+drop trigger if exists normalize_coordinator_email on public.coordinator_emails;
+create trigger normalize_coordinator_email before insert or update on public.coordinator_emails
+  for each row execute function public.normalize_coordinator_email();
+
+create or replace function public.is_coordinator()
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from public.coordinator_emails c
+     where lower(trim(c.email)) in (
+       (select lower(trim(p.email)) from public.profiles p where p.id = auth.uid()),
+       (select lower(trim(u.email)) from auth.users u where u.id = auth.uid())
+     )
+  )
+$$;
+
+-- profiles without an e-mail get it from the sign-in account
+update public.profiles p set email = lower(trim(u.email))
+  from auth.users u
+ where u.id = p.id and coalesce(p.email, '') = '' and u.email is not null;
+
+commit;
+
+insert into sitam_meta.applied_migrations (version, name) values ('20261023120000', 'sitam_v9_6_coordinator_match') on conflict do nothing;
+
+-- ════════ 20261024100000_sitam_v10_competitions ════════
+/* SITAM SPACE v10 — external events, competitions & hackathons; lab heads from the coordinator's list
+   ─────────────────────────────────────────────────────────────────────────────────────────────────
+   • external_events: competitions, hackathons, olympiads, conferences… held OUTSIDE SITAM (shown on /events).
+     An event can be an edition of an annual series (event_series) — every new year links back to the series.
+   • external_event_labs: a lab takes part. Before the event it shows as "Participating" with its students and
+     mentors (external_event_people); after the event the head records the result ("1st place", "Runner-up"…)
+     and the project they submitted.
+   • Rights (checked here, the UI only shows buttons):
+       – add an external event: any lab head, the coordinator;
+       – edit / delete it: whoever added it, the coordinator;
+       – a lab's participation, people and result: heads of THAT lab, the coordinator.
+     Everyone (also guests) can see events, participants and results.
+   • name_key(): same person whatever the word order ("Aziza Nazarbayeva" = "Nazarbayeva Aziza").
+     assign_lab_head() now links an imported head row with the same name instead of adding a second head. */
+
+create or replace function public.name_key(p text)
+returns text language sql immutable as $$
+  select coalesce(string_agg(w, ' ' order by w), '')
+    from unnest(regexp_split_to_array(lower(trim(coalesce(p, ''))), '\s+')) as w
+   where w <> ''
+$$;
+
+/* ───────────── coordinator assigns a head: reuse the imported row of the same person ───────────── */
+create or replace function public.assign_lab_head(p_lab uuid, p_user uuid)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_name text; v_member uuid;
+begin
+  if not public.is_admin() then raise exception 'NOT_ALLOWED: only the coordinator assigns lab heads'; end if;
+  if not exists (select 1 from public.labs where id = p_lab) then raise exception 'NOT_FOUND: lab'; end if;
+  select coalesce(nullif(trim(first_name || ' ' || last_name), ''), email) into v_name from public.profiles where id = p_user;
+  if v_name is null then raise exception 'NOT_FOUND: user'; end if;
+  select id into v_member from public.lab_members where lab_id = p_lab and user_id = p_user;
+  if v_member is not null then
+    update public.lab_members set role = 'lead' where id = v_member and not public.is_lab_head_role(role::text);
+    return;
+  end if;
+  -- a head (or member) row imported under the same name, not linked to an account yet
+  select id into v_member from public.lab_members
+   where lab_id = p_lab and user_id is null and role::text <> 'former_lead' and public.name_key(full_name) = public.name_key(v_name)
+   order by public.is_lab_head_role(role::text) desc, sort_order limit 1;
+  if v_member is not null then
+    update public.lab_members set user_id = p_user,
+           role = case when public.is_lab_head_role(role::text) then role else 'lead' end
+     where id = v_member;
+  else
+    insert into public.lab_members (lab_id, user_id, full_name, role, sort_order) values (p_lab, p_user, left(v_name, 120), 'lead', -1);
+  end if;
+end;
+$$;
+
+/* ───────────── tables ───────────── */
+create table if not exists public.event_series (
+  id uuid primary key default gen_random_uuid(),
+  title text not null check (char_length(trim(title)) between 2 and 160),
+  kind text not null default 'competition' check (kind in ('competition', 'hackathon', 'olympiad', 'conference', 'festival', 'other')),
+  organizer text check (char_length(organizer) <= 160),
+  website text check (website is null or website ~* '^https?://'),
+  recurrence text not null default 'annual' check (recurrence in ('annual')),
+  created_by uuid references public.profiles(id) on delete set null default auth.uid(),
+  created_at timestamptz not null default now()
+);
+create unique index if not exists event_series_title_idx on public.event_series (lower(title));
+
+create table if not exists public.external_events (
+  id uuid primary key default gen_random_uuid(),
+  series_id uuid references public.event_series(id) on delete set null,
+  kind text not null default 'competition' check (kind in ('competition', 'hackathon', 'olympiad', 'conference', 'festival', 'other')),
+  title text not null check (char_length(trim(title)) between 2 and 160),
+  organizer text check (char_length(organizer) <= 160),
+  location text check (char_length(location) <= 160),
+  url text check (url is null or url ~* '^https?://'),
+  starts_on date,
+  ends_on date check (ends_on is null or starts_on is null or ends_on >= starts_on),
+  year int check (year between 1990 and 2100),           -- known even when the exact dates are not
+  description text check (char_length(description) <= 2000),
+  created_by uuid references public.profiles(id) on delete set null default auth.uid(),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists external_events_series_idx on public.external_events (series_id);
+create index if not exists external_events_start_idx on public.external_events (starts_on);
+
+create table if not exists public.external_event_labs (
+  id uuid primary key default gen_random_uuid(),
+  event_id uuid not null references public.external_events(id) on delete cascade,
+  lab_id uuid not null references public.labs(id) on delete cascade,
+  result text check (char_length(result) <= 160),          -- '1st place', 'Runner-up', 'Finalist' … (after the event)
+  project_title text check (char_length(project_title) <= 200),
+  project_url text check (project_url is null or project_url ~* '^https?://'),
+  project_id uuid references public.projects(id) on delete set null,
+  notes text check (char_length(notes) <= 1000),
+  updated_by uuid references public.profiles(id) on delete set null default auth.uid(),
+  updated_at timestamptz not null default now(),
+  unique (event_id, lab_id)
+);
+create index if not exists external_event_labs_lab_idx on public.external_event_labs (lab_id);
+
+create table if not exists public.external_event_people (
+  id uuid primary key default gen_random_uuid(),
+  entry_id uuid not null references public.external_event_labs(id) on delete cascade,
+  member_id uuid references public.lab_members(id) on delete set null,
+  full_name text not null check (char_length(trim(full_name)) between 2 and 120),
+  role text not null default 'student' check (role in ('student', 'mentor')),
+  sort_order int not null default 0
+);
+create index if not exists external_event_people_entry_idx on public.external_event_people (entry_id);
+
+/* read for everyone, write only through the functions below */
+alter table public.event_series enable row level security;
+alter table public.external_events enable row level security;
+alter table public.external_event_labs enable row level security;
+alter table public.external_event_people enable row level security;
+drop policy if exists "Series are public" on public.event_series;
+create policy "Series are public" on public.event_series for select using (true);
+drop policy if exists "External events are public" on public.external_events;
+create policy "External events are public" on public.external_events for select using (true);
+drop policy if exists "Participations are public" on public.external_event_labs;
+create policy "Participations are public" on public.external_event_labs for select using (true);
+drop policy if exists "Participants are public" on public.external_event_people;
+create policy "Participants are public" on public.external_event_people for select using (true);
+grant select on public.event_series, public.external_events, public.external_event_labs, public.external_event_people to anon, authenticated;
+revoke insert, update, delete on public.event_series, public.external_events, public.external_event_labs, public.external_event_people from anon, authenticated;
+
+/* ───────────── rights ───────────── */
+create or replace function public.is_any_lab_head()
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.lab_members where user_id = auth.uid() and can_edit)
+$$;
+
+create or replace function public.can_edit_external_event(p_event uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select public.is_admin() or exists (select 1 from public.external_events e where e.id = p_event and e.created_by = auth.uid())
+$$;
+
+/* ───────────── add / edit an external event ───────────── */
+create or replace function public.save_external_event(
+  p_id uuid, p_kind text, p_title text, p_organizer text, p_location text, p_url text,
+  p_starts_on date, p_ends_on date, p_description text, p_annual boolean, p_series_id uuid default null)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare v_id uuid := p_id; v_series uuid;
+begin
+  if auth.uid() is null then raise exception 'AUTH_REQUIRED: sign in first'; end if;
+  if v_id is null and not (public.is_admin() or public.is_any_lab_head()) then
+    raise exception 'NOT_ALLOWED: only lab heads and the coordinator add external events';
+  end if;
+  if v_id is not null and not public.can_edit_external_event(v_id) then
+    raise exception 'NOT_ALLOWED: only the person who added this event or the coordinator can change it';
+  end if;
+  if char_length(trim(coalesce(p_title, ''))) < 2 then raise exception 'BAD_INPUT: enter the event name'; end if;
+  if p_url is not null and p_url !~* '^https?://' then raise exception 'BAD_INPUT: the link must start with https://'; end if;
+  if p_starts_on is null then raise exception 'BAD_INPUT: choose the start date'; end if;
+  if p_ends_on is not null and p_ends_on < p_starts_on then raise exception 'BAD_INPUT: the end date is before the start date'; end if;
+
+  -- annual event: an edition of a series (an existing one, or a new series named after the event)
+  if coalesce(p_annual, false) then
+    v_series := p_series_id;
+    if v_series is not null and not exists (select 1 from public.event_series where id = v_series) then
+      raise exception 'NOT_FOUND: event series';
+    end if;
+    if v_series is null then
+      select id into v_series from public.event_series
+       where lower(title) = lower(trim(regexp_replace(p_title, '\s*(19|20)\d\d\s*$', '')));
+    end if;
+    if v_series is null then
+      insert into public.event_series (title, kind, organizer, website)
+      values (left(trim(regexp_replace(p_title, '\s*(19|20)\d\d\s*$', '')), 160), coalesce(p_kind, 'competition'), nullif(trim(p_organizer), ''), p_url)
+      returning id into v_series;
+    end if;
+  end if;
+
+  if v_id is null then
+    insert into public.external_events (series_id, kind, title, organizer, location, url, starts_on, ends_on, year, description)
+    values (v_series, coalesce(p_kind, 'competition'), left(trim(p_title), 160), nullif(trim(p_organizer), ''), nullif(trim(p_location), ''),
+            nullif(trim(p_url), ''), p_starts_on, p_ends_on, extract(year from p_starts_on)::int, nullif(trim(p_description), ''))
+    returning id into v_id;
+  else
+    update public.external_events set series_id = v_series, kind = coalesce(p_kind, kind), title = left(trim(p_title), 160),
+           organizer = nullif(trim(p_organizer), ''), location = nullif(trim(p_location), ''), url = nullif(trim(p_url), ''),
+           starts_on = p_starts_on, ends_on = p_ends_on, year = extract(year from p_starts_on)::int,
+           description = nullif(trim(p_description), ''), updated_at = now()
+     where id = v_id;
+  end if;
+  return v_id;
+end;
+$$;
+
+create or replace function public.delete_external_event(p_id uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not public.can_edit_external_event(p_id) then
+    raise exception 'NOT_ALLOWED: only the person who added this event or the coordinator can delete it';
+  end if;
+  delete from public.external_events where id = p_id;
+end;
+$$;
+
+/* ───────────── a lab's participation, people, result ───────────── */
+-- p_people: [{ "member_id": uuid | null, "full_name": text, "role": "student" | "mentor" }]
+create or replace function public.save_event_participation(
+  p_event uuid, p_lab uuid, p_people jsonb, p_result text default null, p_project_title text default null,
+  p_project_url text default null, p_project_id uuid default null, p_notes text default null)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare v_entry uuid; v_start date; v_p jsonb; v_name text; v_member uuid; v_role text; v_i int := 0;
+begin
+  if auth.uid() is null then raise exception 'AUTH_REQUIRED: sign in first'; end if;
+  if not public.is_lab_manager(p_lab) then raise exception 'NOT_ALLOWED: only heads of this lab can register its participation'; end if;
+  select coalesce(starts_on, make_date(year, 1, 1)) into v_start from public.external_events where id = p_event;
+  if not found then raise exception 'NOT_FOUND: event'; end if;
+  -- results are recorded after the event has started
+  if nullif(trim(coalesce(p_result, '')), '') is not null and v_start is not null and v_start > current_date then
+    raise exception 'TOO_EARLY: the result can be added once the event has started';
+  end if;
+  if p_project_url is not null and p_project_url !~* '^https?://' then raise exception 'BAD_INPUT: the project link must start with https://'; end if;
+  if p_project_id is not null and not exists (select 1 from public.projects where id = p_project_id and lab_id = p_lab) then
+    raise exception 'BAD_INPUT: choose a project of this lab';
+  end if;
+
+  insert into public.external_event_labs (event_id, lab_id, result, project_title, project_url, project_id, notes, updated_by, updated_at)
+  values (p_event, p_lab, nullif(trim(p_result), ''), nullif(trim(p_project_title), ''), nullif(trim(p_project_url), ''), p_project_id,
+          nullif(trim(p_notes), ''), auth.uid(), now())
+  on conflict (event_id, lab_id) do update set result = excluded.result, project_title = excluded.project_title,
+    project_url = excluded.project_url, project_id = excluded.project_id, notes = excluded.notes,
+    updated_by = excluded.updated_by, updated_at = now()
+  returning id into v_entry;
+
+  delete from public.external_event_people where entry_id = v_entry;
+  for v_p in select * from jsonb_array_elements(coalesce(p_people, '[]'::jsonb)) loop
+    v_member := nullif(v_p->>'member_id', '')::uuid;
+    v_role := case when v_p->>'role' = 'mentor' then 'mentor' else 'student' end;
+    if v_member is not null then
+      select full_name into v_name from public.lab_members where id = v_member and lab_id = p_lab;
+      if v_name is null then raise exception 'BAD_INPUT: a participant is not in this lab''s team'; end if;
+    else
+      v_name := nullif(trim(coalesce(v_p->>'full_name', '')), '');
+    end if;
+    if v_name is not null and char_length(v_name) >= 2 then
+      insert into public.external_event_people (entry_id, member_id, full_name, role, sort_order)
+      values (v_entry, v_member, left(v_name, 120), v_role, v_i);
+      v_i := v_i + 1;
+    end if;
+  end loop;
+  return v_entry;
+end;
+$$;
+
+create or replace function public.remove_event_participation(p_event uuid, p_lab uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_lab_manager(p_lab) then raise exception 'NOT_ALLOWED: only heads of this lab can change its participation'; end if;
+  delete from public.external_event_labs where event_id = p_event and lab_id = p_lab;
+end;
+$$;
+
+revoke execute on function public.save_external_event(uuid, text, text, text, text, text, date, date, text, boolean, uuid) from anon, public;
+revoke execute on function public.delete_external_event(uuid) from anon, public;
+revoke execute on function public.save_event_participation(uuid, uuid, jsonb, text, text, text, uuid, text) from anon, public;
+revoke execute on function public.remove_event_participation(uuid, uuid) from anon, public;
+grant execute on function public.save_external_event(uuid, text, text, text, text, text, date, date, text, boolean, uuid) to authenticated;
+grant execute on function public.delete_external_event(uuid) to authenticated;
+grant execute on function public.save_event_participation(uuid, uuid, jsonb, text, text, text, uuid, text) to authenticated;
+grant execute on function public.remove_event_participation(uuid, uuid) to authenticated;
+grant execute on function public.name_key(text) to anon, authenticated;
+
+insert into sitam_meta.applied_migrations (version, name) values ('20261024100000', 'sitam_v10_competitions') on conflict do nothing;
+
+-- ════════ 20261024100100_sitam_v10_data ════════
+-- SITAM SPACE v10 — 21 laboratories (coordinator's list of heads + lab form answers) and the Scopus export v7.
+-- Safe on a live database: fills only empty fields, adds people not yet in a team, removes nothing.
+-- Generated by scripts/build-seed.mjs — real data from the lab form and the Scopus export.
+
+-- Statistics
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('statistics', 'Statistics', null, array[]::text[], '',
+  array['Research']::text[], null, null,
+  '[]'::jsonb, '',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'statistics'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'statistics'), 'Amine Sbai', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'statistics') and public.name_key(x.full_name) = public.name_key('Amine Sbai') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+
+-- Robotics Lab
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('robotics-lab', 'Robotics Lab', 2025, array['Koichi Kaganezawa']::text[], 'The Robotics Laboratory is a place where students learn by building. They work with microcontrollers, sensors, motors, and circuit design, and put them together into working robots. Alongside teaching, the lab develops practical robotic solutions, from custom electronics to control systems. A part of this work uses reinforcement learning (RL) to train robots to handle tasks through trial and error, first in simulation and then on real hardware. The aim is simple: give students hands-on skills in electronics and programming, and create robots that actually work.',
+  array['Research', 'Courses']::text[], 'https://drive.google.com/thumbnail?id=15eaPGRM84VTEvLevQBnqdBNUj1NPTCjI&sz=w1000', null,
+  '[{"platform":"Instagram","url":"https://www.instagram.com/robolab_sdu"}]'::jsonb, 'I-03,I-03/1,I-03/2',
+  array['XLE robot(rigid object robotic manipulation)']::text[], array['Research on XLe robot(rigid object robotic manipulation)', 'Vertical Hydroponics System', 'Horizontal Hydroponics System', 'Research about CV navigation with TurtleBot']::text[], array['Industrial Practice Collaboration with Alash Electronics', 'Industrial Practice Collaboration with USTEM Foundation']::text[], array['Presentation StartUp projects about hydroponics.']::text[], array['Workshops about IOT,electronics']::text[],
+  array['RoboCup', 'Shaiqas', 'RoboCon']::text[], array['Dias Kabdualiev Alash Electronics,Caravan Resources group - AI engineer']::text[], array[]::text[],
+  array['Alash Electronics', 'USTEM Foundation']::text[], array['Unitree']::text[], array[]::text[], array['RoboCup Central Asia - 2 place', 'RoboCon Republic - 1 place.']::text[],
+  array['USTEM Foundation', 'Eltex Alatau', 'Alash electronics']::text[], array['REV Robotics', 'Unitree robotics', 'FIRST Robotics', 'Nvidia', 'Boston Dynamics']::text[], array[]::text[], array['Events of NVIDIA', 'Events of Boston Dynamics', 'Events of UNITREE']::text[],
+  array[]::text[], 'https://drive.google.com/drive/folders/19oW8kmjJBE6IEE8d5LL-lrlmAlj0b31Q?usp=sharing',
+  'usually presenting about education program', null, 'No live demo available yet (presentation slides only).')
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'robotics-lab'), array['Kerimbek Bekzhan 4th year student 87075472175  Kazakh, Russian, English']::text[], array['Create a system of labarotory which will teach upcoming students and create projects.']::text[], array['Financial', 'mentorship of teachers']::text[], array['PC with GPU(for RL)', 'UPS(5kw)-2pc', 'Soldering Stations', 'Network Switch', 'WhiteBoard', 'Courses about RL', 'Robots for RL education(Humanoid,Quadruped robots)', '3D printer filaments(except PLA)']::text[], 'https://drive.google.com/open?id=13FIDI5DmraT30vogBbiS4Gb8_F-Xs4xN')
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'robotics-lab'), 'Inkar Baidaly', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'robotics-lab') and public.name_key(x.full_name) = public.name_key('Inkar Baidaly') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 'ingkar.baidaly@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 'ingkar.baidaly@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'robotics-lab') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Inkar Baidaly')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 'ingkar.baidaly@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'robotics-lab') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Inkar Baidaly');
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'robotics-lab'), 'Kerimbek Bekzhan', 'Computer Science 4 year student', 'student_lead', null, 1
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'robotics-lab') and public.name_key(x.full_name) = public.name_key('Kerimbek Bekzhan') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, '87075472175', null from m;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'robotics-lab'), 'Sabyrzhan Assylbek', '4 Computer Science 4 year student', 'deputy_student_lead', null, 2
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'robotics-lab') and public.name_key(x.full_name) = public.name_key('Sabyrzhan Assylbek') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, '87774391867', null from m;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'robotics-lab'), 'Kartbayev Bereket', '- Hardware engineer , 3 year', 'member', null, 3
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'robotics-lab') and public.name_key(x.full_name) = public.name_key('Kartbayev Bereket') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'robotics-lab'), 'Kanatov Raibek', '- CV engineer , 3 year', 'member', null, 4
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'robotics-lab') and public.name_key(x.full_name) = public.name_key('Kanatov Raibek') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'robotics-lab'), 'Rakhymberdi Dariga', '- Project Manager , 3 year', 'member', null, 5
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'robotics-lab') and public.name_key(x.full_name) = public.name_key('Rakhymberdi Dariga') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'robotics-lab'), 'Sovet Mansur', '- Hardware engineer , 2 year', 'member', null, 6
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'robotics-lab') and public.name_key(x.full_name) = public.name_key('Sovet Mansur') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'robotics-lab'), 'Ushkempir Zanggar', '- Software engineer, 2 year', 'member', null, 7
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'robotics-lab') and public.name_key(x.full_name) = public.name_key('Ushkempir Zanggar') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'robotics-lab'), 'Koichi Kaganezawa', null, 'former_lead', '2025-2026', 8
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'robotics-lab') and public.name_key(x.full_name) = public.name_key('Koichi Kaganezawa') and x.role = 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'robotics-lab'), 'research', 'completed', 'XLE robot(rigid object robotic manipulation)', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'robotics-lab'), 'research', 'ongoing', 'Research on XLe robot(rigid object robotic manipulation)', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'robotics-lab'), 'research', 'ongoing', 'Vertical Hydroponics System', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'robotics-lab'), 'research', 'ongoing', 'Horizontal Hydroponics System', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'robotics-lab'), 'research', 'ongoing', 'Research about CV navigation with TurtleBot', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+
+-- RedHat Laboratory
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('redhat-laboratory', 'RedHat Laboratory', null, array[]::text[], '',
+  array['Courses', 'Industry & Commercial Projects']::text[], null, null,
+  '[]'::jsonb, '',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'redhat-laboratory'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'redhat-laboratory'), 'Manbay Shakhnazar-Sultan', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'redhat-laboratory') and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 's.manbay@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 's.manbay@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'redhat-laboratory') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 's.manbay@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'redhat-laboratory') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan');
+
+-- MCM Lab
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('mcm-lab', 'MCM Lab', 2023, array['Yerimbet Aitzhanov']::text[], 'The MCM Lab is dedicated to preparing students for mathematics olympiads and supporting students and their supervisors in conducting research projects.',
+  array['Research']::text[], null, null,
+  '[]'::jsonb, 'F02',
+  array['Research Practice for Master''s students (2024–2026): 10 Master''s students completed supervised research projects in the lab.', 'Olympiad preparation programme: the lab trains students for university mathematics olympiads.']::text[], array['Research Practice for Master''s students', 'Fractional differential equations', 'Controllability of degenerate parabolic systems']::text[], array['Weekly research meetings of students with their supervisors in fractional calculus and control theory; regular research seminars for students']::text[], array['Introduction to fractional calculus and fractional differential equations – undergraduate (3rd–4th year) and Master''s students.', 'Introduction to mathematical control theory – undergraduate and Master''s students.', 'How to start research in mathematics (reading papers, writing in LaTeX) – undergraduate students.']::text[], array[]::text[],
+  array['International Mathematics Competition for University Students (IMC, Bulgaria)', 'Republican Student Olympiad in Mathematics (Kazakhstan)', 'SEEMOUS (South Eastern European Mathematical Olympiad for University Students); international conferences in analysis, differential equations and control theory.']::text[], array['Amir Zhangirbayev, PhD student']::text[], array[]::text[],
+  array['Institute of Mathematics and Mathematical Modeling']::text[], array['Al-Farabi Kazakh National University; Nazarbayev University']::text[], array[]::text[], array['Olympiad preparation programme (2025–2026): the SDU University team, trained in the lab under the supervision of N. Kakharman, was awarded the 3rd Prize in the team competition of the Republican Student Subject Olympiad in Mathematics (Nazarbayev University, Astana, April 11–12, 2026).']::text[],
+  array['International Mathematical Union (IMU)', 'American Mathematical Society (AMS)', 'European Mathematical Society (EMS)', 'Society for Industrial and Applied Mathematics (SIAM)', 'International Federation of Automatic Control (IFAC)', 'IEEE Control Systems Society']::text[], array['Nazarbayev University', 'Institute of Mathematics and Mathematical Modeling']::text[], array['Traditional International April Mathematical Conference (Institute of Mathematics and Mathematical Modeling, Almaty)', 'International Conference on Analysis and Applied Mathematics (ICAAM)', 'Republican Student Olympiad in Mathematics.']::text[], array['International Congress of Mathematicians (ICM)', 'International Conference on Fractional Differentiation and Its Applications (ICFDA)', 'IEEE Conference on Decision and Control (CDC)', 'International Mathematics Competition for University Students (IMC).']::text[],
+  array['https://drive.google.com/thumbnail?id=1d7azE7LrVIq8Q8Qj6wmc99zNyiDTgPhc&sz=w1000', 'https://drive.google.com/thumbnail?id=1gKwUwoBh67fGqyNT1dN_tu3Q3N_8DouQ&sz=w1000', 'https://drive.google.com/thumbnail?id=1Rv-Io1JyuVy7zOepkSQk2UCKIIAUY8wE&sz=w1000', 'https://drive.google.com/thumbnail?id=1KVr1HWu9NqMq9fPV_wEn8zijimdqqT8M&sz=w1000']::text[], null,
+  'Short introduction to the lab: research directions (fractional calculus, control theory) and olympiad preparation (2 min).
+Presentation by a student of their current research project at the whiteboard or on the monitor (3–4 min).
+Overview of the olympiad programme and students'' results (2 min).
+Questions from guests (1–2 min).', 'The lab works in theoretical mathematics, so there are no hardware prototypes', 'No live demo available yet (presentation slides only).')
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'mcm-lab'), array['Yenlik Turarbay, 4th year, 230101008@sdu.edu.kz, Languages: Kazakh, Russian, English']::text[], array['Publication of student research results in peer-reviewed journals; participation of students in international and national olympiads; presentation of student work at conferences; expanding the regular student seminar; attracting more undergraduate students to research.']::text[], array[]::text[], array['Workstation(s) for numerical simulations and computations, with the following minimum specifications: GPU: NVIDIA GeForce RTX 5060 Ti 16 GB or better (with CUDA support); CPU: AMD Ryzen 7 7700 / Ryzen 7 9700X, or an equivalent Intel Core i7 processor or better; RAM: 64 GB DDR5 minimum (128 GB preferred); Storage: 512 GB NVMe SSD or larger.']::text[], 'https://drive.google.com/open?id=1nizTrSVzS_1MYrKiCy8aIJcFcAB9b6oX')
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'mcm-lab'), 'Madina Kalaman', 'Senior lecturer', 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'mcm-lab') and public.name_key(x.full_name) = public.name_key('Madina Kalaman') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'mcm-lab'), 'Yenlik Turarbay', '4th-year undergraduate, Mathematics; 230101008@sdu.edu.kz', 'student_lead', null, 1
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'mcm-lab') and public.name_key(x.full_name) = public.name_key('Yenlik Turarbay') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'mcm-lab'), 'Bayan Bekbolat', 'Research Supervisor (Fractional Calculus), Associate Professor', 'member', null, 2
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'mcm-lab') and public.name_key(x.full_name) = public.name_key('Bayan Bekbolat') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'mcm-lab'), 'Amine Sbai', 'Research Supervisor (Control Theory), Assistant Professor', 'member', null, 3
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'mcm-lab') and public.name_key(x.full_name) = public.name_key('Amine Sbai') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'mcm-lab'), 'Nurbek Kakharman', 'Olympiad Coach (Mathematics Olympiad Preparation), Associate Professor', 'member', null, 4
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'mcm-lab') and public.name_key(x.full_name) = public.name_key('Nurbek Kakharman') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'mcm-lab'), 'Yerimbet Aitzhanov', null, 'former_lead', '2023-2025', 5
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'mcm-lab') and public.name_key(x.full_name) = public.name_key('Yerimbet Aitzhanov') and x.role = 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'mcm-lab'), 'Amir Zhangirbayev', null, 'former_lead', '2025-2026', 6
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'mcm-lab') and public.name_key(x.full_name) = public.name_key('Amir Zhangirbayev') and x.role = 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'mcm-lab'), 'research', 'completed', 'Research Practice for Master''s students (2024–2026): 10 Master''s students completed supervised research projects in the lab.', 2024, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'mcm-lab'), 'research', 'completed', 'Olympiad preparation programme: the lab trains students for university mathematics olympiads.', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'mcm-lab'), 'research', 'ongoing', 'Research Practice for Master''s students', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'mcm-lab'), 'research', 'ongoing', 'Fractional differential equations', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'mcm-lab'), 'research', 'ongoing', 'Controllability of degenerate parabolic systems', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+
+-- Physics Lab
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('physics-lab', 'Physics Lab', null, array[]::text[], '',
+  array['Research', 'Courses']::text[], null, null,
+  '[]'::jsonb, '',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'physics-lab'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'physics-lab'), 'Kalieva Asem Abaevna', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'physics-lab') and public.name_key(x.full_name) = public.name_key('Kalieva Asem Abaevna') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+
+-- Multimedia Studio (F 06)
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('multimedia-studio-f06', 'Multimedia Studio (F 06)', null, array[]::text[], '',
+  array['Courses', 'Industry & Commercial Projects']::text[], null, null,
+  '[]'::jsonb, 'F06',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'multimedia-studio-f06'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'multimedia-studio-f06'), 'Marat Urmanov', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'multimedia-studio-f06') and public.name_key(x.full_name) = public.name_key('Marat Urmanov') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 'marat.urmanov@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 'marat.urmanov@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'multimedia-studio-f06') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Marat Urmanov')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 'marat.urmanov@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'multimedia-studio-f06') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Marat Urmanov');
+
+-- Multimedia 3D Lab (1109)
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('multimedia-3d-lab-1109', 'Multimedia 3D Lab (1109)', null, array[]::text[], '',
+  array['Courses', 'Industry & Commercial Projects']::text[], null, null,
+  '[]'::jsonb, '1109',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'multimedia-3d-lab-1109'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'multimedia-3d-lab-1109'), 'Aziza Yusupova', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'multimedia-3d-lab-1109') and public.name_key(x.full_name) = public.name_key('Aziza Yusupova') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+
+-- Multimedia Lab
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('multimedia-lab', 'Multimedia Lab', 2015, array['Madina Alimanova']::text[], 'The Multimedia Sciences (MMS) Lab is a creative and technology-focused space at SDU University, dedicated to developing students’ practical skills in design, multimedia, digital technologies, and creative project development. The lab provides an environment where students can learn, experiment, collaborate, and turn their ideas into real projects.
+
+Main Focus Areas:
+
+- UX/UI & Graphic Design — user-centered design, visual communication, branding, typography, and digital interfaces.
+- 3D Design & Manufacturing — 3D modeling, CAD/CAM, 3D printing, laser cutting, and prototyping.
+- Multimedia & Creative Technologies — digital content creation, visual storytelling, interactive media, and emerging technologies.
+- Project-Based Learning — developing real-world projects from concept and research to prototype and final presentation.
+- Creative Community & Events — workshops, exhibitions, competitions, festivals, and collaborative activities for students.
+- Innovation & Entrepreneurship — supporting students in developing creative ideas, prototypes, and technology-based projects.',
+  array['Courses', 'Industry & Commercial Projects']::text[], 'https://drive.google.com/thumbnail?id=11VbypRTbcXZx8MmH7h8DV3QeRoBMvlp8&sz=w1000', null,
+  '[{"platform":"Instagram","url":"https://www.instagram.com/sdu.mms/"}]'::jsonb, 'Technopark F06, I109, I block(?)',
+  array['Alpamys', 'The Great Picture (Multimedia Advertisement)', 'SDU Inclusion centre (books for children)']::text[], array['Small Photolithogrpahic Device and subprojects', 'Sound Factory (Game)', 'Seal Way (Game)', 'SDU Store (merch)']::text[], array['Multimedia Fest 2023', 'Design For Manufacturing Fest 2023', 'Multimedia Fest 2024', 'Multimedia Fest 2025', 'Inktober 2025', 'Winter Game Jam 2026', 'Inktober 2026', 'Multimedia Fest 2026']::text[], array['Graphic Design — basic design skills, composition, typography, and visual communication for students.', 'UX/UI Design — creating user-friendly interfaces and digital products for beginners.', 'Branding — developing logos, visual identity, and simple brand concepts for student projects.', '3D Design & Prototyping — basic 3D modeling, 3D printing, and creating physical prototypes.', 'Creative Workshops — practical sessions where students develop and present their own creative projects.']::text[], array['Graphic Design — Students, teachers, and beginners — 6 weeks', 'UX/UI Design — Students and beginners — 6 weeks', 'Branding & Visual Identity — Students, entrepreneurs, and beginners — 4 weeks', '3D Design & Prototyping — Students and beginners interested in digital fabrication — 6 weeks']::text[],
+  array['Turkey game jam', 'Siberian game jam', 'Satpaev game jam', 'Ludum dare', 'GNTK', '3D challenge', 'art battle', 'Global game jam', 'Demo day', 'Animation fest', 'Geek fest', 'Bayqonur film fest']::text[], array['The laboratory’s first graduating cohort completed the program this year. Many alumni are currently working in creative fields, including 3D modeling, graphic design, motion design, and related areas.']::text[], array[]::text[],
+  array[]::text[], array['with other universities']::text[], array[]::text[], array['PunkVerse GameJam 2025 (Best Narrative)', 'PunkVerse GameJam 2025 (Best Game Design)', 'KBTU Global GameJam 2024 (Best Game)', 'SDU Winter GameJam 2026 (2 place)', 'SDU Winter GameJam 2026 (1 place)']::text[],
+  array['MMS Fest']::text[], array[]::text[], array[]::text[], array[]::text[],
+  array['https://drive.google.com/thumbnail?id=1B3oq5ILumjbTjPSKnqfhdj9TcTmv0kQL&sz=w1000', 'https://drive.google.com/thumbnail?id=13_uXwscuWw0qxQ4VYmXk2UQqfiwX6x1L&sz=w1000', 'https://drive.google.com/thumbnail?id=1GLic5VFc0358h8210ymXM3XvEntXM6wV&sz=w1000', 'https://drive.google.com/thumbnail?id=1lFwCNUIL00hNv5r4J3u_7irWB7nCwq-c&sz=w1000', 'https://drive.google.com/thumbnail?id=1je3jnzAEA6VaDFqePOu01Pi9NL0zI1rV&sz=w1000', 'https://drive.google.com/thumbnail?id=17QJTWaxMa8jPfxvojpZSVr2n_NUu9yPp&sz=w1000', 'https://drive.google.com/thumbnail?id=1a_b08WCmWPDp4s3AGDaufOxvnwxGIroR&sz=w1000', 'https://drive.google.com/thumbnail?id=1bPfrMtXTqSJK5uULsqvZ8IHrjY3lSv8v&sz=w1000', 'https://drive.google.com/thumbnail?id=1BeIezv7MnkQZzZZqaZb9QxPnEtmSdC_y&sz=w1000', 'https://drive.google.com/thumbnail?id=1iYYAw86lKjUg0T1zoEeTNUs0IPmKvEGr&sz=w1000']::text[], 'https://drive.google.com/drive/folders/1Q_UTfabHFqcr166n7EbtPU5VLJuIr74x?usp=sharing',
+  'First, we will introduce the BA program in Multimedia Sciences, highlighting its main areas of study and opportunities for students. Next, we will take a closer look at the laboratory: what students do there, what they learn, and how the laboratory helps them develop practical and creative skills. Finally, we will showcase some of the projects created by our students and demonstrate how they apply their knowledge in practice.', 'Games -> Film/CGI Projects ->  3D Prints', 'Projects are ready, but need 10–15 minutes of setup/startup time.')
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'multimedia-lab'), array['Murat Rassul Zamiruly, 2006, +7 776 791 8708, Kz, Rus, Eng']::text[], array['MMS Fest']::text[], array['Administrative support, financial support for equipment and events, PR and media support, technical support, and opportunities for mentorship and collaboration with industry partners.']::text[], array['We are still finalizing the Budget Plan. A detailed list of the required equipment, software, and other resources will be provided in the linked Budget Plan', 'https://docs.google.com/spreadsheets/d/1IXoZ0IiK0nVwhkbm9YU0pDVOuRL9cBJhEfdGqWS08SE/edit?usp=sharing']::text[], 'https://drive.google.com/open?id=1qZqIY2AlGNiCx1yhho6aXSyeVKAxwwCF')
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'multimedia-lab'), 'Aziza Yusupova', 'TA, Lab Head', 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'multimedia-lab') and public.name_key(x.full_name) = public.name_key('Aziza Yusupova') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'multimedia-lab'), 'Marat Urmanov', 'MSc in Computer Science', 'co_lead', null, 1
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'multimedia-lab') and public.name_key(x.full_name) = public.name_key('Marat Urmanov') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 'marat.urmanov@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 'marat.urmanov@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'multimedia-lab') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Marat Urmanov')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 'marat.urmanov@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'multimedia-lab') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Marat Urmanov');
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'multimedia-lab'), 'Murat Rassul Zamiruly', 'MMS 4 year, /@Fortschrtt', 'student_lead', null, 2
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'multimedia-lab') and public.name_key(x.full_name) = public.name_key('Murat Rassul Zamiruly') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, '+77767918708', null from m;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'multimedia-lab'), 'Aziza Yussupova', 'TA, Lab Head, 2025', 'member', null, 3
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'multimedia-lab') and public.name_key(x.full_name) = public.name_key('Aziza Yussupova') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'multimedia-lab'), 'Murat Rassul', 'Lead Assistant, 2025', 'member', null, 4
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'multimedia-lab') and public.name_key(x.full_name) = public.name_key('Murat Rassul') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'multimedia-lab'), 'Rakhmetulla Bekzada', '2026', 'member', null, 5
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'multimedia-lab') and public.name_key(x.full_name) = public.name_key('Rakhmetulla Bekzada') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'multimedia-lab'), 'Amanova Adel', '2026', 'member', null, 6
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'multimedia-lab') and public.name_key(x.full_name) = public.name_key('Amanova Adel') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'multimedia-lab'), 'Kozhakhmetov Zhanibek', '2026', 'member', null, 7
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'multimedia-lab') and public.name_key(x.full_name) = public.name_key('Kozhakhmetov Zhanibek') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'multimedia-lab'), 'Madina Alimanova', null, 'former_lead', null, 8
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'multimedia-lab') and public.name_key(x.full_name) = public.name_key('Madina Alimanova') and x.role = 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, '2015-2019', null from m;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'multimedia-lab'), 'Marat Urmanov', null, 'former_lead', null, 9
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'multimedia-lab') and public.name_key(x.full_name) = public.name_key('Marat Urmanov') and x.role = 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, '2019-2021', null from m;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'multimedia-lab'), 'Shyngys Adilkhan', null, 'former_lead', null, 10
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'multimedia-lab') and public.name_key(x.full_name) = public.name_key('Shyngys Adilkhan') and x.role = 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, '2021-2026', null from m;
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'multimedia-lab'), 'research', 'completed', 'Alpamys', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'multimedia-lab'), 'research', 'completed', 'The Great Picture (Multimedia Advertisement)', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'multimedia-lab'), 'research', 'completed', 'SDU Inclusion centre (books for children)', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'multimedia-lab'), 'research', 'ongoing', 'Small Photolithogrpahic Device and subprojects', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'multimedia-lab'), 'research', 'ongoing', 'Sound Factory (Game)', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'multimedia-lab'), 'research', 'ongoing', 'Seal Way (Game)', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'multimedia-lab'), 'research', 'ongoing', 'SDU Store (merch)', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+
+-- Fortinet
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('fortinet', 'Fortinet', null, array[]::text[], '',
+  array['Courses', 'Industry & Commercial Projects']::text[], null, null,
+  '[]'::jsonb, '',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'fortinet'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'fortinet'), 'Manbay Shakhnazar-Sultan', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'fortinet') and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 's.manbay@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 's.manbay@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'fortinet') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 's.manbay@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'fortinet') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan');
+
+-- Distributed Systems and Computing Lab
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('distributed-systems-and-computing-lab', 'Distributed Systems and Computing Lab', 2021, array['Kamila Orynbekova', 'Andrey Bogdanchikov']::text[], 'It was designed for research and practical activities and was established to enhance the quality and volume of research in the field of big data analysis.',
+  array['Research', 'Courses']::text[], 'https://drive.google.com/thumbnail?id=1gvXJpE0K2IvyOM2dXYFkSerC756VmPSJ&sz=w1000', 'https://dsc.ailab-sdu.com',
+  '[]'::jsonb, 'G107/1',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, 'No live demo available yet (presentation slides only).')
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'distributed-systems-and-computing-lab'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'distributed-systems-and-computing-lab'), 'Orynbekova Kamila', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'distributed-systems-and-computing-lab') and public.name_key(x.full_name) = public.name_key('Orynbekova Kamila') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 'kamila.orynbekova@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 'kamila.orynbekova@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'distributed-systems-and-computing-lab') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Orynbekova Kamila')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 'kamila.orynbekova@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'distributed-systems-and-computing-lab') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Orynbekova Kamila');
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'distributed-systems-and-computing-lab'), 'Assylbek Sabyrzhan', '(id: 230107096) tel.', 'student_lead', null, 1
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'distributed-systems-and-computing-lab') and public.name_key(x.full_name) = public.name_key('Assylbek Sabyrzhan') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, '+77774391867', null from m;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'distributed-systems-and-computing-lab'), 'Dariga Kazak', '(id: 230107138) tel.', 'deputy_student_lead', null, 2
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'distributed-systems-and-computing-lab') and public.name_key(x.full_name) = public.name_key('Dariga Kazak') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, '+77712818932', null from m;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'distributed-systems-and-computing-lab'), 'Yernar Akhmetbek', null, 'former_lead', '2025-2026', 3
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'distributed-systems-and-computing-lab') and public.name_key(x.full_name) = public.name_key('Yernar Akhmetbek') and x.role = 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+
+-- SDU Data Analytics Lab
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('data-analytics-lab', 'SDU Data Analytics Lab', 2025, array['Bakhtiyor Meraliyev', 'Aziza Nazarbayeva', 'Zhanserik Sauatbek', 'Meruyert Salizhanova']::text[], 'MADRID Lab (Machine learning, Analytics, Data Research & Intelligent Decisions) is an SDU University research lab that develops data-driven methods to support well-grounded decisions. The lab brings together students and researchers working on real data problems: building models, testing them rigorously, and understanding when results can be trusted. Focus areas: machine learning, analytics, data research, and intelligent decision-making, with applications in clinical prediction, NLP and text analysis, computer vision, HR and learning analytics, and environmental modelling. Students join the lab for research projects, theses and internships.',
+  array['Research', 'Courses']::text[], 'https://drive.google.com/thumbnail?id=13yc61pL_UkTBzXmkqWuOgFQtbRa9fBFa&sz=w1000', 'https://datalab.sdutechnopark.kz/',
+  '[{"platform":"GitHub","url":"https://github.com/SDU-Data-Analytics-Lab/"},{"platform":"LinkedIn","url":"https://www.linkedin.com/in/data-analytics-lab-661a07437/"}]'::jsonb, 'SDU Technopark',
+  array['Using Machine Learning to Predict Arterial Hypertension From a Clinical Dataset (ICECCO 2026)', 'Search Trees: A Review and Comparative Study (WPMC 2025)', 'Attrition Rate Measuring in HR Analytics Using ML (ICECCO 2023)', 'ML as an Effective Tool for HR Management in Higher Education (ICECCO 2023)', 'Computer Vision Supported Investigation on Anxiety-Success Relationship in Education (IEEE SIST 2021)', 'Content Analysis of Suicide Texts From Social Media Using NLP and ML (IEEE SIST 2021)', 'ML Models for Predicting Forest Fires in Australia (2020)']::text[], array['Suicide-risk detection from social media text (NLP, Kazakh/Russian data collection; multimodal extension)', 'Student dropout analysis and prediction (learning analytics)', 'Leakage-aware explainable AI for hypertension staging (accepted, AICT 2026)', 'Digital and clinical biomarkers for Parkinson''s disease (SYNERGY-PD)', 'Kazakh language NLP: semantic word-guessing game Жасырын Сөз']::text[], array['Recruitment interviews for new members of the Data Analytics Lab (Freedom program participants)(2026)', 'Seminars and trainings for the previous year''s Freedom Data Analytics Lab participants(2025)']::text[], array['Intro to Machine Learning with Python, for 1st–2nd year students', 'Honest model evaluation: data leakage and validation, for students doing research or theses', 'Writing and publishing your first research paper, for undergraduates']::text[], array['Applied Machine Learning with Python, for 1st-3rd year students, 8 weeks', 'Research Methods for Data Science (from data to paper), for undergraduates, 6 weeks']::text[],
+  array['Digital Bridge', 'Astana Hub AI and Data Science hackathons', 'Decentrathon', 'GovTech Camp', 'Freedom Holding data and AI challenges', 'IEEE conferences and student research competitions', 'NeurIPS', 'ICML', 'KDD and other major international AI/ML events']::text[], array[]::text[], array['To be identified in cooperation with the SDU Alumni Office, Technopark and faculty network. We are particularly interested in SDU alumni working in Data Science, Machine Learning, Data Engineering, AI research, healthcare analytics and technology companies who could contribute through mentorship, workshops, research collaboration or industry projects.']::text[],
+  array['SDU Technopark and SDU University faculty/research units.', 'Freedom Holding Corp. — collaboration through SDU Data Science/Data Bootcamp educational and industry-oriented initiatives.', 'The laboratory also collaborates with researchers, academic supervisors and domain experts on individual research projects.']::text[], array['Astana Hub; ISSAI at Nazarbayev University; Freedom Holding Corp. and its ecosystem companies; healthcare and clinical organizations in Kazakhstan; National Center for the Development of Higher Education; Ministry of Science and Higher Education of the Republic of Kazakhstan; technology companies working in AI, Data Science and Data Engineering.', 'Internationally, the lab is interested in collaboration with university research laboratories, IEEE communities, ACM communities and research groups working in applied machine learning, trustworthy AI, NLP, healthcare AI and learning analytics.']::text[], array[]::text[], array['Freedom Ecosystem Challenge 2026 (SDU University × Freedom Holding Corp., 17.05.2026): lab members won 1st place in all three tracks (Freedom Holding Corp., Freedom Insurance, Freedom Finance); prizes: 500,000 ₸, 250,000 ₸, 100,000 ₸']::text[],
+  array['Astana Hub', 'ISSAI (Nazarbayev University)', 'Ministry of Digital Development', 'Ministry of Science and Higher Education']::text[], array['IEEE', 'ACM', 'Google DeepMind', 'Hugging Face']::text[], array['ICECCO', 'SIDe', 'Decentrathon', 'GovTech Camp']::text[], array['NeurIPS', 'ICML', 'KDD', 'AICT']::text[],
+  array['https://drive.google.com/thumbnail?id=14qRRB2xty9ake-EKtn-iFfrMeae7G-_Z&sz=w1000', 'https://drive.google.com/thumbnail?id=1Jhu1H3Gp5gq6Iy9WUHq6QKz509gfTxNM&sz=w1000', 'https://drive.google.com/thumbnail?id=1pYxicPhd-OYrMPiuMcoSM6qD16WkHLIe&sz=w1000', 'https://drive.google.com/thumbnail?id=1kB9vUtIFvHjwoASv_oyhIX2KdKCKx5EY&sz=w1000', 'https://drive.google.com/thumbnail?id=1juWGjWMOxI9E9vM268b_etckjWM2RBtN&sz=w1000', 'https://drive.google.com/thumbnail?id=1MAXz40rbOpJ-kWZ6xfzVm3RS1WVOPUON&sz=w1000', 'https://drive.google.com/thumbnail?id=1WUfVziJjAgUvYtaDOncaagpXn_4GrPoK&sz=w1000', 'https://drive.google.com/thumbnail?id=1daHGBWaSJ7vwKOVm6VbuE9XnVLzP34Fv&sz=w1000']::text[], 'https://drive.google.com/drive/folders/121CZHmJbNHGOGXW_rT3GPjCNPe0m9q9f?usp=sharing',
+  '1) Introduction to MADRID Lab -> 1 minute
+Briefly introduce the laboratory''s mission: Machine Learning, Analytics, Data Research & Intelligent Decisions, and explain how the lab connects student research with real-world data problems.
+
+2) Research areas and team -> 1 minute
+Present the main research directions: clinical prediction, NLP and text analysis, learning analytics, computer vision, HR analytics and environmental modelling.
+
+3) Selected research projects -> 2-3 minutes
+Present 2–3 representative projects, such as explainable machine learning for arterial hypertension, suicide-risk detection using NLP, and student dropout analytics.
+
+4) Live technical demonstration -> 2-3 minutes
+Show a prepared ML pipeline or dashboard using anonymized/sample data: data input → model prediction → model evaluation → explainability/SHAP results.
+
+5) Research output and opportunities -> 1-2 minutes
+Show publications, conferences, the laboratory website and GitHub, and briefly explain opportunities for student research, theses, internships and external collaboration.', '1. Explainable AI for Clinical Prediction
+Demo flow: anonymized/sample clinical data → preprocessing → trained ML model → predicted risk/stage → SHAP-based explanation showing the most influential features → discussion of model validation and data leakage.
+
+2. Student Analytics / Dropout Analysis
+Demo flow: anonymized student dataset → overview of key variables → exploratory dashboard → prediction/analysis → identification of important factors → visualization of results.
+
+3. NLP Research Pipeline
+Demo flow: sample text → preprocessing/tokenization → NLP model → classification or semantic analysis → visualization/interpretation of model output.
+
+4. MADRID Lab Research Platform
+Demo flow: laboratory website → team → research areas → publications → current projects/openings → GitHub repositories.
+
+For visitor demonstrations, prepared synthetic or anonymized datasets should be used instead of sensitive research data.', 'Projects are ready, but need 10–15 minutes of setup/startup time.')
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'data-analytics-lab'), array['Aknur Mansurkhan - Student Lead, 4th-year BSc Computer Science student Languages: Kazakh, Russian, English Contact: https://www.linkedin.com/in/aknur-m-ba809a330/', 'Aisulu Igimbayeva - Deputy Student Lead, 4th-year BSc Information Systems student Languages: Kazakh, Russian, English Contact: https://www.linkedin.com/in/aisigim/', 'Other research assistants can participate in presentations depending on the project being demonstrated.']::text[], array['The main goals of MADRID Lab for the coming year are to strengthen its research infrastructure, increase high-quality research output, expand collaboration with industry and academic institutions, and create a sustainable student research ecosystem.', 'Publish research in peer-reviewed IEEE/Scopus-indexed conferences and journals.', 'Develop 3–5 active research projects with reproducible datasets, code and documentation.', 'Increase student participation in research, theses and research assistantships.', 'Establish regular internal research seminars and technical workshops.', 'Build stronger partnerships with industry, healthcare organizations and other research laboratories.', 'Apply for external research grants and industry-sponsored projects.', 'Improve the laboratory''s computing infrastructure for machine learning experiments.', 'Develop demonstration-ready AI/analytics prototypes for visitors, partners and university events.', 'Strengthen the laboratory''s national and international research visibility.']::text[], array['Access to dedicated high-performance computing infrastructure for machine learning and data-intensive research, including at least one shared GPU workstation for approximately five active researchers working on deep learning, NLP, computer vision, LLM-based projects and reproducible experiments for academic publications.', 'Financial support for research conferences, publication fees and student participation in competitions, including registration fees, travel support and other research-related expenses where applicable.', 'Support for cloud computing, AI/API credits and research software subscriptions, including OpenAI API, Anthropic Claude API, Meta Threads API-related infrastructure, GPU cloud services and other tools required for research, data processing and experimentation.', 'Data storage and research infrastructure support, including SSD/NAS storage for datasets, trained models, experiment outputs and secure backups.', 'Assistance in establishing collaborations with companies, government organizations, healthcare institutions, research centers and international academic groups.', 'Support with grant applications and externally funded research projects, including identification of relevant funding opportunities and assistance with proposal preparation.', 'Administrative assistance for research agreements, data-access agreements, ethics-related documentation and collaboration documents, particularly for projects involving external datasets or institutional partners.', 'PR and communications support for promoting laboratory research, publications, events, achievements and student opportunities through university communication channels.', 'Support for organizing workshops, seminars, research meetups, guest lectures and internal training sessions for students and researchers.', 'A dedicated laboratory/workspace suitable for research activities, team meetings and project demonstrations, with appropriate workstations, monitors and basic peripherals such as mice and mouse pads.']::text[], array['Priority equipment and resource needs:', '1 high-performance AI/ML workstation for deep learning, LLM/NLP, computer vision and large-scale data analysis. Preferably equipped with a modern NVIDIA GPU with at least 24 GB VRAM, 64–128 GB RAM, a high-performance multi-core CPU, and at least 2–4 TB SSD storage. This workstation would serve as a shared computing resource for laboratory research projects and paper-related experiments.', '5 computer mice and 5 mouse pads for student research workstations.', 'Cloud/API research budget for a team of approximately 5 researchers, including:', 'OpenAI / ChatGPT API credits', 'Anthropic Claude API credits', 'Meta Threads API access and related infrastructure for research involving public social-media data', 'additional cloud/API credits when required for NLP, LLM and data-collection experiments.', 'Cloud computing or GPU credits for computationally intensive experiments.', 'Additional SSD/NAS storage for datasets, trained models, experiment outputs and backups.', 'Shared software/research subscriptions where required for academic projects and publication-related work.']::text[], 'https://drive.google.com/open?id=1vi87CidIIt8eL52_COWzHZ1a6t9z4J7l')
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'data-analytics-lab'), 'Nazarbayeva Aziza', 'Head of MADRID Lab', 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'data-analytics-lab') and public.name_key(x.full_name) = public.name_key('Nazarbayeva Aziza') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'data-analytics-lab'), 'Aruzhan Narikbayeva', 'Co-Lead of MADRID Lab', 'co_lead', null, 1
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'data-analytics-lab') and public.name_key(x.full_name) = public.name_key('Aruzhan Narikbayeva') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'data-analytics-lab'), 'Aknur Mansurkhan', '4th-year BSc Computer Science student', 'student_lead', null, 2
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'data-analytics-lab') and public.name_key(x.full_name) = public.name_key('Aknur Mansurkhan') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, 'https://www.linkedin.com/in/aknur-m-ba809a330/', null from m;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'data-analytics-lab'), 'Aisulu Igimbayeva', '4th-year BSc Information Systems student', 'deputy_student_lead', null, 3
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'data-analytics-lab') and public.name_key(x.full_name) = public.name_key('Aisulu Igimbayeva') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, 'https://www.linkedin.com/in/aisigim/', null from m;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'data-analytics-lab'), 'Bakhtiyor Meraliyev', 'Founder, Professor', 'member', null, 4
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'data-analytics-lab') and public.name_key(x.full_name) = public.name_key('Bakhtiyor Meraliyev') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'data-analytics-lab'), 'Abilmansur Alibekov', 'Research Assistant', 'research_assistant', null, 5
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'data-analytics-lab') and public.name_key(x.full_name) = public.name_key('Abilmansur Alibekov') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'data-analytics-lab'), 'Akbike Zhurymbay', 'Research Assistant', 'research_assistant', null, 6
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'data-analytics-lab') and public.name_key(x.full_name) = public.name_key('Akbike Zhurymbay') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'data-analytics-lab'), 'Aruzhan Iliyas', 'Research Assistant', 'research_assistant', null, 7
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'data-analytics-lab') and public.name_key(x.full_name) = public.name_key('Aruzhan Iliyas') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'data-analytics-lab'), 'Zhanserik Sauatbek', null, 'former_lead', '2025-2026', 8
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'data-analytics-lab') and public.name_key(x.full_name) = public.name_key('Zhanserik Sauatbek') and x.role = 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'data-analytics-lab'), 'Meruyert Salizhanova', null, 'former_lead', '2025-2026', 9
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'data-analytics-lab') and public.name_key(x.full_name) = public.name_key('Meruyert Salizhanova') and x.role = 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'data-analytics-lab'), 'research', 'completed', 'Using Machine Learning to Predict Arterial Hypertension From a Clinical Dataset (ICECCO 2026)', 2026, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'data-analytics-lab'), 'research', 'completed', 'Search Trees: A Review and Comparative Study (WPMC 2025)', 2025, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'data-analytics-lab'), 'research', 'completed', 'Attrition Rate Measuring in HR Analytics Using ML (ICECCO 2023)', 2023, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'data-analytics-lab'), 'research', 'completed', 'ML as an Effective Tool for HR Management in Higher Education (ICECCO 2023)', 2023, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'data-analytics-lab'), 'research', 'completed', 'Computer Vision Supported Investigation on Anxiety-Success Relationship in Education (IEEE SIST 2021)', 2021, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'data-analytics-lab'), 'research', 'completed', 'Content Analysis of Suicide Texts From Social Media Using NLP and ML (IEEE SIST 2021)', 2021, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'data-analytics-lab'), 'research', 'completed', 'ML Models for Predicting Forest Fires in Australia (2020)', 2020, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'data-analytics-lab'), 'research', 'ongoing', 'Suicide-risk detection from social media text (NLP, Kazakh/Russian data collection; multimodal extension)', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'data-analytics-lab'), 'research', 'ongoing', 'Student dropout analysis and prediction (learning analytics)', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'data-analytics-lab'), 'research', 'ongoing', 'Leakage-aware explainable AI for hypertension staging (accepted, AICT 2026)', 2026, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'data-analytics-lab'), 'research', 'ongoing', 'Digital and clinical biomarkers for Parkinson''s disease (SYNERGY-PD)', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'data-analytics-lab'), 'research', 'ongoing', 'Kazakh language NLP: semantic word-guessing game Жасырын Сөз', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+
+-- Cybersecurity Laboratory
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('cybersecurity-laboratory', 'Cybersecurity Laboratory', null, array[]::text[], '',
+  array['Research', 'Courses']::text[], null, null,
+  '[]'::jsonb, '',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'cybersecurity-laboratory'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'cybersecurity-laboratory'), 'Manbay Shakhnazar-Sultan', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'cybersecurity-laboratory') and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 's.manbay@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 's.manbay@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'cybersecurity-laboratory') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 's.manbay@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'cybersecurity-laboratory') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan');
+
+-- CISCO Networking Academy
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('cisco-networking-academy', 'CISCO Networking Academy', null, array[]::text[], '',
+  array['Courses']::text[], null, null,
+  '[]'::jsonb, '',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'cisco-networking-academy'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'cisco-networking-academy'), 'Manbay Shakhnazar-Sultan', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'cisco-networking-academy') and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 's.manbay@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 's.manbay@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'cisco-networking-academy') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 's.manbay@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'cisco-networking-academy') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan');
+
+-- Microelectronics (Chip lab)
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('microelectronics-chip-lab', 'Microelectronics (Chip lab)', null, array[]::text[], '',
+  array['Research', 'Courses']::text[], null, null,
+  '[]'::jsonb, '',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'microelectronics-chip-lab'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'microelectronics-chip-lab'), 'Imankulova Binara Bakytzhanovna', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'microelectronics-chip-lab') and public.name_key(x.full_name) = public.name_key('Imankulova Binara Bakytzhanovna') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 'binara.imankulova@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 'binara.imankulova@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'microelectronics-chip-lab') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Imankulova Binara Bakytzhanovna')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 'binara.imankulova@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'microelectronics-chip-lab') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Imankulova Binara Bakytzhanovna');
+
+-- Applied Mathematics
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('applied-mathematics', 'Applied Mathematics', null, array[]::text[], '',
+  array['Research']::text[], null, null,
+  '[]'::jsonb, '',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'applied-mathematics'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'applied-mathematics'), 'Alexey Kavokin', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'applied-mathematics') and public.name_key(x.full_name) = public.name_key('Alexey Kavokin') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 'aleksei.kavokin@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 'aleksei.kavokin@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'applied-mathematics') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Alexey Kavokin')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 'aleksei.kavokin@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'applied-mathematics') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Alexey Kavokin');
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'applied-mathematics'), 'Symbat Duisen', null, 'co_lead', null, 1
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'applied-mathematics') and public.name_key(x.full_name) = public.name_key('Symbat Duisen') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 'symbat.duisen@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 'symbat.duisen@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'applied-mathematics') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Symbat Duisen')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 'symbat.duisen@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'applied-mathematics') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Symbat Duisen');
+
+-- Analysis
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('analysis', 'Analysis', 2026, array['Nursultan Kuanyshov']::text[], 'The laboratory is located in a standard classroom equipped with desks, chairs, a projector, and a whiteboard. Its primary purpose is to support research in mathematical analysis and to host various academic activities related to this field.',
+  array['Research', 'Courses']::text[], null, null,
+  '[]'::jsonb, 'F302',
+  array[]::text[], array['Science Club']::text[], array[]::text[], array[]::text[], array['Advanced Topics in Mathematical Analysis — Senior Undergraduate and Graduate Students — 12 weeks']::text[],
+  array['Competition for Student Research Projects — an annual competition in which university students present and defend their research projects.']::text[], array[]::text[], array[]::text[],
+  array[]::text[], array['IMMM and KazNU']::text[], array[]::text[], array[]::text[],
+  array['Institute of Mathematics and Mathematical Modeling (IMMM)', 'Kazakhstan Mathematical Society', 'National Academy of Sciences of the Republic of Kazakhstan under the President of the Republic of Kazakhstan']::text[], array['International Mathematical Union (IMU)', 'American Mathematical Society (AMS)', 'European Mathematical Society (EMS)', 'Society for Industrial and Applied Mathematics (SIAM)']::text[], array['Traditional International April Mathematical Conference', 'Congress of Mathematicians of Kazakhstan', 'International Conference and Workshop on Mathematics and Artificial Intelligence', 'International ISAAC Congress on Analysis, Applications and Computation']::text[], array['International Congress of Mathematicians (ICM)', 'International Congress on Industrial and Applied Mathematics (ICIAM)', 'International ISAAC Congress on Analysis, Applications and Computation', 'Joint Mathematics Meetings (JMM)']::text[],
+  array[]::text[], null,
+  'As the laboratory is currently located in a standard classroom, a formal visitor walkthrough has not yet been developed. The space needs to be equipped with appropriate facilities, technology, and visual materials before a structured laboratory tour can be offered.', 'As the laboratory is currently located in a standard classroom, a formal visitor walkthrough has not yet been developed. The space needs to be equipped with appropriate facilities, technology, and visual materials before a structured laboratory tour can be offered.', null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'analysis'), array['Bayan Bekbolat']::text[], array['Strengthen the collaboration between the Analysis Lab and the Science Club.', 'Attract more undergraduate and graduate students to activities related to mathematical analysis.', 'Organize regular seminars, problem-solving sessions, and research-oriented workshops.', 'Conduct motivational meetings with experienced researchers and invited speakers.', 'Involve students in research projects and prepare them for national research competitions and academic conferences.', 'Establish collaboration with mathematical research institutions and international researchers.', 'Improve the laboratory’s facilities by acquiring appropriate equipment, software, and educational resources.']::text[], array['Financial']::text[], array['An interactive smartboard or upgraded projector', 'A printer and scanner', 'Improved furniture suitable for seminars and collaborative work']::text[], 'https://drive.google.com/open?id=1XWY71RlIVMzBgqgRPZrQF0th2rya66of')
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'analysis'), 'Bayan Bekbolat', 'Associate Professor', 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'analysis') and public.name_key(x.full_name) = public.name_key('Bayan Bekbolat') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 'bayan.bekbolat@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 'bayan.bekbolat@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'analysis') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Bayan Bekbolat')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 'bayan.bekbolat@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'analysis') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Bayan Bekbolat');
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'analysis'), 'Akniyet Mussakhan', 'Instructor', 'co_lead', null, 1
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'analysis') and public.name_key(x.full_name) = public.name_key('Akniyet Mussakhan') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'analysis'), 'research', 'ongoing', 'Science Club', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+
+-- Algebra
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('algebra', 'Algebra', null, array[]::text[], '',
+  array['Research']::text[], null, null,
+  '[]'::jsonb, '',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'algebra'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'algebra'), 'Bekzat Zhakhayev', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'algebra') and public.name_key(x.full_name) = public.name_key('Bekzat Zhakhayev') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 'bekzat.zhakhayev@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 'bekzat.zhakhayev@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'algebra') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Bekzat Zhakhayev')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 'bekzat.zhakhayev@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'algebra') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Bekzat Zhakhayev');
+
+-- Artificial Intelligence Laboratory (AI)
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('ai-lab', 'Artificial Intelligence Laboratory (AI)', 2023, array['Meraryslan Meraliyev']::text[], 'SDU AI Lab is an artificial intelligence research and innovation hub at the School of Information Technologies and Applied Mathematics, SDU University, bringing together students, researchers, faculty, and industry partners to develop practical AI-driven solutions. The Lab focuses on artificial intelligence, machine learning, deep learning, generative AI, while giving students hands-on experience through research, real-world projects, hackathons, competitions, workshops, and industry collaboration.',
+  array['Research', 'Courses', 'Industry & Commercial Projects']::text[], 'https://drive.google.com/thumbnail?id=1rTm7X1Q9jqvlB2g2dbsimcV59bbSKBW-&sz=w1000', 'https://cair.sdu.edu.kz/en',
+  '[{"platform":"LinkedIn","url":"https://www.linkedin.com/company/ai-laboratory-sdu/"},{"platform":"GitHub","url":"https://github.com/ailab-sdu"},{"platform":"Instagram","url":"https://www.instagram.com/sdu_ai_lab"}]'::jsonb, 'I105, I07',
+  array['intelib kz', 'SDU chatbot', 'SmartRecruiter', 'Violence Detection']::text[], array['CampusTour', 'CareerQuest']::text[], array[]::text[], array['Building AI Projects from Idea to Prototype', 'Introduction to Artificial Intelligence & Machine Learning — Students and beginners interested in AI', 'Deep Learning & Neural Networks — Computer Science, Data Science, and AI students', 'Generative AI & Large Language Models (LLMs) — Students, faculty, researchers, and industry professionals', 'Data Engineering & Big Data Technologies — Students interested in data pipelines, databases, Spark, Kafka, and Airflow']::text[], array['Introduction to Artificial Intelligence & Machine Learning - beginners - 1month', 'AI Project Development: From Idea to Prototype — students teams — 6–8 weeks', 'MLOps & AI Deployment — Advanced students and junior AI/ML engineers — 4 weeks']::text[],
+  array['Hackathons realted to AI, Datathons', 'AWS workshops', 'Decentrathon', 'AI Sana exhibition']::text[], array['Bauyrzhan Nurzhanov  + AI engineer', 'Mukhtar Rabayev + Master degree abroad', 'Agytai Mukhatai + Kaspi']::text[], array[]::text[],
+  array['qcloudy']::text[], array['Freedom AI labs', 'NVIDIA — GPU computing, deep learning, certification programs, technical workshops, and research support', 'OpenAI — generative AI, LLM-based projects, education, and applied AI research', 'Yandex — AI/ML education, expert talks, internships, competitions, and student community development']::text[], array[]::text[], array['Freedom Hackaton 2nd place 2025']::text[],
+  array['Astana Hub — technology ecosystem supporting AI, startups, research, education, hackathons, and innovation programs in Kazakhstan.', 'Alem.ai International Center for Artificial Intelligence — national platform focused on AI development, research, education, and collaboration.', 'Nazarbayev University / Institute of Smart Systems and Artificial Intelligence (ISSAI) — research in AI, machine learning, NLP, computer vision, and intelligent systems.', 'Freedom Holding Corp. — industry partner with strong potential for applied AI, data science, data engineering, student projects, and internships.']::text[], array['OpenAI — generative AI, large language models, AI research, and developer technologies.', 'NVIDIA — GPU computing, deep learning, AI infrastructure, research, and professional education.', 'Google DeepMind — fundamental and applied artificial intelligence research.', 'Microsoft Research / Microsoft AI — AI research, cloud-based AI systems, and applied machine learning.', 'Meta AI — open-source AI models, computer vision, NLP, and generative AI research.']::text[], array['AI & Digital Bridge — one of Kazakhstan''s major international technology forums connecting AI, business, research, startups, investors, and government.', 'Astana AI Week / AI Month — a series of AI-focused conferences, workshops, hackathons, startup activities, and educational events connecting academia, industry, and government.', 'Decentrathon — nationwide technology and AI hackathon conducted across multiple cities in Kazakhstan.']::text[], array['NeurIPS — Conference on Neural Information Processing Systems — one of the leading global conferences in machine learning and artificial intelligence.', 'ICML — International Conference on Machine Learning — a major international conference focused on machine learning research.', 'CVPR — Conference on Computer Vision and Pattern Recognition — one of the world''s leading conferences in computer vision and deep learning.', 'ICLR — International Conference on Learning Representations — major research conference focused on deep learning and representation learning.', 'NVIDIA GTC — global conference focused on AI, GPU computing, robotics, generative AI, and accelerated computing.']::text[],
+  array[]::text[], 'https://drive.google.com/drive/folders/10bBwaIjAQEYqWxsuE_891IhnTck97OGJ?usp=drive_link',
+  'we show them intelib kz
+SDU chatbot 
+Smart Recruiter', 'intelib kz
+SDU chatbot 
+Smart Recruite
+website platforms', 'Projects are ready, but need 10–15 minutes of setup/startup time.')
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'ai-lab'), array['Adilet Batyrbayev Kazakh, Russian, English', 'Kudaiberdi Zainiyev Kazakh, English', 'Nurdaulet Sagnadin Kazakh, Russian, English', 'Assylbek Sabyrzhan Kazakh, Russian, English']::text[], array['The main goals are to establish SDU AI Lab as a strong university center for AI research, student innovation, and industry collaboration; develop 5–10 high-quality AI projects and research initiatives; increase student participation in national and international hackathons and conferences; establish partnerships with leading companies and research organizations ; support students in publishing research papers and developing startup-ready AI products; organize regular workshops, seminars, and AI courses; and create opportunities for internships, mentorship, research collaboration, and employment.']::text[], array['Administrative support — assistance with partnerships, agreements, official events, competitions, and external collaborations.', 'Financial support — budget for conferences, hackathons, research activities, software, cloud services, and project development.', 'Infrastructure support — dedicated AI Lab workspace, reliable high-speed internet, networking infrastructure, and secure access to computing equipment.', 'Academic support — involvement of faculty members as research mentors and supervisors for student projects.', 'Industry networking — assistance in establishing partnerships with technology companies, research institutions, and international universities.', 'PR & Media support — promotion of AI Lab projects, achievements, events, and partnerships through SDU''s website and social media.', 'International collaboration support — assistance with participation in conferences, research programs, competitions, and exchange opportunities.']::text[], array['Central GPU server / compute cluster for shared training of large AI and deep learning models.', 'Additional GPU workstations and GPUs for simultaneous student and research projects.', 'High-capacity centralized storage / NAS for datasets, models, research results, and backups.', 'High-speed networking infrastructure (10 GbE or higher) between AI Lab workstations and servers.', 'Cloud computing credits for AWS, Google Cloud, Azure, and GPU cloud platforms.', 'OpenAI / LLM API credits for generative AI research and student projects.', 'Professional AI and data software licenses where required.']::text[], 'https://drive.google.com/open?id=1YSRp3AdvofVuOW7BcRWv6Fu2nvRRDfzO')
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Suleimenova Dilnaz', 'Teacher-Assistant', 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Suleimenova Dilnaz') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Adilet Batyrbayev', '4th year Computer Science', 'student_lead', null, 1
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Adilet Batyrbayev') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, '+77067050814', null from m;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Aizere Dauletbayeva', 'Product Manager, Data Scientist', 'member', null, 2
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Aizere Dauletbayeva') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Akhan', null, 'member', null, 3
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Akhan') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Alibek Omirzak', 'Research Assistant', 'research_assistant', null, 4
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Alibek Omirzak') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Amir Kaiyrbek', 'ML Engineer', 'member', null, 5
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Amir Kaiyrbek') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Amir Tukhtakhunov', 'Dev ops intern', 'member', null, 6
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Amir Tukhtakhunov') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Anuar Alimzhan', 'Dev/De Assistant', 'member', null, 7
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Anuar Alimzhan') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Assylbek Sabyrzhan', 'DevOps Engineer', 'member', null, 8
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Assylbek Sabyrzhan') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Bauyrzhan Nurzhanov', 'AI Engineer', 'member', null, 9
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Bauyrzhan Nurzhanov') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Bauyrzhan Ulanuly', 'Software assistant', 'member', null, 10
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Bauyrzhan Ulanuly') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Beket Nurzhanov', 'Lead AI Engineer', 'member', null, 11
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Beket Nurzhanov') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Bekzhan', 'Robotics Lead', 'member', null, 12
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Bekzhan') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Berik Satybaldy', 'AI/ML engineer', 'member', null, 13
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Berik Satybaldy') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Kanatov Raibek', 'Assistent', 'member', null, 14
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Kanatov Raibek') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Kudaiberdi Zainiev', 'Software Engineer', 'member', null, 15
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Kudaiberdi Zainiev') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Madi Zhassymbek', 'Assistent', 'member', null, 16
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Madi Zhassymbek') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Marjan Mamatova', 'Data engineer', 'member', null, 17
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Marjan Mamatova') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Nurdaulet Sagnadin', 'Software Engineer', 'member', null, 18
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Nurdaulet Sagnadin') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Saltanat Tugayeva', 'AI / ML Engineer', 'member', null, 19
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Saltanat Tugayeva') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Sultan Mukashev', 'Retired DevOps/SWE', 'member', null, 20
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Sultan Mukashev') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Tolebi Aitenov', 'iOS developer, UX/UI designer', 'member', null, 21
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Tolebi Aitenov') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Turebekuly Dastan', 'AI engineer', 'member', null, 22
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Turebekuly Dastan') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Aisha Amirkyzy', null, 'member', null, 23
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Aisha Amirkyzy') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Meraryslan Meraliyev', null, 'former_lead', '2023-2025', 24
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Meraryslan Meraliyev') and x.role = 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'ai-lab'), 'Yernar Akhmetbek', null, 'former_lead', '2025-2026', 25
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'ai-lab') and public.name_key(x.full_name) = public.name_key('Yernar Akhmetbek') and x.role = 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id) select id from m where false;
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'ai-lab'), 'research', 'completed', 'intelib kz', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'ai-lab'), 'research', 'completed', 'SDU chatbot', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'ai-lab'), 'research', 'completed', 'SmartRecruiter', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'ai-lab'), 'research', 'completed', 'Violence Detection', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'ai-lab'), 'research', 'ongoing', 'CampusTour', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+insert into public.projects (lab_id, kind, status, title, year, created_by)
+values ((select id from public.labs where slug = 'ai-lab'), 'research', 'ongoing', 'CareerQuest', null, null)
+on conflict (lab_id, lower(title)) do update set status = excluded.status, year = coalesce(public.projects.year, excluded.year);
+
+-- Cloud Computing
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('cloud-computing', 'Cloud Computing', null, array[]::text[], '',
+  array['Courses', 'Industry & Commercial Projects']::text[], null, null,
+  '[]'::jsonb, '',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'cloud-computing'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'cloud-computing'), 'Manbay Shakhnazar-Sultan', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'cloud-computing') and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 's.manbay@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 's.manbay@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'cloud-computing') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 's.manbay@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'cloud-computing') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Manbay Shakhnazar-Sultan');
+
+-- IOT Laboratory
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('iot-laboratory', 'IOT Laboratory', null, array[]::text[], '',
+  array['Research', 'Courses']::text[], null, null,
+  '[]'::jsonb, '',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'iot-laboratory'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+with m as (insert into public.lab_members (lab_id, full_name, title, role, term, sort_order)
+  select (select id from public.labs where slug = 'iot-laboratory'), 'Imankulova Binara Bakytzhanovna', null, 'lead', null, 0
+  where not exists (select 1 from public.lab_members x where x.lab_id = (select id from public.labs where slug = 'iot-laboratory') and public.name_key(x.full_name) = public.name_key('Imankulova Binara Bakytzhanovna') and x.role <> 'former_lead')
+  returning id)
+insert into public.lab_member_contacts (member_id, contact, email) select id, null, 'binara.imankulova@sdu.edu.kz' from m;
+insert into public.lab_member_contacts (member_id, email)
+select x.id, 'binara.imankulova@sdu.edu.kz' from public.lab_members x
+ where x.lab_id = (select id from public.labs where slug = 'iot-laboratory') and x.user_id is null and public.name_key(x.full_name) = public.name_key('Imankulova Binara Bakytzhanovna')
+   and not exists (select 1 from public.lab_member_contacts c where c.member_id = x.id)
+on conflict do nothing;
+update public.lab_member_contacts c set email = 'binara.imankulova@sdu.edu.kz'
+  from public.lab_members x
+ where c.member_id = x.id and x.lab_id = (select id from public.labs where slug = 'iot-laboratory') and x.user_id is null and c.email is null and public.name_key(x.full_name) = public.name_key('Imankulova Binara Bakytzhanovna');
+
+-- Computer Vision
+insert into public.labs (slug, name, year_founded, founders, description, focus, logo_url, website, social_links, location,
+  completed_projects, ongoing_projects, organized_events, seminars, courses, external_events, notable_alumni, alumni_contributors,
+  current_partners, prospective_partners, grants, awards, orgs_kz, orgs_global, events_kz, events_global, photo_urls, photo_archive_link,
+  visitor_walkthrough, live_demo, demo_stand)
+values ('computer-vision', 'Computer Vision', null, array[]::text[], '',
+  array['Research']::text[], null, null,
+  '[]'::jsonb, '',
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], array[]::text[], array[]::text[], array[]::text[],
+  array[]::text[], null,
+  null, null, null)
+on conflict (slug) do update set name = excluded.name, year_founded = coalesce(public.labs.year_founded, excluded.year_founded),
+  founders = case when cardinality(public.labs.founders) = 0 then excluded.founders else public.labs.founders end,
+  description = coalesce(nullif(public.labs.description, ''), excluded.description),
+  focus = case when cardinality(public.labs.focus) = 0 then excluded.focus else public.labs.focus end,
+  logo_url = coalesce(public.labs.logo_url, excluded.logo_url),
+  website = coalesce(public.labs.website, excluded.website),
+  social_links = case when public.labs.social_links = '[]'::jsonb then excluded.social_links else public.labs.social_links end,
+  location = coalesce(nullif(public.labs.location, ''), excluded.location),
+  completed_projects = case when cardinality(public.labs.completed_projects) = 0 then excluded.completed_projects else public.labs.completed_projects end,
+  ongoing_projects = case when cardinality(public.labs.ongoing_projects) = 0 then excluded.ongoing_projects else public.labs.ongoing_projects end,
+  organized_events = case when cardinality(public.labs.organized_events) = 0 then excluded.organized_events else public.labs.organized_events end,
+  seminars = case when cardinality(public.labs.seminars) = 0 then excluded.seminars else public.labs.seminars end,
+  courses = case when cardinality(public.labs.courses) = 0 then excluded.courses else public.labs.courses end,
+  external_events = case when cardinality(public.labs.external_events) = 0 then excluded.external_events else public.labs.external_events end,
+  notable_alumni = case when cardinality(public.labs.notable_alumni) = 0 then excluded.notable_alumni else public.labs.notable_alumni end,
+  alumni_contributors = case when cardinality(public.labs.alumni_contributors) = 0 then excluded.alumni_contributors else public.labs.alumni_contributors end,
+  current_partners = case when cardinality(public.labs.current_partners) = 0 then excluded.current_partners else public.labs.current_partners end,
+  prospective_partners = case when cardinality(public.labs.prospective_partners) = 0 then excluded.prospective_partners else public.labs.prospective_partners end,
+  grants = case when cardinality(public.labs.grants) = 0 then excluded.grants else public.labs.grants end,
+  awards = case when cardinality(public.labs.awards) = 0 then excluded.awards else public.labs.awards end,
+  orgs_kz = case when cardinality(public.labs.orgs_kz) = 0 then excluded.orgs_kz else public.labs.orgs_kz end,
+  orgs_global = case when cardinality(public.labs.orgs_global) = 0 then excluded.orgs_global else public.labs.orgs_global end,
+  events_kz = case when cardinality(public.labs.events_kz) = 0 then excluded.events_kz else public.labs.events_kz end,
+  events_global = case when cardinality(public.labs.events_global) = 0 then excluded.events_global else public.labs.events_global end,
+  photo_urls = case when cardinality(public.labs.photo_urls) = 0 then excluded.photo_urls else public.labs.photo_urls end,
+  photo_archive_link = coalesce(public.labs.photo_archive_link, excluded.photo_archive_link),
+  visitor_walkthrough = coalesce(public.labs.visitor_walkthrough, excluded.visitor_walkthrough),
+  live_demo = coalesce(public.labs.live_demo, excluded.live_demo),
+  demo_stand = coalesce(public.labs.demo_stand, excluded.demo_stand);
+insert into public.lab_internal (lab_id, presenters, goals, required_support, resource_gaps, action_plan_link)
+values ((select id from public.labs where slug = 'computer-vision'), array[]::text[], array[]::text[], array[]::text[], array[]::text[], null)
+on conflict (lab_id) do update set
+  presenters = case when cardinality(public.lab_internal.presenters) = 0 then excluded.presenters else public.lab_internal.presenters end,
+  goals = case when cardinality(public.lab_internal.goals) = 0 then excluded.goals else public.lab_internal.goals end,
+  required_support = case when cardinality(public.lab_internal.required_support) = 0 then excluded.required_support else public.lab_internal.required_support end,
+  resource_gaps = case when cardinality(public.lab_internal.resource_gaps) = 0 then excluded.resource_gaps else public.lab_internal.resource_gaps end,
+  action_plan_link = coalesce(public.lab_internal.action_plan_link, excluded.action_plan_link);
+
+-- Abai Nussipbekov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('abai.nussipbekov', 'Abai', 'Nussipbekov', 'Abai Nussipbekov', 'Assistant Professor SDU', 'PhD', 'abai.nussipbekov@sdu.edu.kz',
+  null, null, '56206049800', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Abai+Nussipbekov',
+  1, 1, 24, 1,
+  array['book', 'collaborative filtering', 'recommendation system']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Online book recommendation system', 2016, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2015.7416895', 'Proceedings of the 2015 12th International Conference on Electronics Computer and Computation, ICECCO 2015',
+  'Institute of Electrical and Electronics Engineers Inc.', 24, false, 'https://www.scopus.com/pages/publications/84964608574?origin=resultslist', '2-s2.0-84964608574', array['book', 'collaborative filtering', 'recommendation system']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84964608574');
+update public.publications set citations = 24, keywords = array['book', 'collaborative filtering', 'recommendation system']::text[] where scopus_eid = '2-s2.0-84964608574';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'abai.nussipbekov') from public.publications where scopus_eid = '2-s2.0-84964608574' on conflict do nothing;
+
+-- Abay Magauiya
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('abay.magauiya', 'Abay', 'Magauiya', 'Abay Magauiya', 'Technopark manager', 'Master', 'abay.magauiya@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-2654-5311', '57460289600', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Abay+Magauiya',
+  2, 0, 9, 2,
+  array['blockchain', 'copyright', 'digital music', 'digital rights management', 'intellectual property', 'smart contracts', 'intellectual property law', 'judicial practice']::text[], '[{"topic_name":"Digital Transformation in Law","subfield":"General Economics, Econometrics and Finance","field":"Economics, Econometrics and Finance","domain":"Social Sciences","works_count":1},{"topic_name":"Law, AI, and Intellectual Property","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Security, Politics, and Digital Transformation","subfield":"Political Science and International Relations","field":"Social Sciences","domain":"Social Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The use of blockchain technology in the field of digital music', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663835', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 3, false, 'https://www.scopus.com/pages/publications/85124990391?origin=resultslist', '2-s2.0-85124990391', array['blockchain', 'copyright', 'digital music', 'digital rights management', 'intellectual property', 'smart contracts']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124990391');
+update public.publications set citations = 3, keywords = array['blockchain', 'copyright', 'digital music', 'digital rights management', 'intellectual property', 'smart contracts']::text[] where scopus_eid = '2-s2.0-85124990391';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'abay.magauiya') from public.publications where scopus_eid = '2-s2.0-85124990391' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The Practices of Advanced Countries in the Legal Regulation of Intellectual Property Objects Created by Artificial Intelligence', 2023, 'Article', 'https://doi.org/10.26512/lstr.v15i1.43935', 'Revista de Direito, Estado e Telecomunicacoes',
+  'Universidade de Brasilia', 6, true, 'https://www.scopus.com/pages/publications/85160947303?origin=resultslist', '2-s2.0-85160947303', array['Intellectual Property Law', 'Judicial Practice', 'Objects of Intellectual Property Rights', 'Statutory Regulation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85160947303');
+update public.publications set citations = 6, keywords = array['Intellectual Property Law', 'Judicial Practice', 'Objects of Intellectual Property Rights', 'Statutory Regulation']::text[] where scopus_eid = '2-s2.0-85160947303';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'abay.magauiya') from public.publications where scopus_eid = '2-s2.0-85160947303' on conflict do nothing;
+
+-- Abdibek Ydyrys
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('abdibek.ydyrys', 'Abdibek', 'Ydyrys', 'Abdibek Ydyrys', 'Senior Lecturer', 'Master', 'abdibek.ydyrys@sdu.edu.kz',
+  null, 'https://orcid.org/0009-0002-2490-156X', '58414974000', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Abdibek+Ydyrys',
+  1, 0, 1, 1,
+  array['algebraic and scientific computation', 'gröbner bases', 'operads free algebras', 'polynomial identities']::text[], '[{"topic_name":"Advanced Topics in Algebra","subfield":"Algebra and Number Theory","field":"Mathematics","domain":"Physical Sciences","works_count":2},{"topic_name":"Algebraic structures and combinatorial models","subfield":"Geometry and Topology","field":"Mathematics","domain":"Physical Sciences","works_count":1},{"topic_name":"Homotopy and Cohomology in Algebraic Topology","subfield":"Mathematical Physics","field":"Mathematics","domain":"Physical Sciences","works_count":1},{"topic_name":"Advanced Algebra and Logic","subfield":"Computational Theory and Mathematics","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Mathematical and Theoretical Analysis","subfield":"Mathematical Physics","field":"Mathematics","domain":"Physical Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Free products of operads and Gröbner base of some operads', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147149', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85163718677?origin=resultslist', '2-s2.0-85163718677', array['Algebraic and Scientific Computation', 'Gröbner bases', 'Operads Free algebras', 'polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163718677');
+update public.publications set citations = 1, keywords = array['Algebraic and Scientific Computation', 'Gröbner bases', 'Operads Free algebras', 'polynomial identities']::text[] where scopus_eid = '2-s2.0-85163718677';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'abdibek.ydyrys') from public.publications where scopus_eid = '2-s2.0-85163718677' on conflict do nothing;
+
+-- Adil Akhmetov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('adil.akhmetov', 'Adil', 'Akhmetov', 'Adil Akhmetov', 'Senior Lecturer', 'Master', 'adil.akhmetov@sdu.edu.kz',
+  null, 'https://orcid.org/0009-0005-0388-8564', '57460289400', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Adil+Akhmetov',
+  3, 1, 26, 9,
+  array['large language models', 'edge computing', 'federated learning', 'education', 'students', 'supervisors', 'lstm in pos tagging', 'pos tagging']::text[], '[{"topic_name":"Post-Soviet Geopolitical Dynamics","subfield":"Political Science and International Relations","field":"Social Sciences","domain":"Social Sciences","works_count":4},{"topic_name":"Privacy-Preserving Technologies in Data","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":3},{"topic_name":"International Law and Human Rights","subfield":"Political Science and International Relations","field":"Social Sciences","domain":"Social Sciences","works_count":2},{"topic_name":"Advanced Graph Neural Networks","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Legal and Regulatory Analysis","subfield":"Transportation","field":"Social Sciences","domain":"Social Sciences","works_count":2}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Part-of-speech tagging of Kazakh text via LSTM network with a bidirectional modifier', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663794', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 10, false, 'https://www.scopus.com/pages/publications/85124997254?origin=resultslist', '2-s2.0-85124997254', array['LSTM in POS tagging', 'POS tagging', 'POS tagging of agglutinative language']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124997254');
+update public.publications set citations = 10, keywords = array['LSTM in POS tagging', 'POS tagging', 'POS tagging of agglutinative language']::text[] where scopus_eid = '2-s2.0-85124997254';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'adil.akhmetov') from public.publications where scopus_eid = '2-s2.0-85124997254' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Interoperability Challenges in Wearable Iot for Healthcare with Federated Learning: A Review', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488778', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/105038334072?origin=resultslist', '2-s2.0-105038334072', array['Edge Computing', 'Federated Learning', 'FHIR Standards', 'Interoperability', 'IoMT', 'Wearable IoT']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038334072');
+update public.publications set citations = 1, keywords = array['Edge Computing', 'Federated Learning', 'FHIR Standards', 'Interoperability', 'IoMT', 'Wearable IoT']::text[] where scopus_eid = '2-s2.0-105038334072';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'adil.akhmetov') from public.publications where scopus_eid = '2-s2.0-105038334072' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Personalized Federated Learning for Sovereign Personal AI Agents: A Review', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488769', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/105038345621?origin=resultslist', '2-s2.0-105038345621', array['Data Sovereignty', 'Edge AI', 'Large Language Models', 'Personalized Federated Learning', 'Privacy Preservation', 'Sovereign AI']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038345621');
+update public.publications set citations = 1, keywords = array['Data Sovereignty', 'Edge AI', 'Large Language Models', 'Personalized Federated Learning', 'Privacy Preservation', 'Sovereign AI']::text[] where scopus_eid = '2-s2.0-105038345621';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'adil.akhmetov') from public.publications where scopus_eid = '2-s2.0-105038345621' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Analysis of supervisors and students in the context of diploma defense', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663776', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/85124992041?origin=resultslist', '2-s2.0-85124992041', array['data analysis', 'education', 'ICT', 'students', 'supervisors']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124992041');
+update public.publications set citations = 5, keywords = array['data analysis', 'education', 'ICT', 'students', 'supervisors']::text[] where scopus_eid = '2-s2.0-85124992041';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'adil.akhmetov') from public.publications where scopus_eid = '2-s2.0-85124992041' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Application of k-means in the perception of supervisors from students'' side', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663859', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/85124949518?origin=resultslist', '2-s2.0-85124949518', array['education', 'k-means', 'students', 'supervisors']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124949518');
+update public.publications set citations = 7, keywords = array['education', 'k-means', 'students', 'supervisors']::text[] where scopus_eid = '2-s2.0-85124949518';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'adil.akhmetov') from public.publications where scopus_eid = '2-s2.0-85124949518' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'An Empirical Evaluation of LLM Function Calling in Enterprise Backend Systems: Latency, Reliability, and Development Trade-offs', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECET65726.2026.11633280', 'International Conference on Electrical, Computer, and Energy Technologies, ICECET 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105048893580?origin=resultslist', '2-s2.0-105048893580', array['accuracy', 'back-end integration', 'development effort', 'function calling', 'Large Language Models', 'latency', 'Spring AI']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105048893580');
+update public.publications set citations = 0, keywords = array['accuracy', 'back-end integration', 'development effort', 'function calling', 'Large Language Models', 'latency', 'Spring AI']::text[] where scopus_eid = '2-s2.0-105048893580';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'adil.akhmetov') from public.publications where scopus_eid = '2-s2.0-105048893580' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Performance Evaluation of Flask (WSGI) and Fastapi (ASGI) under High-Concurrency Workloads', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488817', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/105038318181?origin=resultslist', '2-s2.0-105038318181', array['ASGI', 'FastAPI', 'Flask', 'Python', 'Scalability', 'Web Frameworks', 'WSGI']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038318181');
+update public.publications set citations = 1, keywords = array['ASGI', 'FastAPI', 'Flask', 'Python', 'Scalability', 'Web Frameworks', 'WSGI']::text[] where scopus_eid = '2-s2.0-105038318181';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'adil.akhmetov') from public.publications where scopus_eid = '2-s2.0-105038318181' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Federated Learning Strategies for Fine-Tuning Large Language Models: A Systematic Literature Review', 2026, 'Conference paper', 'https://doi.org/10.1109/ICINT69379.2026.11549926', '2026 11th International Conference on Information and Network Technologies, ICINT 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/105042934311?origin=resultslist', '2-s2.0-105042934311', array['Edge Computing', 'Federated Learning', 'Fine-Tuning', 'Large Language Models', 'PEFT', 'Privacy']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105042934311');
+update public.publications set citations = 1, keywords = array['Edge Computing', 'Federated Learning', 'Fine-Tuning', 'Large Language Models', 'PEFT', 'Privacy']::text[] where scopus_eid = '2-s2.0-105042934311';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'adil.akhmetov') from public.publications where scopus_eid = '2-s2.0-105042934311' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Personalized Federated Learning Systems for Secure and Private Analysis of Patient Medical Records', 2026, 'Conference paper', 'https://doi.org/10.1109/ICCSDFAI70505.2026.11648033', '2026 International Conference on Cybersecurity, Digital Forensics, and AI Applications, ICCSDFAI 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105049057098?origin=resultslist', '2-s2.0-105049057098', array['differential privacy', 'EHR cybersecurity', 'Federated learning security', 'FedPer', 'gradient inversion', 'medical record protection', 'membership inference', 'patient data privacy', 'secure aggregation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105049057098');
+update public.publications set citations = 0, keywords = array['differential privacy', 'EHR cybersecurity', 'Federated learning security', 'FedPer', 'gradient inversion', 'medical record protection', 'membership inference', 'patient data privacy', 'secure aggregation']::text[] where scopus_eid = '2-s2.0-105049057098';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'adil.akhmetov') from public.publications where scopus_eid = '2-s2.0-105049057098' on conflict do nothing;
+
+-- Aiganym Soltiyeva
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('aiganym.soltiyeva', 'Aiganym', 'Soltiyeva', 'Aiganym Soltiyeva', 'Senior Lecturer', 'Master', 'aiganym.soltiyeva@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-8178-6871', '57994434700', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Aiganym+Soltiyeva',
+  3, 2, 30, 5,
+  array['artificial intelligence', 'social interaction', '3d model generation', '3d reconstruction', 'generative adversarial networks', 'latent space', 'polygon mesh', 'variational autoencoder']::text[], '[{"topic_name":"Autism Spectrum Disorder Research","subfield":"Cognitive Neuroscience","field":"Neuroscience","domain":"Life Sciences","works_count":6},{"topic_name":"Educational Games and Gamification","subfield":"Developmental and Educational Psychology","field":"Psychology","domain":"Social Sciences","works_count":6},{"topic_name":"Virtual Reality Applications and Impacts","subfield":"Human-Computer Interaction","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"3D Shape Modeling and Analysis","subfield":"Computational Mechanics","field":"Engineering","domain":"Physical Sciences","works_count":1},{"topic_name":"Generative Adversarial Networks and Image Synthesis","subfield":"Computer Vision and Pattern Recognition","field":"Computer Science","domain":"Physical Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Advances in artificial intelligence-driven 3D model generation: a review of GAN and VAE methodologies', 2025, 'Article', 'https://doi.org/10.11591/eei.v14i6.10755', 'Bulletin of Electrical Engineering and Informatics',
+  'Institute of Advanced Engineering and Science', 0, true, 'https://www.scopus.com/pages/publications/105024093702?origin=resultslist', '2-s2.0-105024093702', array['3D model generation', '3D reconstruction', 'Artificial intelligence', 'Generative adversarial networks', 'Latent space', 'Polygon mesh', 'Variational autoencoder']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105024093702');
+update public.publications set citations = 0, keywords = array['3D model generation', '3D reconstruction', 'Artificial intelligence', 'Generative adversarial networks', 'Latent space', 'Polygon mesh', 'Variational autoencoder']::text[] where scopus_eid = '2-s2.0-105024093702';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aiganym.soltiyeva') from public.publications where scopus_eid = '2-s2.0-105024093702' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The Effects of Gamification on Students’ Academic Performance', 2026, 'Article', 'https://doi.org/10.1007/s10758-026-09971-w', 'Technology, Knowledge and Learning',
+  'Springer Science and Business Media B.V.', 0, true, 'https://www.scopus.com/pages/publications/105035794141?origin=resultslist', '2-s2.0-105035794141', array['Controlled experiment', 'Educational performance', 'Game-based learning', 'Gamification', 'Students’ performance']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105035794141');
+update public.publications set citations = 0, keywords = array['Controlled experiment', 'Educational performance', 'Game-based learning', 'Gamification', 'Students’ performance']::text[] where scopus_eid = '2-s2.0-105035794141';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aiganym.soltiyeva') from public.publications where scopus_eid = '2-s2.0-105035794141' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Gameful strategies in the education of autistic children: a systematic literature review, scientometric analysis, and future research roadmap', 2024, 'Review', 'https://doi.org/10.1186/s40561-024-00309-6', 'Smart Learning Environments',
+  'Springer', 10, true, 'https://www.scopus.com/pages/publications/85195373160?origin=resultslist', '2-s2.0-85195373160', array['Early years education', 'Gameful approaches', 'Special needs education', 'Systematic review', 'Teaching/learning strategies']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85195373160');
+update public.publications set citations = 10, keywords = array['Early years education', 'Gameful approaches', 'Special needs education', 'Systematic review', 'Teaching/learning strategies']::text[] where scopus_eid = '2-s2.0-85195373160';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aiganym.soltiyeva') from public.publications where scopus_eid = '2-s2.0-85195373160' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Developing an Immersive Virtual Reality Training System to Enrich Social Interaction and Communication Skills for Children With Autism Spectrum Disorder', 2022, 'Conference paper', 'https://doi.org/10.1109/SIST54437.2022.9945733', 'SIST 2022 - 2022 International Conference on Smart Information Systems and Technologies, Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 14, false, 'https://www.scopus.com/pages/publications/85143428570?origin=resultslist', '2-s2.0-85143428570', array['Artificial Intelligence', 'Autism spectrum disorders', 'Communicational skills', 'Immersive Virtual reality', 'Social interaction']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85143428570');
+update public.publications set citations = 14, keywords = array['Artificial Intelligence', 'Autism spectrum disorders', 'Communicational skills', 'Immersive Virtual reality', 'Social interaction']::text[] where scopus_eid = '2-s2.0-85143428570';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aiganym.soltiyeva') from public.publications where scopus_eid = '2-s2.0-85143428570' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Understanding experiences and interactions of children with Asperger’s syndrome in Virtual Reality-based learning systems', 2025, 'Article', 'https://doi.org/10.1080/10494820.2024.2364250', 'Interactive Learning Environments',
+  'Routledge', 6, true, 'https://www.scopus.com/pages/publications/105001273050?origin=resultslist', '2-s2.0-105001273050', array['Asperger’s syndrome', 'Autism Spectrum Disorder', 'learning technologies', 'social interaction', 'virtual reality']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105001273050');
+update public.publications set citations = 6, keywords = array['Asperger’s syndrome', 'Autism Spectrum Disorder', 'learning technologies', 'social interaction', 'virtual reality']::text[] where scopus_eid = '2-s2.0-105001273050';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aiganym.soltiyeva') from public.publications where scopus_eid = '2-s2.0-105001273050' on conflict do nothing;
+
+-- Aigerim Bogyrbayeva
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('aigerim.bogyrbayeva', 'Aigerim', 'Bogyrbayeva', 'Aigerim Bogyrbayeva', 'Assistant Professor SDU', 'PhD', 'aigerim.bogyrbayeva@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-1669-4663', '57218692430', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Aigerim+Bogyrbayeva',
+  4, 2, 257, 4,
+  array['neural combinatorial optimization', 'reinforcement learning', 'vehicle routing', 'deep reinforcement learning', 'stochastic customer requests', 'vehicle routing problems', 'supervised learning']::text[], '[{"topic_name":"Transportation and Mobility Innovations","subfield":"Automotive Engineering","field":"Engineering","domain":"Physical Sciences","works_count":9},{"topic_name":"Vehicle Routing Optimization Methods","subfield":"Industrial and Manufacturing Engineering","field":"Engineering","domain":"Physical Sciences","works_count":6},{"topic_name":"Traffic control and management","subfield":"Control and Systems Engineering","field":"Engineering","domain":"Physical Sciences","works_count":2},{"topic_name":"UAV Applications and Optimization","subfield":"Aerospace Engineering","field":"Engineering","domain":"Physical Sciences","works_count":2},{"topic_name":"Auction Theory and Applications","subfield":"Management Science and Operations Research","field":"Decision Sciences","domain":"Social Sciences","works_count":2}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Deep Reinforcement Learning for Stochastic Dynamic Vehicle Routing Problem', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147154', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/85163726980?origin=resultslist', '2-s2.0-85163726980', array['deep reinforcement learning', 'stochastic customer requests', 'vehicle routing problems']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163726980');
+update public.publications set citations = 7, keywords = array['deep reinforcement learning', 'stochastic customer requests', 'vehicle routing problems']::text[] where scopus_eid = '2-s2.0-85163726980';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aigerim.bogyrbayeva') from public.publications where scopus_eid = '2-s2.0-85163726980' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Reinforcement Learning for Efficient Drone-Assisted Vehicle Routing', 2025, 'Article', 'https://doi.org/10.3390/app15042007', 'Applied Sciences (Switzerland)',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 9, true, 'https://www.scopus.com/pages/publications/85218464270?origin=resultslist', '2-s2.0-85218464270', array['neural combinatorial optimization', 'reinforcement learning', 'vehicle routing']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85218464270');
+update public.publications set citations = 9, keywords = array['neural combinatorial optimization', 'reinforcement learning', 'vehicle routing']::text[] where scopus_eid = '2-s2.0-85218464270';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aigerim.bogyrbayeva') from public.publications where scopus_eid = '2-s2.0-85218464270' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Machine Learning to Solve Vehicle Routing Problems: A Survey', 2024, 'Article', 'https://doi.org/10.1109/TITS.2023.3334976', 'IEEE Transactions on Intelligent Transportation Systems',
+  'Institute of Electrical and Electronics Engineers Inc.', 130, false, 'https://www.scopus.com/pages/publications/85181555979?origin=resultslist', '2-s2.0-85181555979', array['neural combinatorial optimization', 'Reinforcement learning', 'supervised learning', 'vehicle routing']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85181555979');
+update public.publications set citations = 130, keywords = array['neural combinatorial optimization', 'Reinforcement learning', 'supervised learning', 'vehicle routing']::text[] where scopus_eid = '2-s2.0-85181555979';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aigerim.bogyrbayeva') from public.publications where scopus_eid = '2-s2.0-85181555979' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A deep reinforcement learning approach for solving the Traveling Salesman Problem with Drone', 2023, 'Article', 'https://doi.org/10.1016/j.trc.2022.103981', 'Transportation Research Part C: Emerging Technologies',
+  null, 111, true, 'https://www.scopus.com/pages/publications/85146047173?origin=resultslist', '2-s2.0-85146047173', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85146047173');
+update public.publications set citations = 111, keywords = array[]::text[] where scopus_eid = '2-s2.0-85146047173';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aigerim.bogyrbayeva') from public.publications where scopus_eid = '2-s2.0-85146047173' on conflict do nothing;
+
+-- Aiken Kazin
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('aiken.kazin', 'Aiken', 'Kazin', 'Aiken Kazin', 'Senior Lecturer', 'Master', 'aiken.kazin@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-9658-9723', '59305206400', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Aiken+Kazin',
+  2, 0, 7, 3,
+  array['ai-generated text detection', 'deberta', 'deep learning', 'humanized ai text', 'lstm', 'machine learning', 'natural language processing', 'text classification']::text[], '[{"topic_name":"Topic Modeling","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Mathematical Dynamics and Fractals","subfield":"Mathematical Physics","field":"Mathematics","domain":"Physical Sciences","works_count":2},{"topic_name":"Theoretical and Computational Physics","subfield":"Condensed Matter Physics","field":"Physics and Astronomy","domain":"Physical Sciences","works_count":1},{"topic_name":"Advanced Topology and Set Theory","subfield":"Geometry and Topology","field":"Mathematics","domain":"Physical Sciences","works_count":1},{"topic_name":"Text and Document Classification Technologies","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Multi-Class Detection of Humanized AI Text Using Machine Learning and Transformer Models', 2025, 'Conference paper', 'https://doi.org/10.1109/ICCIKE67021.2025.11318272', '2025 International Conference on Computational Intelligence and Knowledge Economy, ICCIKE 2025',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/105032669978?origin=resultslist', '2-s2.0-105032669978', array['AI-generated text detection', 'DeBERTa', 'deep learning', 'humanized AI text', 'LSTM', 'machine learning', 'natural language processing', 'text classification']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105032669978');
+update public.publications set citations = 5, keywords = array['AI-generated text detection', 'DeBERTa', 'deep learning', 'humanized AI text', 'LSTM', 'machine learning', 'natural language processing', 'text classification']::text[] where scopus_eid = '2-s2.0-105032669978';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aiken.kazin') from public.publications where scopus_eid = '2-s2.0-105032669978' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Semi-Regular Continued Fractions with Fast-Growing Partial Quotients', 2024, 'Article', 'https://doi.org/10.3390/fractalfract8080436', 'Fractal and Fractional',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 2, true, 'https://www.scopus.com/pages/publications/85202598302?origin=resultslist', '2-s2.0-85202598302', array['box dimension', 'convergents', 'dimension theory', 'Hausdorff dimension', 'number theory', 'partial quotients', 'semi-regular continued fractions']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85202598302');
+update public.publications set citations = 2, keywords = array['box dimension', 'convergents', 'dimension theory', 'Hausdorff dimension', 'number theory', 'partial quotients', 'semi-regular continued fractions']::text[] where scopus_eid = '2-s2.0-85202598302';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aiken.kazin') from public.publications where scopus_eid = '2-s2.0-85202598302' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A note on semi-regular continued fractions with bounded partial quotients', 2026, 'Article', 'https://doi.org/10.1007/s40065-025-00611-2', 'Arabian Journal of Mathematics',
+  'Springer Science and Business Media Deutschland GmbH', 0, false, 'https://www.scopus.com/pages/publications/105028726417?origin=resultslist', '2-s2.0-105028726417', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105028726417');
+update public.publications set citations = 0, keywords = array[]::text[] where scopus_eid = '2-s2.0-105028726417';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aiken.kazin') from public.publications where scopus_eid = '2-s2.0-105028726417' on conflict do nothing;
+
+-- Aisaule Bazarkulova
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('aisaule.bazarkulova', 'Aisaule', 'Bazarkulova', 'Aisaule Bazarkulova', 'Senior Lecturer', 'Master', 'aisaule.bazarkulova@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-8092-8348', '57459897600', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Aisaule+Bazarkulova',
+  1, 0, 7, 4,
+  array['low-resource languages', 'adaptive algorithms', 'collaborative learning', 'community-based approach', 'crowdsourcing', 'kazakh language', 'language learning systems', 'machine translation']::text[], '[{"topic_name":"Orthopedic Surgery and Rehabilitation","subfield":"Surgery","field":"Medicine","domain":"Health Sciences","works_count":1},{"topic_name":"Software Testing and Debugging Techniques","subfield":"Software","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Legal Education and Practice Innovations","subfield":"Law","field":"Social Sciences","domain":"Social Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of a Crowdsourcing-Based Adaptive Kazakh - English Translation System for the Kazakh Language', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488829', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038371619?origin=resultslist', '2-s2.0-105038371619', array['adaptive algorithms', 'collaborative learning', 'community-based approach', 'crowdsourcing', 'Kazakh language', 'language learning systems', 'machine translation', 'morphological complexity', 'translation accuracy', 'user feedback']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038371619');
+update public.publications set citations = 0, keywords = array['adaptive algorithms', 'collaborative learning', 'community-based approach', 'crowdsourcing', 'Kazakh language', 'language learning systems', 'machine translation', 'morphological complexity', 'translation accuracy', 'user feedback']::text[] where scopus_eid = '2-s2.0-105038371619';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aisaule.bazarkulova') from public.publications where scopus_eid = '2-s2.0-105038371619' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Analysis of supervisors and students in the context of diploma defense', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663776', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/85124992041?origin=resultslist', '2-s2.0-85124992041', array['data analysis', 'education', 'ICT', 'students', 'supervisors']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124992041');
+update public.publications set citations = 5, keywords = array['data analysis', 'education', 'ICT', 'students', 'supervisors']::text[] where scopus_eid = '2-s2.0-85124992041';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aisaule.bazarkulova') from public.publications where scopus_eid = '2-s2.0-85124992041' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Cross-Lingual and Multilingual Approaches to Fake News Detection in the Kazakh Language', 2026, 'Conference paper', 'https://doi.org/10.1016/j.procs.2026.01.082', 'Procedia Computer Science',
+  'Elsevier B.V.', 1, true, 'https://www.scopus.com/pages/publications/105041038665?origin=resultslist', '2-s2.0-105041038665', array['Cross-lingual transfer', 'Logistic Regression', 'Low-resource languages', 'Misinformation Analysis', 'Text Classification', 'TF-IDF']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105041038665');
+update public.publications set citations = 1, keywords = array['Cross-lingual transfer', 'Logistic Regression', 'Low-resource languages', 'Misinformation Analysis', 'Text Classification', 'TF-IDF']::text[] where scopus_eid = '2-s2.0-105041038665';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aisaule.bazarkulova') from public.publications where scopus_eid = '2-s2.0-105041038665' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of Hybrid LLM-ASR Methodology for Improving Process of Kazakh Language Learning', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488744', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/105038337944?origin=resultslist', '2-s2.0-105038337944', array['automatic speech recognition (ASR)', 'data augmentation', 'educational technology', 'interactive learning', 'Kazakh language learning', 'large language models (LLMs)', 'low-resource languages', 'pronunciation evaluation', 'transfer learning', 'Whisper']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038337944');
+update public.publications set citations = 1, keywords = array['automatic speech recognition (ASR)', 'data augmentation', 'educational technology', 'interactive learning', 'Kazakh language learning', 'large language models (LLMs)', 'low-resource languages', 'pronunciation evaluation', 'transfer learning', 'Whisper']::text[] where scopus_eid = '2-s2.0-105038337944';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aisaule.bazarkulova') from public.publications where scopus_eid = '2-s2.0-105038337944' on conflict do nothing;
+
+-- Akerke Alseitova
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('akerke.alseitova', 'Akerke', 'Alseitova', 'Akerke Alseitova', 'Senior Lecturer', 'Master', 'akerke.alseitova@sdu.edu.kz',
+  null, null, '58413441800', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Akerke+Alseitova',
+  1, 0, 2, 2,
+  array['learning management systems', 'learning traits', 'longitudinal study', 'personality traits', 'students’ behavior', 'gamification elements', 'gamification in education', 'gamification mechanics']::text[], '[{"topic_name":"Online Learning and Analytics","subfield":"Computer Science Applications","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Teaching and Learning Programming","subfield":"Computer Science Applications","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Educational Games and Gamification","subfield":"Developmental and Educational Psychology","field":"Psychology","domain":"Social Sciences","works_count":1},{"topic_name":"Emotional Intelligence and Performance","subfield":"Social Psychology","field":"Psychology","domain":"Social Sciences","works_count":1},{"topic_name":"Learning Styles and Cognitive Differences","subfield":"Developmental and Educational Psychology","field":"Psychology","domain":"Social Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Understanding Students’ Behavior in Learning Management Systems Through Their Personality Traits', 2025, 'Article', 'https://doi.org/10.1007/s10758-025-09931-w', 'Technology, Knowledge and Learning',
+  'Springer Science and Business Media B.V.', 0, true, 'https://www.scopus.com/pages/publications/105024213101?origin=resultslist', '2-s2.0-105024213101', array['Learning management systems', 'Learning traits', 'Longitudinal study', 'Personality traits', 'Students’ behavior']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105024213101');
+update public.publications set citations = 0, keywords = array['Learning management systems', 'Learning traits', 'Longitudinal study', 'Personality traits', 'Students’ behavior']::text[] where scopus_eid = '2-s2.0-105024213101';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'akerke.alseitova') from public.publications where scopus_eid = '2-s2.0-105024213101' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'What Forces Us to Gamify the Programming in Higher Education: A Literature Review', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10146601', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, false, 'https://www.scopus.com/pages/publications/85163771988?origin=resultslist', '2-s2.0-85163771988', array['gamification elements', 'gamification in education', 'gamification mechanics', 'programming language education', 'review']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163771988');
+update public.publications set citations = 2, keywords = array['gamification elements', 'gamification in education', 'gamification mechanics', 'programming language education', 'review']::text[] where scopus_eid = '2-s2.0-85163771988';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'akerke.alseitova') from public.publications where scopus_eid = '2-s2.0-85163771988' on conflict do nothing;
+
+-- Aleksei Kavokin
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('aleksei.kavokin', 'Aleksei', 'Kavokin', 'Aleksei Kavokin', 'Assistant Professor SDU', 'Candidate of Science', 'aleksei.kavokin@sdu.edu.kz',
+  null, 'https://orcid.org/0009-0000-1931-4518', '57200718188', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Aleksei+Kavokin',
+  1, 0, 8, 2,
+  array['computer models of heat processes', 'free boundary problems', 'numerical methods', 'phase reactions kinetics', 'phase transitions', 'free boundaries', 'heat polynomials', 'two phase stefan problem']::text[], '[{"topic_name":"Semiconductor Quantum Structures and Devices","subfield":"Atomic and Molecular Physics, and Optics","field":"Physics and Astronomy","domain":"Physical Sciences","works_count":1},{"topic_name":"Photonic and Optical Devices","subfield":"Electrical and Electronic Engineering","field":"Engineering","domain":"Physical Sciences","works_count":1},{"topic_name":"Neural Networks and Applications","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Model Reduction and Neural Networks","subfield":"Statistical and Nonlinear Physics","field":"Physics and Astronomy","domain":"Physical Sciences","works_count":1},{"topic_name":"Mechanical and Optical Resonators","subfield":"Atomic and Molecular Physics, and Optics","field":"Physics and Astronomy","domain":"Physical Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Model of a two-dimensional free boundary problem in an cylindrical shape electrical contact', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147130', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85163752263?origin=resultslist', '2-s2.0-85163752263', array['computer models of heat processes', 'free boundary problems', 'numerical methods', 'phase reactions kinetics', 'phase transitions']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163752263');
+update public.publications set citations = 0, keywords = array['computer models of heat processes', 'free boundary problems', 'numerical methods', 'phase reactions kinetics', 'phase transitions']::text[] where scopus_eid = '2-s2.0-85163752263';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aleksei.kavokin') from public.publications where scopus_eid = '2-s2.0-85163752263' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Exact solution of two phase spherical Stefan problem with two free boundaries', 2016, 'Conference paper', 'https://doi.org/10.1063/1.4959731', 'AIP Conference Proceedings',
+  'American Institute of Physics Inc.', 8, false, 'https://www.scopus.com/pages/publications/85000376712?origin=resultslist', '2-s2.0-85000376712', array['Free boundaries', 'Heat polynomials', 'Two phase Stefan Problem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85000376712');
+update public.publications set citations = 8, keywords = array['Free boundaries', 'Heat polynomials', 'Two phase Stefan Problem']::text[] where scopus_eid = '2-s2.0-85000376712';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aleksei.kavokin') from public.publications where scopus_eid = '2-s2.0-85000376712' on conflict do nothing;
+
+-- Alexandr Ivanov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('alexandr.ivanov', 'Alexandr', 'Ivanov', 'Alexandr Ivanov', 'Senior Lecturer', 'Candidate of Science', 'alexandr.ivanov@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-6002-7868', '57221003402', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Alexandr+Ivanov',
+  1, 0, 1, 1,
+  array['eigenvalues', 'eigenvectors', 'frobenius matrix', 'polynomial roots']::text[], '[{"topic_name":"Magnetic confinement fusion research","subfield":"Nuclear and High Energy Physics","field":"Physics and Astronomy","domain":"Physical Sciences","works_count":250},{"topic_name":"Particle accelerators and beam dynamics","subfield":"Aerospace Engineering","field":"Engineering","domain":"Physical Sciences","works_count":167},{"topic_name":"Plasma Diagnostics and Applications","subfield":"Electrical and Electronic Engineering","field":"Engineering","domain":"Physical Sciences","works_count":161},{"topic_name":"Nuclear Physics and Applications","subfield":"Radiation","field":"Physics and Astronomy","domain":"Physical Sciences","works_count":76},{"topic_name":"Fusion materials and technologies","subfield":"Materials Chemistry","field":"Materials Science","domain":"Physical Sciences","works_count":63}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Analytical method of finding polynomial roots by using the eigenvectors, eigenvalues apparatus', 2016, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2015.7416874', 'Proceedings of the 2015 12th International Conference on Electronics Computer and Computation, ICECCO 2015',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, true, 'https://www.scopus.com/pages/publications/84964626305?origin=resultslist', '2-s2.0-84964626305', array['eigenvalues', 'eigenvectors', 'Frobenius matrix', 'polynomial roots']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84964626305');
+update public.publications set citations = 1, keywords = array['eigenvalues', 'eigenvectors', 'Frobenius matrix', 'polynomial roots']::text[] where scopus_eid = '2-s2.0-84964626305';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'alexandr.ivanov') from public.publications where scopus_eid = '2-s2.0-84964626305' on conflict do nothing;
+
+-- Aliya Zhunis
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('aliya.zhunis', 'Aliya', 'Zhunis', 'Aliya Zhunis', 'Senior Lecturer', 'Master', 'aliya.zhunis@sdu.edu.kz',
+  null, null, '57216436200', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Aliya+Zhunis',
+  1, 1, 13, 1,
+  array['decision tree', 'dwt', 'eeg', 'emd', 'knn', 'seizure detection', 'svm']::text[], '[{"topic_name":"EEG and Brain-Computer Interfaces","subfield":"Cognitive Neuroscience","field":"Neuroscience","domain":"Life Sciences","works_count":2},{"topic_name":"Neural and Behavioral Psychology Studies","subfield":"Cognitive Neuroscience","field":"Neuroscience","domain":"Life Sciences","works_count":1},{"topic_name":"ECG Monitoring and Analysis","subfield":"Cardiology and Cardiovascular Medicine","field":"Medicine","domain":"Health Sciences","works_count":1},{"topic_name":"Psychosomatic Disorders and Their Treatments","subfield":"Psychiatry and Mental health","field":"Medicine","domain":"Health Sciences","works_count":1},{"topic_name":"Blind Source Separation Techniques","subfield":"Signal Processing","field":"Computer Science","domain":"Physical Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Epileptic Seizure Prediction in EEG Signals using EMD and DWT', 2019, 'Conference paper', 'https://doi.org/10.1109/ICECCO48375.2019.9043270', '2019 15th International Conference on Electronics, Computer and Computation, ICECCO 2019',
+  'Institute of Electrical and Electronics Engineers Inc.', 13, false, 'https://www.scopus.com/pages/publications/85083520254?origin=resultslist', '2-s2.0-85083520254', array['Decision Tree', 'DWT', 'EEG', 'EMD', 'KNN', 'Seizure Detection', 'SVM']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85083520254');
+update public.publications set citations = 13, keywords = array['Decision Tree', 'DWT', 'EEG', 'EMD', 'KNN', 'Seizure Detection', 'SVM']::text[] where scopus_eid = '2-s2.0-85083520254';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aliya.zhunis') from public.publications where scopus_eid = '2-s2.0-85083520254' on conflict do nothing;
+
+-- Amina Shaikym
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('amina.shaikym', 'Amina', 'Shaikym', 'Amina Shaikym', 'Senior Lecturer', 'Master', 'amina.shaikym@sdu.edu.kz',
+  null, null, '58411895500', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Amina+Shaikym',
+  2, 0, 13, 3,
+  array['academic performance', 'data interpretation', 'electronic devices', 'hypothesis testing', 'statistical analysis', 'collaborative base filtering', 'content-based filtering', 'fuzzy logic']::text[], '[{"topic_name":"Recommender Systems and Techniques","subfield":"Information Systems","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Impact of Technology on Adolescents","subfield":"Sociology and Political Science","field":"Social Sciences","domain":"Social Sciences","works_count":2},{"topic_name":"Online Learning and Analytics","subfield":"Computer Science Applications","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Technology Adoption and User Behaviour","subfield":"Information Systems and Management","field":"Decision Sciences","domain":"Social Sciences","works_count":1},{"topic_name":"Online and Blended Learning","subfield":"Education","field":"Social Sciences","domain":"Social Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Comparative Study of the Impact of Electronic Devices on University Students'' Academic Performance', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147158', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85163716125?origin=resultslist', '2-s2.0-85163716125', array['academic performance', 'data interpretation', 'electronic devices', 'hypothesis testing', 'statistical analysis']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163716125');
+update public.publications set citations = 1, keywords = array['academic performance', 'data interpretation', 'electronic devices', 'hypothesis testing', 'statistical analysis']::text[] where scopus_eid = '2-s2.0-85163716125';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'amina.shaikym') from public.publications where scopus_eid = '2-s2.0-85163716125' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Design and Evaluation of a Personalized Job Recommendation System for Computer Science Students Using Hybrid Approach', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147147', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/85163774662?origin=resultslist', '2-s2.0-85163774662', array['collaborative base filtering', 'content-based filtering', 'fuzzy logic', 'personalized system', 'recommendation system']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163774662');
+update public.publications set citations = 7, keywords = array['collaborative base filtering', 'content-based filtering', 'fuzzy logic', 'personalized system', 'recommendation system']::text[] where scopus_eid = '2-s2.0-85163774662';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'amina.shaikym') from public.publications where scopus_eid = '2-s2.0-85163774662' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'MBTI-based recommendation system for extracurricular activities for high school students', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147138', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/85163728686?origin=resultslist', '2-s2.0-85163728686', array['extracurricular activities', 'MBTI', 'personality types', 'personalized approach', 'recommendation systems']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163728686');
+update public.publications set citations = 5, keywords = array['extracurricular activities', 'MBTI', 'personality types', 'personalized approach', 'recommendation systems']::text[] where scopus_eid = '2-s2.0-85163728686';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'amina.shaikym') from public.publications where scopus_eid = '2-s2.0-85163728686' on conflict do nothing;
+
+-- Askhat Aitimov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('askhat.aitimov', 'Askhat', 'Aitimov', 'Askhat Aitimov', 'Vice Dean for Academic Affairs', 'PhD', 'askhat.aitimov@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-9849-1391', '57207766577', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Askhat+Aitimov',
+  2, 1, 21, 5,
+  array['gesture recognition', 'sign language', 'stochastic gradient descent', 'triplet loss', 'face recognition', 'algorithm evaluation', 'feature extraction', 'hand tracking']::text[], '[{"topic_name":"Hand Gesture Recognition Systems","subfield":"Human-Computer Interaction","field":"Computer Science","domain":"Physical Sciences","works_count":4},{"topic_name":"Hearing Impairment and Communication","subfield":"Developmental and Educational Psychology","field":"Psychology","domain":"Social Sciences","works_count":3},{"topic_name":"Face and Expression Recognition","subfield":"Computer Vision and Pattern Recognition","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Gait Recognition and Analysis","subfield":"Biomedical Engineering","field":"Engineering","domain":"Physical Sciences","works_count":2},{"topic_name":"Video Surveillance and Tracking Methods","subfield":"Computer Vision and Pattern Recognition","field":"Computer Science","domain":"Physical Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'SIGN LANGUAGE DACTYL RECOGNITION BASED ON MACHINE LEARNING ALGORITHMS', 2021, 'Article', 'https://doi.org/10.15587/1729-4061.2021.239253', 'Eastern-European Journal of Enterprise Technologies',
+  'Technology Center', 13, true, 'https://www.scopus.com/pages/publications/85117223595?origin=resultslist', '2-s2.0-85117223595', array['algorithm evaluation', 'feature extraction', 'Gesture recognition', 'hand tracking', 'sign language']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85117223595');
+update public.publications set citations = 13, keywords = array['algorithm evaluation', 'feature extraction', 'Gesture recognition', 'hand tracking', 'sign language']::text[] where scopus_eid = '2-s2.0-85117223595';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'askhat.aitimov') from public.publications where scopus_eid = '2-s2.0-85117223595' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Pca and projection based hand gesture recognition', 2021, 'Article', null, 'Journal of Theoretical and Applied Information Technology',
+  'Little Lion Scientific', 0, false, 'https://www.scopus.com/pages/publications/85112491621?origin=resultslist', '2-s2.0-85112491621', array['Computer Vision', 'Hand Gesture Recognition', 'Human-Computer Interaction', 'kNN', 'PCA-TP', 'Sign Language', 'SRC', 'Stochastic Gradient Descent', 'Triplet Loss']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85112491621');
+update public.publications set citations = 0, keywords = array['Computer Vision', 'Hand Gesture Recognition', 'Human-Computer Interaction', 'kNN', 'PCA-TP', 'Sign Language', 'SRC', 'Stochastic Gradient Descent', 'Triplet Loss']::text[] where scopus_eid = '2-s2.0-85112491621';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'askhat.aitimov') from public.publications where scopus_eid = '2-s2.0-85112491621' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'An enhanced face recognition method for lighting problem', 2019, 'Conference paper', 'https://doi.org/10.1109/ICECCO48375.2019.9043199', '2019 15th International Conference on Electronics, Computer and Computation, ICECCO 2019',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, false, 'https://www.scopus.com/pages/publications/85083498167?origin=resultslist', '2-s2.0-85083498167', array['Adaptive Single Scale Retinex', 'Analysis', 'Face Recognition', 'Histogram Equalization', 'Principal Component']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85083498167');
+update public.publications set citations = 2, keywords = array['Adaptive Single Scale Retinex', 'Analysis', 'Face Recognition', 'Histogram Equalization', 'Principal Component']::text[] where scopus_eid = '2-s2.0-85083498167';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'askhat.aitimov') from public.publications where scopus_eid = '2-s2.0-85083498167' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select '2D face recognition using PCA and triplet similarity embedding', 2023, 'Article', 'https://doi.org/10.11591/eei.v12i1.4162', 'Bulletin of Electrical Engineering and Informatics',
+  'Institute of Advanced Engineering and Science', 4, true, 'https://www.scopus.com/pages/publications/85141357567?origin=resultslist', '2-s2.0-85141357567', array['Face recognition', 'K-nearest neighbor', 'Principal component analysis TP', 'Stochastic gradient descent', 'Triplet loss']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85141357567');
+update public.publications set citations = 4, keywords = array['Face recognition', 'K-nearest neighbor', 'Principal component analysis TP', 'Stochastic gradient descent', 'Triplet loss']::text[] where scopus_eid = '2-s2.0-85141357567';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'askhat.aitimov') from public.publications where scopus_eid = '2-s2.0-85141357567' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Gesture recognition based on sparse reconstruction', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634687', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, false, 'https://www.scopus.com/pages/publications/85062856258?origin=resultslist', '2-s2.0-85062856258', array['Gesture recognition', 'Recognition rate', 'Sparse representation classifier']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062856258');
+update public.publications set citations = 2, keywords = array['Gesture recognition', 'Recognition rate', 'Sparse representation classifier']::text[] where scopus_eid = '2-s2.0-85062856258';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'askhat.aitimov') from public.publications where scopus_eid = '2-s2.0-85062856258' on conflict do nothing;
+
+-- Assem Talasbek
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('assem.talasbek', 'Assem', 'Talasbek', 'Assem Talasbek', 'Vice Dean for Academic Affairs', 'PhD', 'assem.talasbek@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-0944-1772', '57207778433', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Assem+Talasbek',
+  4, 1, 41, 7,
+  array['apache spark', 'distributed systems', 'hr', 'human resources', 'machine learning in hr', 'recommendation systems', 'algorithm', 'allocation']::text[], '[{"topic_name":"Sentiment Analysis and Opinion Mining","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":3},{"topic_name":"Personality Traits and Psychology","subfield":"Clinical Psychology","field":"Psychology","domain":"Social Sciences","works_count":3},{"topic_name":"Topic Modeling","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Recommender Systems and Techniques","subfield":"Information Systems","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Personality Disorders and Psychopathology","subfield":"Clinical Psychology","field":"Psychology","domain":"Social Sciences","works_count":2}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Recommendation System for Human Resource Management by the Use of Apache Spark Cluster', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147129', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/85163752577?origin=resultslist', '2-s2.0-85163752577', array['Apache Spark', 'distributed systems', 'HR', 'human resources', 'machine learning in HR', 'recommendation systems']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163752577');
+update public.publications set citations = 5, keywords = array['Apache Spark', 'distributed systems', 'HR', 'human resources', 'machine learning in HR', 'recommendation systems']::text[] where scopus_eid = '2-s2.0-85163752577';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'assem.talasbek') from public.publications where scopus_eid = '2-s2.0-85163752577' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Algorithm for reduction of space allocation of the boxes in the warehouse', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634695', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85062875839?origin=resultslist', '2-s2.0-85062875839', array['Algorithm', 'Allocation', 'Database', 'Optimize', 'Smart', 'Space', 'Statistics', 'Time']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062875839');
+update public.publications set citations = 0, keywords = array['Algorithm', 'Allocation', 'Database', 'Optimize', 'Smart', 'Space', 'Statistics', 'Time']::text[] where scopus_eid = '2-s2.0-85062875839';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'assem.talasbek') from public.publications where scopus_eid = '2-s2.0-85062875839' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Evaluating Large Language Models for Kazakh Question Generation: A Comparative Study of ChatGPT and Gemma', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488827', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038342232?origin=resultslist', '2-s2.0-105038342232', array['ChatGPT', 'educational technology', 'Gemma', 'Kazakh language', 'Large language models', 'low-resource languages', 'natural language processing', 'question generation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038342232');
+update public.publications set citations = 0, keywords = array['ChatGPT', 'educational technology', 'Gemma', 'Kazakh language', 'Large language models', 'low-resource languages', 'natural language processing', 'question generation']::text[] where scopus_eid = '2-s2.0-105038342232';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'assem.talasbek') from public.publications where scopus_eid = '2-s2.0-105038342232' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Personality Classification by Applying k-Means Clustering', 2020, 'Conference paper', 'https://doi.org/10.1109/ICAIIC48513.2020.9065244', '2020 International Conference on Artificial Intelligence in Information and Communication, ICAIIC 2020',
+  'Institute of Electrical and Electronics Engineers Inc.', 8, false, 'https://www.scopus.com/pages/publications/85084071154?origin=resultslist', '2-s2.0-85084071154', array['Jungian Type Inventory', 'k-means clustering on personality test', 'personality types and machine learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85084071154');
+update public.publications set citations = 8, keywords = array['Jungian Type Inventory', 'k-means clustering on personality test', 'personality types and machine learning']::text[] where scopus_eid = '2-s2.0-85084071154';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'assem.talasbek') from public.publications where scopus_eid = '2-s2.0-85084071154' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'MBTI personality classification using Apache Spark', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663858', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 4, false, 'https://www.scopus.com/pages/publications/85124992958?origin=resultslist', '2-s2.0-85124992958', array['Apache Spark', 'Logistic Regression', 'MBTI', 'Naive Bayes', 'SVM']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124992958');
+update public.publications set citations = 4, keywords = array['Apache Spark', 'Logistic Regression', 'MBTI', 'Naive Bayes', 'SVM']::text[] where scopus_eid = '2-s2.0-85124992958';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'assem.talasbek') from public.publications where scopus_eid = '2-s2.0-85124992958' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Personality classification experiment by applying k-means clustering', 2020, 'Article', 'https://doi.org/10.3991/ijet.v15i16.15049', 'International Journal of Emerging Technologies in Learning',
+  null, 19, true, 'https://www.scopus.com/pages/publications/85090100474?origin=resultslist', '2-s2.0-85090100474', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85090100474');
+update public.publications set citations = 19, keywords = array[]::text[] where scopus_eid = '2-s2.0-85090100474';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'assem.talasbek') from public.publications where scopus_eid = '2-s2.0-85090100474' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Best Practices in Running IT Hackathons Based on Paragon University Dataset', 2020, 'Article', 'https://doi.org/10.3991/ijet.v15i19.15523', 'International Journal of Emerging Technologies in Learning',
+  null, 5, true, 'https://www.scopus.com/pages/publications/85097578858?origin=resultslist', '2-s2.0-85097578858', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85097578858');
+update public.publications set citations = 5, keywords = array[]::text[] where scopus_eid = '2-s2.0-85097578858';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'assem.talasbek') from public.publications where scopus_eid = '2-s2.0-85097578858' on conflict do nothing;
+
+-- Assem Kaliyeva
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('assem.kaliyeva', 'Assem', 'Kaliyeva', 'Assem Kaliyeva', 'Senior Lecturer', 'Master', 'assem.kaliyeva@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-5733-797X', '58984595600', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Assem+Kaliyeva',
+  1, 0, 5, 1,
+  array['attitudes and beliefs', 'class', 'gender differences in science', 'kazakh high school students', 'physics education', 'psychometrics']::text[], '[{"topic_name":"COVID-19 Pandemic Impacts","subfield":"Economics and Econometrics","field":"Economics, Econometrics and Finance","domain":"Social Sciences","works_count":2},{"topic_name":"Monetary Policy and Economic Impact","subfield":"General Economics, Econometrics and Finance","field":"Economics, Econometrics and Finance","domain":"Social Sciences","works_count":1},{"topic_name":"Science Education and Pedagogy","subfield":"Education","field":"Social Sciences","domain":"Social Sciences","works_count":1},{"topic_name":"Market Dynamics and Volatility","subfield":"Economics and Econometrics","field":"Economics, Econometrics and Finance","domain":"Social Sciences","works_count":1},{"topic_name":"Agricultural risk and resilience","subfield":"Soil Science","field":"Agricultural and Biological Sciences","domain":"Life Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Surveying Kazakh high school students'' attitudes and beliefs about physics and learning with the Colorado learning attitudes about science survey', 2020, 'Article', 'https://doi.org/10.1088/1361-6552/abad4a', 'Physics Education',
+  'IOP Publishing Ltd', 5, false, 'https://www.scopus.com/pages/publications/85092736909?origin=resultslist', '2-s2.0-85092736909', array['Attitudes and beliefs', 'CLASS', 'Gender differences in science', 'Kazakh high school students', 'Physics education', 'Psychometrics']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85092736909');
+update public.publications set citations = 5, keywords = array['Attitudes and beliefs', 'CLASS', 'Gender differences in science', 'Kazakh high school students', 'Physics education', 'Psychometrics']::text[] where scopus_eid = '2-s2.0-85092736909';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'assem.kaliyeva') from public.publications where scopus_eid = '2-s2.0-85092736909' on conflict do nothing;
+
+-- Assemgul Kozhabek
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('assemgul.kozhabek', 'Assemgul', 'Kozhabek', 'Assemgul Kozhabek', 'Assistant Professor SDU', 'PhD', 'assemgul.kozhabek@sdu.edu.kz',
+  null, 'https://orcid.org/0009-0008-6762-640X', '58925522300', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Assemgul+Kozhabek',
+  0, 0, 0, 1,
+  array['internet', 'power-law', 'preferential attachment', 'scale-free', 'topology']::text[], '[{"topic_name":"Complex Network Analysis Techniques","subfield":"Statistical and Nonlinear Physics","field":"Physics and Astronomy","domain":"Physical Sciences","works_count":1},{"topic_name":"Network Traffic and Congestion Control","subfield":"Computer Networks and Communications","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Land Use and Ecosystem Services","subfield":"Global and Planetary Change","field":"Environmental Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Traffic control and management","subfield":"Control and Systems Engineering","field":"Engineering","domain":"Physical Sciences","works_count":1},{"topic_name":"Probabilistic and Robust Engineering Design","subfield":"Statistics, Probability and Uncertainty","field":"Decision Sciences","domain":"Social Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A 27-Year Longitudinal Study on the Structure of the Internet Topology: Scale-Freeness and Preferential Attachment', 2026, 'Article', 'https://doi.org/10.1109/TON.2026.3702190', 'IEEE Transactions on Networking',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105041931443?origin=resultslist', '2-s2.0-105041931443', array['Internet', 'power-law', 'preferential attachment', 'scale-free', 'topology']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105041931443');
+update public.publications set citations = 0, keywords = array['Internet', 'power-law', 'preferential attachment', 'scale-free', 'topology']::text[] where scopus_eid = '2-s2.0-105041931443';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'assemgul.kozhabek') from public.publications where scopus_eid = '2-s2.0-105041931443' on conflict do nothing;
+
+-- Ayaulym Parmash
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('ayaulym.parmash', 'Ayaulym', 'Parmash', 'Ayaulym Parmash', 'Educational Program (EP) Director', 'Master', 'ayaulym.parmash@sdu.edu.kz',
+  null, 'https://orcid.org/0009-0009-1249-3643', '60623388000', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Ayaulym+Parmash',
+  0, 0, 0, 3,
+  array['deep reinforcement learning', 'deep learning', 'lstm', 'nlp', 'turkish sentiment analysis', 'word2vec', 'autnomous mobile robot navigation', 'multi-room navigation']::text[], '[{"topic_name":"Robotic Path Planning Algorithms","subfield":"Computer Vision and Pattern Recognition","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Robotics and Sensor-Based Localization","subfield":"Aerospace Engineering","field":"Engineering","domain":"Physical Sciences","works_count":1},{"topic_name":"Reinforcement Learning in Robotics","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Sentiment Analysis and Opinion Mining","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Emotion and Mood Recognition","subfield":"Experimental and Cognitive Psychology","field":"Psychology","domain":"Social Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Comparative Analysis of Embedding Strategies for Turkish Sentiment Analysis', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488770', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038328769?origin=resultslist', '2-s2.0-105038328769', array['Deep Learning', 'LSTM', 'NLP', 'Turkish Sentiment Analysis', 'Word2Vec']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038328769');
+update public.publications set citations = 0, keywords = array['Deep Learning', 'LSTM', 'NLP', 'Turkish Sentiment Analysis', 'Word2Vec']::text[] where scopus_eid = '2-s2.0-105038328769';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ayaulym.parmash') from public.publications where scopus_eid = '2-s2.0-105038328769' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Autonomous Mobile Robot Navigation in Multi-Room Environments Using Twin Delayed Deep Deterministic Policy Gradient (TD3)', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488749', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038347898?origin=resultslist', '2-s2.0-105038347898', array['Autnomous mobile robot navigation', 'Deep reinforcement learning', 'Multi-room navigation', 'Robot operating system']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038347898');
+update public.publications set citations = 0, keywords = array['Autnomous mobile robot navigation', 'Deep reinforcement learning', 'Multi-room navigation', 'Robot operating system']::text[] where scopus_eid = '2-s2.0-105038347898';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ayaulym.parmash') from public.publications where scopus_eid = '2-s2.0-105038347898' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Hierarchical VLM-to-TD3 Framework with Novel Object Coordinate Estimation and Persistent Spatial Memory for Semantically Guided Indoor Navigation', 2026, 'Article', 'https://doi.org/10.3390/s26154661', 'Sensors',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 0, true, 'https://www.scopus.com/pages/publications/105047164059?origin=resultslist', '2-s2.0-105047164059', array['autonomous mobile robot navigation', 'deep reinforcement learning', 'vision-based navigation', 'vision–language models']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105047164059');
+update public.publications set citations = 0, keywords = array['autonomous mobile robot navigation', 'deep reinforcement learning', 'vision-based navigation', 'vision–language models']::text[] where scopus_eid = '2-s2.0-105047164059';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ayaulym.parmash') from public.publications where scopus_eid = '2-s2.0-105047164059' on conflict do nothing;
+
+-- Azamat Zhamanov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('azamat.zhamanov', 'Azamat', 'Zhamanov', 'Azamat Zhamanov', 'Associate Professor  SDU', 'PhD', 'azamat.zhamanov@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-5547-8955', '55668391400', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Azamat+Zhamanov',
+  5, 3, 120, 7,
+  array['flipped classroom', 'natural language processing', 'computer networks', 'gamification', 'teaching methods', 'machine learning algorithms', 'natural language toolkit', 'text processing']::text[], '[{"topic_name":"Experimental Learning in Engineering","subfield":"Media Technology","field":"Engineering","domain":"Physical Sciences","works_count":3},{"topic_name":"Innovative Teaching Methods","subfield":"Education","field":"Social Sciences","domain":"Social Sciences","works_count":3},{"topic_name":"Topic Modeling","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Natural Language Processing Techniques","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Online Learning and Analytics","subfield":"Computer Science Applications","field":"Computer Science","domain":"Physical Sciences","works_count":2}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Automatic Summarizing the News from Inform.kz by Using Natural Language Processing Tools', 2021, 'Conference paper', 'https://doi.org/10.1109/SIST50301.2021.9465885', 'SIST 2021 - 2021 IEEE International Conference on Smart Information Systems and Technologies',
+  'Institute of Electrical and Electronics Engineers Inc.', 4, false, 'https://www.scopus.com/pages/publications/85113839818?origin=resultslist', '2-s2.0-85113839818', array['Machine learning algorithms', 'Natural Language Processing', 'Natural Language Toolkit', 'Text processing', 'Text summarization', 'Text tokenization']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85113839818');
+update public.publications set citations = 4, keywords = array['Machine learning algorithms', 'Natural Language Processing', 'Natural Language Toolkit', 'Text processing', 'Text summarization', 'Text tokenization']::text[] where scopus_eid = '2-s2.0-85113839818';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'azamat.zhamanov') from public.publications where scopus_eid = '2-s2.0-85113839818' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Implementing flipped classroom and gamification teaching methods into computer networks subject, by using cisco networking academy', 2016, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2015.7416890', 'Proceedings of the 2015 12th International Conference on Electronics Computer and Computation, ICECCO 2015',
+  'Institute of Electrical and Electronics Engineers Inc.', 15, false, 'https://www.scopus.com/pages/publications/84964597401?origin=resultslist', '2-s2.0-84964597401', array['Computer Networks', 'Flipped Classroom', 'Gamification', 'netacad', 'Teaching Methods']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84964597401');
+update public.publications set citations = 15, keywords = array['Computer Networks', 'Flipped Classroom', 'Gamification', 'netacad', 'Teaching Methods']::text[] where scopus_eid = '2-s2.0-84964597401';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'azamat.zhamanov') from public.publications where scopus_eid = '2-s2.0-84964597401' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Question answering model construction by using transfer learning', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663846', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, false, 'https://www.scopus.com/pages/publications/85124982198?origin=resultslist', '2-s2.0-85124982198', array['Bidirctionl Encodr', 'Deep Learning', 'Fine-Tuning', 'Natural Language Processing', 'Question Answering System', 'Transfer Learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124982198');
+update public.publications set citations = 2, keywords = array['Bidirctionl Encodr', 'Deep Learning', 'Fine-Tuning', 'Natural Language Processing', 'Question Answering System', 'Transfer Learning']::text[] where scopus_eid = '2-s2.0-85124982198';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'azamat.zhamanov') from public.publications where scopus_eid = '2-s2.0-85124982198' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'IoT smart campus review and implementation of IoT applications into education process of university', 2017, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2017.8333334', '2017 13th International Conference on Electronics, Computer and Computation, ICECCO 2017',
+  'Institute of Electrical and Electronics Engineers Inc.', 67, false, 'https://www.scopus.com/pages/publications/85050521118?origin=resultslist', '2-s2.0-85050521118', array['computer networks', 'education', 'Flipped Classroom', 'IoT', 'university']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85050521118');
+update public.publications set citations = 67, keywords = array['computer networks', 'education', 'Flipped Classroom', 'IoT', 'university']::text[] where scopus_eid = '2-s2.0-85050521118';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'azamat.zhamanov') from public.publications where scopus_eid = '2-s2.0-85050521118' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Implementation and evaluation of flipped classroom as IoT element into learning process of computer network education', 2018, 'Article', 'https://doi.org/10.4018/IJICTE.2018040103', 'International Journal of Information and Communication Technology Education',
+  'IGI Global', 21, false, 'https://www.scopus.com/pages/publications/85060578669?origin=resultslist', '2-s2.0-85060578669', array['Computer network education', 'Flipped classroom', 'Gamification', 'IoT element', 'Learning process', 'Smart devices', 'Teaching methods', 'Traditional learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85060578669');
+update public.publications set citations = 21, keywords = array['Computer network education', 'Flipped classroom', 'Gamification', 'IoT element', 'Learning process', 'Smart devices', 'Teaching methods', 'Traditional learning']::text[] where scopus_eid = '2-s2.0-85060578669';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'azamat.zhamanov') from public.publications where scopus_eid = '2-s2.0-85060578669' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of Method to Predict Career Choice of IT Students in Kazakhstan by Applying Machine Learning Methods', 2025, 'Article', 'https://doi.org/10.18196/jrc.v6i1.25558', 'Journal of Robotics and Control (JRC)',
+  'Department of Agribusiness, Universitas Muhammadiyah Yogyakarta', 5, true, 'https://www.scopus.com/pages/publications/105000651110?origin=resultslist', '2-s2.0-105000651110', array['Artificial Intelligence in Education', 'Educational Prediction', 'Machine Learning in Education', 'Prediction Systems in Education']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105000651110');
+update public.publications set citations = 5, keywords = array['Artificial Intelligence in Education', 'Educational Prediction', 'Machine Learning in Education', 'Prediction Systems in Education']::text[] where scopus_eid = '2-s2.0-105000651110';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'azamat.zhamanov') from public.publications where scopus_eid = '2-s2.0-105000651110' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Computer networks teaching by microlearning principles', 2013, 'Conference paper', 'https://doi.org/10.1088/1742-6596/423/1/012028', 'Journal of Physics: Conference Series',
+  'Institute of Physics Publishing', 6, true, 'https://www.scopus.com/pages/publications/84876848940?origin=resultslist', '2-s2.0-84876848940', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84876848940');
+update public.publications set citations = 6, keywords = array[]::text[] where scopus_eid = '2-s2.0-84876848940';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'azamat.zhamanov') from public.publications where scopus_eid = '2-s2.0-84876848940' on conflict do nothing;
+
+-- Aziza Aipenova
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('aziza.aipenova', 'Aziza', 'Aipenova', 'Aziza Aipenova', 'Associate Professor  SDU', 'PhD', 'aziza.aipenova@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-5104-7429', '56295076700', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Aziza+Aipenova',
+  0, 0, 0, 1,
+  array['healthcare development', 'medical services', 'quality of medical services']::text[], '[{"topic_name":"Statistical Methods and Inference","subfield":"Statistics and Probability","field":"Mathematics","domain":"Physical Sciences","works_count":4},{"topic_name":"Bayesian Methods and Mixture Models","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":3},{"topic_name":"Child and Adolescent Psychosocial and Emotional Development","subfield":"Clinical Psychology","field":"Psychology","domain":"Social Sciences","works_count":1},{"topic_name":"Statistical Methods and Bayesian Inference","subfield":"Statistics and Probability","field":"Mathematics","domain":"Physical Sciences","works_count":1},{"topic_name":"Genetic and phenotypic traits in livestock","subfield":"Genetics","field":"Biochemistry, Genetics and Molecular Biology","domain":"Life Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The analysis of indexes quality of a healthcare in Kazakhstan', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634681', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85062878115?origin=resultslist', '2-s2.0-85062878115', array['Healthcare development', 'Medical services', 'Quality of medical services']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062878115');
+update public.publications set citations = 0, keywords = array['Healthcare development', 'Medical services', 'Quality of medical services']::text[] where scopus_eid = '2-s2.0-85062878115';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'aziza.aipenova') from public.publications where scopus_eid = '2-s2.0-85062878115' on conflict do nothing;
+
+-- Bakhtiyor Meraliyev
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('bakhtiyor.meraliyev', 'Bakhtiyor', 'Meraliyev', 'Bakhtiyor Meraliyev', 'Senior Lecturer', 'Master', 'bakhtiyor.meraliyev@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-5640-4966', '57238603500', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Bakhtiyor+Meraliyev',
+  2, 1, 23, 10,
+  array['machine learning', 'natural language processing', 'artificial intelligence', 'hr', 'attention mechanism', 'bert', 'multimodal deep learning', 'social media analytics']::text[], '[{"topic_name":"Emotion and Mood Recognition","subfield":"Experimental and Cognitive Psychology","field":"Psychology","domain":"Social Sciences","works_count":4},{"topic_name":"Mental Health via Writing","subfield":"Social Psychology","field":"Psychology","domain":"Social Sciences","works_count":3},{"topic_name":"Suicide and Self-Harm Studies","subfield":"Clinical Psychology","field":"Psychology","domain":"Social Sciences","works_count":2},{"topic_name":"Artificial Intelligence in Healthcare","subfield":"Health Information Management","field":"Health Professions","domain":"Health Sciences","works_count":2},{"topic_name":"Artificial Intelligence in Healthcare and Education","subfield":"Health Informatics","field":"Medicine","domain":"Health Sciences","works_count":2}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of Multimodal Neural Network for Suicidal Ideation Detection Using Kazakh-Russian BERT and Attention Mechanism', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488771', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038367927?origin=resultslist', '2-s2.0-105038367927', array['Attention Mechanism', 'BERT', 'Multimodal Deep Learning', 'Natural Language Processing', 'Social Media Analytics', 'Suicidal Ideation Detection']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038367927');
+update public.publications set citations = 0, keywords = array['Attention Mechanism', 'BERT', 'Multimodal Deep Learning', 'Natural Language Processing', 'Social Media Analytics', 'Suicidal Ideation Detection']::text[] where scopus_eid = '2-s2.0-105038367927';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bakhtiyor.meraliyev') from public.publications where scopus_eid = '2-s2.0-105038367927' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Using Machine Learning to Predict Arterial Hypertension from a Clinical Dataset', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488787', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038369904?origin=resultslist', '2-s2.0-105038369904', array['arterial hypertension', 'cardiovascular risk prediction', 'clinical decision support', 'Kazakhstan', 'machine learning', 'XGBoost']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038369904');
+update public.publications set citations = 0, keywords = array['arterial hypertension', 'cardiovascular risk prediction', 'clinical decision support', 'Kazakhstan', 'machine learning', 'XGBoost']::text[] where scopus_eid = '2-s2.0-105038369904';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bakhtiyor.meraliyev') from public.publications where scopus_eid = '2-s2.0-105038369904' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of an AI-Based Communication Fraud Detection System', 2025, 'Article', 'https://doi.org/10.18576/amis/190419', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 7, false, 'https://www.scopus.com/pages/publications/105009436098?origin=resultslist', '2-s2.0-105009436098', array['AI fraud', 'Detecting fraud', 'fraud detection', 'fraud in messages', 'fraud in phone']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105009436098');
+update public.publications set citations = 7, keywords = array['AI fraud', 'Detecting fraud', 'fraud detection', 'fraud in messages', 'fraud in phone']::text[] where scopus_eid = '2-s2.0-105009436098';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bakhtiyor.meraliyev') from public.publications where scopus_eid = '2-s2.0-105009436098' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The Automated Method of Collecting and Labeling Data for Speech Emotion Recognition based on Face Emotion Recognition', 2025, 'Article', 'https://doi.org/10.18576/amis/190508', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 2, false, 'https://www.scopus.com/pages/publications/105022158868?origin=resultslist', '2-s2.0-105022158868', array['Face emotion recognition', 'labeling', 'machine learning', 'speech emotion recognition']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105022158868');
+update public.publications set citations = 2, keywords = array['Face emotion recognition', 'labeling', 'machine learning', 'speech emotion recognition']::text[] where scopus_eid = '2-s2.0-105022158868';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bakhtiyor.meraliyev') from public.publications where scopus_eid = '2-s2.0-105022158868' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Content Analysis of Extracted Suicide Texts from Social Media Networks by Using Natural Language Processing and Machine Learning Techniques', 2021, 'Conference paper', 'https://doi.org/10.1109/SIST50301.2021.9466001', 'SIST 2021 - 2021 IEEE International Conference on Smart Information Systems and Technologies',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85113863332?origin=resultslist', '2-s2.0-85113863332', array['machine learning', 'natural language processing', 'social networks', 'suicide recognition']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85113863332');
+update public.publications set citations = 1, keywords = array['machine learning', 'natural language processing', 'social networks', 'suicide recognition']::text[] where scopus_eid = '2-s2.0-85113863332';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bakhtiyor.meraliyev') from public.publications where scopus_eid = '2-s2.0-85113863332' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Multimodal Deep Neural Network for Suicide Risk Classification Using Audio and Facial Features', 2026, 'Article', 'https://doi.org/10.18576/amis/200418', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 0, false, 'https://www.scopus.com/pages/publications/105046819976?origin=resultslist', '2-s2.0-105046819976', array['deep learning', 'MFCC', 'multimodal fusion', 'suicide classification', 'VGG16']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105046819976');
+update public.publications set citations = 0, keywords = array['deep learning', 'MFCC', 'multimodal fusion', 'suicide classification', 'VGG16']::text[] where scopus_eid = '2-s2.0-105046819976';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bakhtiyor.meraliyev') from public.publications where scopus_eid = '2-s2.0-105046819976' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Automated Chunking of Clinical Video Interviews: A Case Study in Multimodal Suicide Risk Assessment', 2026, 'Conference paper', 'https://doi.org/10.1109/CAI68641.2026.11536217', '2026 IEEE Conference on Artificial Intelligence, CAI 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105042116505?origin=resultslist', '2-s2.0-105042116505', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105042116505');
+update public.publications set citations = 0, keywords = array[]::text[] where scopus_eid = '2-s2.0-105042116505';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bakhtiyor.meraliyev') from public.publications where scopus_eid = '2-s2.0-105042116505' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Computer Vision Supported Investigation on Anxiety-Success Relationship in Educational Processes', 2021, 'Conference paper', 'https://doi.org/10.1109/SIST50301.2021.9465880', 'SIST 2021 - 2021 IEEE International Conference on Smart Information Systems and Technologies',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85113853879?origin=resultslist', '2-s2.0-85113853879', array['anxietysuccess relationship', 'Emotion recognition', 'online proctoring']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85113853879');
+update public.publications set citations = 0, keywords = array['anxietysuccess relationship', 'Emotion recognition', 'online proctoring']::text[] where scopus_eid = '2-s2.0-85113853879';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bakhtiyor.meraliyev') from public.publications where scopus_eid = '2-s2.0-85113853879' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Machine Learning as an effective tool for Human Resource management in recruiting process in the higher educational field', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147133', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 11, false, 'https://www.scopus.com/pages/publications/85163776566?origin=resultslist', '2-s2.0-85163776566', array['acceptance', 'artificial intelligence', 'candidates', 'hiring process', 'HR', 'Machine learning', 're-sume', 'recruitment', 'technology']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163776566');
+update public.publications set citations = 11, keywords = array['acceptance', 'artificial intelligence', 'candidates', 'hiring process', 'HR', 'Machine learning', 're-sume', 'recruitment', 'technology']::text[] where scopus_eid = '2-s2.0-85163776566';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bakhtiyor.meraliyev') from public.publications where scopus_eid = '2-s2.0-85163776566' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Attrition Rate Measuring in Human Resource Analytics Using Machine Learning', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10146602', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, false, 'https://www.scopus.com/pages/publications/85163776681?origin=resultslist', '2-s2.0-85163776681', array['artificial intelligence', 'employee quitting', 'HR', 'Machine Learning', 'predicting', 'staff planning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163776681');
+update public.publications set citations = 2, keywords = array['artificial intelligence', 'employee quitting', 'HR', 'Machine Learning', 'predicting', 'staff planning']::text[] where scopus_eid = '2-s2.0-85163776681';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bakhtiyor.meraliyev') from public.publications where scopus_eid = '2-s2.0-85163776681' on conflict do nothing;
+
+-- Batyr Sharimbayev
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('batyr.sharimbayev', 'Batyr', 'Sharimbayev', 'Batyr Sharimbayev', 'Lecturer', 'Master', 'batyr.sharimbayev@sdu.edu.kz',
+  null, 'https://orcid.org/0009-0006-3323-231X', '59566921100', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Batyr+Sharimbayev',
+  3, 0, 22, 8,
+  array['machine learning', 'text classification', 'large language models', 'ai-generated text', 'transformers', 'deep learning', 'lstm', 'data sovereignty']::text[], '[{"topic_name":"Topic Modeling","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":5},{"topic_name":"Text and Document Classification Technologies","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":4},{"topic_name":"Hate Speech and Cyberbullying Detection","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":3},{"topic_name":"Authorship Attribution and Profiling","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":3},{"topic_name":"Artificial Intelligence in Healthcare and Education","subfield":"Health Informatics","field":"Medicine","domain":"Health Sciences","works_count":2}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Personalized Federated Learning for Sovereign Personal AI Agents: A Review', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488769', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/105038345621?origin=resultslist', '2-s2.0-105038345621', array['Data Sovereignty', 'Edge AI', 'Large Language Models', 'Personalized Federated Learning', 'Privacy Preservation', 'Sovereign AI']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038345621');
+update public.publications set citations = 1, keywords = array['Data Sovereignty', 'Edge AI', 'Large Language Models', 'Personalized Federated Learning', 'Privacy Preservation', 'Sovereign AI']::text[] where scopus_eid = '2-s2.0-105038345621';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'batyr.sharimbayev') from public.publications where scopus_eid = '2-s2.0-105038345621' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Testing the Limits: Evaluating AI Detectors’ Accuracy and the Impact of Obfuscation Techniques on AI-Generated Text', 2026, 'Article', 'https://doi.org/10.12720/jait.17.3.438-449', 'Journal of Advances in Information Technology',
+  'Engineering and Technology Publishing', 1, true, 'https://www.scopus.com/pages/publications/105033040489?origin=resultslist', '2-s2.0-105033040489', array['academic integrity', 'AI detection tools', 'ethical implications', 'large language models', 'obfuscation techniques']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105033040489');
+update public.publications set citations = 1, keywords = array['academic integrity', 'AI detection tools', 'ethical implications', 'large language models', 'obfuscation techniques']::text[] where scopus_eid = '2-s2.0-105033040489';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'batyr.sharimbayev') from public.publications where scopus_eid = '2-s2.0-105033040489' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Cross-Lingual Detection of Machine-Generated Text Using Multilingual Transformers and Balanced Data', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488773', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038354879?origin=resultslist', '2-s2.0-105038354879', array['AI-generated text', 'cross-lingual detection', 'mBERT', 'mDeBERTa', 'transformers', 'XLM-RoBERTa']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038354879');
+update public.publications set citations = 0, keywords = array['AI-generated text', 'cross-lingual detection', 'mBERT', 'mDeBERTa', 'transformers', 'XLM-RoBERTa']::text[] where scopus_eid = '2-s2.0-105038354879';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'batyr.sharimbayev') from public.publications where scopus_eid = '2-s2.0-105038354879' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Text Classification for AI Generated Content with Machine Learning and Deep Learning Models', 2025, 'Conference paper', 'https://doi.org/10.1109/SIST61657.2025.11139296', 'SIST 2025 - 2025 IEEE 5th International Conference on Smart Information Systems and Technologies, Conference Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/105016841572?origin=resultslist', '2-s2.0-105016841572', array['AI-generated text', 'Bi-LSTM', 'deep learning', 'DistilBERT', 'machine learning', 'text classification']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105016841572');
+update public.publications set citations = 7, keywords = array['AI-generated text', 'Bi-LSTM', 'deep learning', 'DistilBERT', 'machine learning', 'text classification']::text[] where scopus_eid = '2-s2.0-105016841572';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'batyr.sharimbayev') from public.publications where scopus_eid = '2-s2.0-105016841572' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Advancing Machine-generated Text Detection: A Comprehensive Evaluation of Transformer-based Models', 2026, 'Article', 'https://doi.org/10.12720/jait.17.7.1321-1330', 'Journal of Advances in Information Technology',
+  'Engineering and Technology Publishing', 0, true, 'https://www.scopus.com/pages/publications/105045792883?origin=resultslist', '2-s2.0-105045792883', array['AI-generated content', 'Artificial Intelligence (AI)', 'Artificial Intelligence (AI) detection', 'Bidirectional Long Short-Term Memory (BiLSTM)', 'Decoding-Enhanced Bert with Disentangled Attention (DeBERTa)', 'text classification', 'transformers']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105045792883');
+update public.publications set citations = 0, keywords = array['AI-generated content', 'Artificial Intelligence (AI)', 'Artificial Intelligence (AI) detection', 'Bidirectional Long Short-Term Memory (BiLSTM)', 'Decoding-Enhanced Bert with Disentangled Attention (DeBERTa)', 'text classification', 'transformers']::text[] where scopus_eid = '2-s2.0-105045792883';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'batyr.sharimbayev') from public.publications where scopus_eid = '2-s2.0-105045792883' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Multi-Class Detection of Humanized AI Text Using Machine Learning and Transformer Models', 2025, 'Conference paper', 'https://doi.org/10.1109/ICCIKE67021.2025.11318272', '2025 International Conference on Computational Intelligence and Knowledge Economy, ICCIKE 2025',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/105032669978?origin=resultslist', '2-s2.0-105032669978', array['AI-generated text detection', 'DeBERTa', 'deep learning', 'humanized AI text', 'LSTM', 'machine learning', 'natural language processing', 'text classification']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105032669978');
+update public.publications set citations = 5, keywords = array['AI-generated text detection', 'DeBERTa', 'deep learning', 'humanized AI text', 'LSTM', 'machine learning', 'natural language processing', 'text classification']::text[] where scopus_eid = '2-s2.0-105032669978';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'batyr.sharimbayev') from public.publications where scopus_eid = '2-s2.0-105032669978' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Artificial intelligence and teacher competence: a scoping review of assessment, analytics, and professional development', 2026, 'Review', 'https://doi.org/10.3389/frai.2026.1901449', 'Frontiers in Artificial Intelligence',
+  'Frontiers Media SA', 0, true, 'https://www.scopus.com/pages/publications/105048043829?origin=resultslist', '2-s2.0-105048043829', array['artificial intelligence', 'learning analytics', 'machine learning', 'teacher competency', 'teacher professional development']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105048043829');
+update public.publications set citations = 0, keywords = array['artificial intelligence', 'learning analytics', 'machine learning', 'teacher competency', 'teacher professional development']::text[] where scopus_eid = '2-s2.0-105048043829';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'batyr.sharimbayev') from public.publications where scopus_eid = '2-s2.0-105048043829' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Automatic Language Identification from Audio Signals using LSTM-RNN', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10146603', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 8, false, 'https://www.scopus.com/pages/publications/85163774916?origin=resultslist', '2-s2.0-85163774916', array['Audio Signals', 'Language Identification', 'LSTM', 'RNN']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163774916');
+update public.publications set citations = 8, keywords = array['Audio Signals', 'Language Identification', 'LSTM', 'RNN']::text[] where scopus_eid = '2-s2.0-85163774916';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'batyr.sharimbayev') from public.publications where scopus_eid = '2-s2.0-85163774916' on conflict do nothing;
+
+-- Bauirzhan Berlikozha
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('bauirzhan.berlikozha', 'Bauirzhan', 'Berlikozha', 'Bauirzhan Berlikozha', 'Senior Lecturer', 'PhD', 'bauirzhan.berlikozha@sdu.edu.kz',
+  null, null, '59702974900', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Bauirzhan+Berlikozha',
+  2, 0, 10, 4,
+  array['cnn-bilstm architecture', 'hybrid deep learning models', 'mobile app reviews', 'model interpretability', 'resource-efficient nlp', 'sentiment analysis', 'blockchain', 'career path recommendation']::text[], '[{"topic_name":"Cybersecurity and Information Systems","subfield":"Computer Networks and Communications","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Advanced Data Processing Techniques","subfield":"Control and Systems Engineering","field":"Engineering","domain":"Physical Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Resource-efficient Sentiment Classification of App Reviews Using a CNN-BiLSTM Hybrid Model', 2025, 'Article', 'https://doi.org/10.12928/biste.v7i3.13954', 'Buletin Ilmiah Sarjana Teknik Elektro',
+  'Universitas Ahmad Dahlan', 3, false, 'https://www.scopus.com/pages/publications/105019513933?origin=resultslist', '2-s2.0-105019513933', array['CNN-BiLSTM Architecture', 'Hybrid Deep Learning Models', 'Mobile App Reviews', 'Model Interpretability', 'Resource-efficient NLP', 'Sentiment Analysis']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105019513933');
+update public.publications set citations = 3, keywords = array['CNN-BiLSTM Architecture', 'Hybrid Deep Learning Models', 'Mobile App Reviews', 'Model Interpretability', 'Resource-efficient NLP', 'Sentiment Analysis']::text[] where scopus_eid = '2-s2.0-105019513933';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauirzhan.berlikozha') from public.publications where scopus_eid = '2-s2.0-105019513933' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Intelligent Career Path Recommendations Leveraging Blockchain and Machine Learning', 2025, 'Conference paper', 'https://doi.org/10.1109/SIST61657.2025.11139304', 'SIST 2025 - 2025 IEEE 5th International Conference on Smart Information Systems and Technologies, Conference Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, false, 'https://www.scopus.com/pages/publications/105016843011?origin=resultslist', '2-s2.0-105016843011', array['blockchain', 'career path recommendation', 'data integrity', 'higher education', 'machine learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105016843011');
+update public.publications set citations = 2, keywords = array['blockchain', 'career path recommendation', 'data integrity', 'higher education', 'machine learning']::text[] where scopus_eid = '2-s2.0-105016843011';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauirzhan.berlikozha') from public.publications where scopus_eid = '2-s2.0-105016843011' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Personalized Federated Learning Systems for Secure and Private Analysis of Patient Medical Records', 2026, 'Conference paper', 'https://doi.org/10.1109/ICCSDFAI70505.2026.11648033', '2026 International Conference on Cybersecurity, Digital Forensics, and AI Applications, ICCSDFAI 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105049057098?origin=resultslist', '2-s2.0-105049057098', array['differential privacy', 'EHR cybersecurity', 'Federated learning security', 'FedPer', 'gradient inversion', 'medical record protection', 'membership inference', 'patient data privacy', 'secure aggregation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105049057098');
+update public.publications set citations = 0, keywords = array['differential privacy', 'EHR cybersecurity', 'Federated learning security', 'FedPer', 'gradient inversion', 'medical record protection', 'membership inference', 'patient data privacy', 'secure aggregation']::text[] where scopus_eid = '2-s2.0-105049057098';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauirzhan.berlikozha') from public.publications where scopus_eid = '2-s2.0-105049057098' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of Method to Predict Career Choice of IT Students in Kazakhstan by Applying Machine Learning Methods', 2025, 'Article', 'https://doi.org/10.18196/jrc.v6i1.25558', 'Journal of Robotics and Control (JRC)',
+  'Department of Agribusiness, Universitas Muhammadiyah Yogyakarta', 5, true, 'https://www.scopus.com/pages/publications/105000651110?origin=resultslist', '2-s2.0-105000651110', array['Artificial Intelligence in Education', 'Educational Prediction', 'Machine Learning in Education', 'Prediction Systems in Education']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105000651110');
+update public.publications set citations = 5, keywords = array['Artificial Intelligence in Education', 'Educational Prediction', 'Machine Learning in Education', 'Prediction Systems in Education']::text[] where scopus_eid = '2-s2.0-105000651110';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauirzhan.berlikozha') from public.publications where scopus_eid = '2-s2.0-105000651110' on conflict do nothing;
+
+-- Bauyrzhan Sartayev
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('bauyrzhan.sartayev', 'Bauyrzhan', 'Sartayev', 'Bauyrzhan Sartayev', 'Associate Professor  SDU', 'PhD', 'bauyrzhan.sartayev@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-4014-8857', '57210558545', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Bauyrzhan+Sartayev',
+  8, 7, 149, 18,
+  array['polynomial identities', 'operad', 'identity', 'poisson algebra', 'free algebra', 'novikov algebra', 'gröbner bases', 'differential algebra']::text[], '[{"topic_name":"Advanced Topics in Algebra","subfield":"Algebra and Number Theory","field":"Mathematics","domain":"Physical Sciences","works_count":33},{"topic_name":"Algebraic structures and combinatorial models","subfield":"Geometry and Topology","field":"Mathematics","domain":"Physical Sciences","works_count":28},{"topic_name":"Homotopy and Cohomology in Algebraic Topology","subfield":"Mathematical Physics","field":"Mathematics","domain":"Physical Sciences","works_count":18},{"topic_name":"Advanced Algebra and Logic","subfield":"Computational Theory and Mathematics","field":"Computer Science","domain":"Physical Sciences","works_count":6},{"topic_name":"Rings, Modules, and Algebras","subfield":"Algebra and Number Theory","field":"Mathematics","domain":"Physical Sciences","works_count":4}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Free products of operads and Gröbner base of some operads', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147149', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85163718677?origin=resultslist', '2-s2.0-85163718677', array['Algebraic and Scientific Computation', 'Gröbner bases', 'Operads Free algebras', 'polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163718677');
+update public.publications set citations = 1, keywords = array['Algebraic and Scientific Computation', 'Gröbner bases', 'Operads Free algebras', 'polynomial identities']::text[] where scopus_eid = '2-s2.0-85163718677';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-85163718677' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Free special Gelfand-Dorfman algebra', 2023, 'Article', 'https://doi.org/10.1142/S0219498825500057', 'Journal of Algebra and its Applications',
+  'World Scientific', 4, false, 'https://www.scopus.com/pages/publications/85168985401?origin=resultslist', '2-s2.0-85168985401', array['Differential algebra', 'Gelfand-Dorfman algebra', 'identity', 'Poisson algebra']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85168985401');
+update public.publications set citations = 4, keywords = array['Differential algebra', 'Gelfand-Dorfman algebra', 'identity', 'Poisson algebra']::text[] where scopus_eid = '2-s2.0-85168985401';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-85168985401' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Binary perm algebras and alternative algebras', 2026, 'Article', 'https://doi.org/10.1080/00927872.2025.2524070', 'Communications in Algebra',
+  'Taylor and Francis Ltd.', 8, false, 'https://www.scopus.com/pages/publications/105010225118?origin=resultslist', '2-s2.0-105010225118', array['Alternative algebra', 'binary algebra', 'perm algebra', 'polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105010225118');
+update public.publications set citations = 8, keywords = array['Alternative algebra', 'binary algebra', 'perm algebra', 'polynomial identities']::text[] where scopus_eid = '2-s2.0-105010225118';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-105010225118' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On the commutator in Leibniz algebras', 2022, 'Article', 'https://doi.org/10.1142/S0218196722500333', 'International Journal of Algebra and Computation',
+  'World Scientific', 3, false, 'https://www.scopus.com/pages/publications/85125532494?origin=resultslist', '2-s2.0-85125532494', array['anti-commutator', 'commutator', 'computer algebra', 'Leibniz algebras', 'polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85125532494');
+update public.publications set citations = 3, keywords = array['anti-commutator', 'commutator', 'computer algebra', 'Leibniz algebras', 'polynomial identities']::text[] where scopus_eid = '2-s2.0-85125532494';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-85125532494' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Novikov Dialgebras and Perm Algebras', 2025, 'Article', 'https://doi.org/10.1007/s41980-025-00981-5', 'Bulletin of the Iranian Mathematical Society',
+  'Springer', 4, false, 'https://www.scopus.com/pages/publications/105010657781?origin=resultslist', '2-s2.0-105010657781', array['Free algebras', 'Novikov dialgebras', 'Perm algebras', 'Polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105010657781');
+update public.publications set citations = 4, keywords = array['Free algebras', 'Novikov dialgebras', 'Perm algebras', 'Polynomial identities']::text[] where scopus_eid = '2-s2.0-105010657781';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-105010657781' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Malcev classification for the variety of associative algebras', 2026, 'Article', 'https://doi.org/10.1142/S1793557126500695', 'Asian-European Journal of Mathematics',
+  'World Scientific', 0, false, 'https://www.scopus.com/pages/publications/105042990892?origin=resultslist', '2-s2.0-105042990892', array['Associative algebra', 'free algebra', 'operad']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105042990892');
+update public.publications set citations = 0, keywords = array['Associative algebra', 'free algebra', 'operad']::text[] where scopus_eid = '2-s2.0-105042990892';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-105042990892' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Gelfand–Dorfman algebras, derived identities, and the Manin product of operads', 2019, 'Article', 'https://doi.org/10.1016/j.jalgebra.2019.07.034', 'Journal of Algebra',
+  'Academic Press Inc.', 23, true, 'https://www.scopus.com/pages/publications/85070878878?origin=resultslist', '2-s2.0-85070878878', array['Differential algebra', 'Gelfand–Dorfman algebra', 'Identity', 'Operad', 'Poisson algebra']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85070878878');
+update public.publications set citations = 23, keywords = array['Differential algebra', 'Gelfand–Dorfman algebra', 'Identity', 'Operad', 'Poisson algebra']::text[] where scopus_eid = '2-s2.0-85070878878';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-85070878878' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Some generalizations of the variety of transposed Poisson algebras', 2024, 'Article', 'https://doi.org/10.46298/cm.11346', 'Communications in Mathematics',
+  'Episciences', 30, true, 'https://www.scopus.com/pages/publications/85174792140?origin=resultslist', '2-s2.0-85174792140', array['Gelfand-Dorfman algebra', 'Poisson algebra', 'Polynomial identities', 'Transposed Poisson algebra']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85174792140');
+update public.publications set citations = 30, keywords = array['Gelfand-Dorfman algebra', 'Poisson algebra', 'Polynomial identities', 'Transposed Poisson algebra']::text[] where scopus_eid = '2-s2.0-85174792140';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-85174792140' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Identities in Differential Perm Algebras', 2026, 'Article', 'https://doi.org/10.1007/s40840-026-02200-8', 'Bulletin of the Malaysian Mathematical Sciences Society',
+  'Springer', 0, false, 'https://www.scopus.com/pages/publications/105052728620?origin=resultslist', '2-s2.0-105052728620', array['Leibniz algebra', 'Lie algebra', 'Perm algebra', 'Polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105052728620');
+update public.publications set citations = 0, keywords = array['Leibniz algebra', 'Lie algebra', 'Perm algebra', 'Polynomial identities']::text[] where scopus_eid = '2-s2.0-105052728620';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-105052728620' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On the free metabelian Novikov and metabelian Lie-admissible algebras', 2025, 'Article', 'https://doi.org/10.46298/cm.12877', 'Communications in Mathematics',
+  'Episciences', 13, true, 'https://www.scopus.com/pages/publications/85196911720?origin=resultslist', '2-s2.0-85196911720', array['free algebra', 'Lie-admissible algebra', 'metabelian identity', 'Novikov algebra', 'polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85196911720');
+update public.publications set citations = 13, keywords = array['free algebra', 'Lie-admissible algebra', 'metabelian identity', 'Novikov algebra', 'polynomial identities']::text[] where scopus_eid = '2-s2.0-85196911720';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-85196911720' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Metabelian Lie and perm algebras', 2024, 'Article', 'https://doi.org/10.1142/S0219498824500658', 'Journal of Algebra and its Applications',
+  'World Scientific', 14, false, 'https://www.scopus.com/pages/publications/85133866468?origin=resultslist', '2-s2.0-85133866468', array['Gröbner bases', 'Lie and Jordan elements', 'Perm algebras', 'polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85133866468');
+update public.publications set citations = 14, keywords = array['Gröbner bases', 'Lie and Jordan elements', 'Perm algebras', 'polynomial identities']::text[] where scopus_eid = '2-s2.0-85133866468';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-85133866468' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On the Dong Property for a binary quadratic operad', 2026, 'Article', 'https://doi.org/10.1016/j.jalgebra.2025.11.025', 'Journal of Algebra',
+  'Academic Press Inc.', 3, true, 'https://www.scopus.com/pages/publications/105024341555?origin=resultslist', '2-s2.0-105024341555', array['Dong lemma', 'Identity', 'Manin product', 'Operad']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105024341555');
+update public.publications set citations = 3, keywords = array['Dong lemma', 'Identity', 'Manin product', 'Operad']::text[] where scopus_eid = '2-s2.0-105024341555';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-105024341555' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On the embedding of left-symmetric algebras into differential Perm-algebras', 2022, 'Article', 'https://doi.org/10.1080/00927872.2022.2028798', 'Communications in Algebra',
+  'Taylor and Francis Ltd.', 15, false, 'https://www.scopus.com/pages/publications/85124909287?origin=resultslist', '2-s2.0-85124909287', array['derivation', 'dialgebra', 'identity', 'Left-symmetric algebra', 'Novikov algebra']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124909287');
+update public.publications set citations = 15, keywords = array['derivation', 'dialgebra', 'identity', 'Left-symmetric algebra', 'Novikov algebra']::text[] where scopus_eid = '2-s2.0-85124909287';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-85124909287' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Noncommutative Novikov algebras', 2023, 'Article', 'https://doi.org/10.1007/s40879-023-00632-1', 'European Journal of Mathematics',
+  'Springer Science and Business Media Deutschland GmbH', 13, true, 'https://www.scopus.com/pages/publications/85159943649?origin=resultslist', '2-s2.0-85159943649', array['Associative algebra', 'Derivation', 'Gröbner–Shirshov basis', 'Novikov algebra']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85159943649');
+update public.publications set citations = 13, keywords = array['Associative algebra', 'Derivation', 'Gröbner–Shirshov basis', 'Novikov algebra']::text[] where scopus_eid = '2-s2.0-85159943649';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-85159943649' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On algebras embeddable into bicommutative algebras', 2024, 'Article', 'https://doi.org/10.1080/00927872.2024.2358178', 'Communications in Algebra',
+  'Taylor and Francis Ltd.', 3, false, 'https://www.scopus.com/pages/publications/85195499681?origin=resultslist', '2-s2.0-85195499681', array['Bicommutative algebra', 'metabelian Lie algebra', 'speciality problem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85195499681');
+update public.publications set citations = 3, keywords = array['Bicommutative algebra', 'metabelian Lie algebra', 'speciality problem']::text[] where scopus_eid = '2-s2.0-85195499681';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-85195499681' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Basis of the free noncommutative Novikov algebra', 2025, 'Article', 'https://doi.org/10.1142/S0219498825502925', 'Journal of Algebra and its Applications',
+  'World Scientific', 2, false, 'https://www.scopus.com/pages/publications/85196546955?origin=resultslist', '2-s2.0-85196546955', array['differential associative algebra', 'free algebra', 'Novikov algebra']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85196546955');
+update public.publications set citations = 2, keywords = array['differential associative algebra', 'free algebra', 'Novikov algebra']::text[] where scopus_eid = '2-s2.0-85196546955';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-85196546955' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On the Special Identities of Gelfand–Dorfman Algebras', 2024, 'Article', 'https://doi.org/10.1080/10586458.2022.2041134', 'Experimental Mathematics',
+  'Taylor and Francis Ltd.', 11, true, 'https://www.scopus.com/pages/publications/85126741159?origin=resultslist', '2-s2.0-85126741159', array['Gelfand–Dorfman algebra', 'Gröbner basis', 'operad', 'Poisson algebra', 'special identity']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85126741159');
+update public.publications set citations = 11, keywords = array['Gelfand–Dorfman algebra', 'Gröbner basis', 'operad', 'Poisson algebra', 'special identity']::text[] where scopus_eid = '2-s2.0-85126741159';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-85126741159' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Malcev classification for the variety of left-symmetric algebras', 2026, 'Article', 'https://doi.org/10.1007/s40590-026-00882-5', 'Boletin de la Sociedad Matematica Mexicana',
+  'Springer International Publishing', 2, false, 'https://www.scopus.com/pages/publications/105034433248?origin=resultslist', '2-s2.0-105034433248', array['Free algebra', 'Left-symmetric algebra', 'Operad']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105034433248');
+update public.publications set citations = 2, keywords = array['Free algebra', 'Left-symmetric algebra', 'Operad']::text[] where scopus_eid = '2-s2.0-105034433248';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bauyrzhan.sartayev') from public.publications where scopus_eid = '2-s2.0-105034433248' on conflict do nothing;
+
+-- Bayan Bekbolat
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('bayan.bekbolat', 'Bayan', 'Bekbolat', 'Bayan Bekbolat', 'Associate Professor  SDU', 'PhD', 'bayan.bekbolat@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0003-2347-0630', '57209835933', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Bayan+Bekbolat',
+  1, 0, 2, 4,
+  array['inverse source problem', 'direct problem', 'heat equation', 'dunkl operator', 'caputo fractional derivative', 'laplace transform', 'riemann-liouville fractional derivative', 'bi-ordinal hilfer fractional derivative']::text[], '[{"topic_name":"Differential Equations and Boundary Problems","subfield":"Applied Mathematics","field":"Mathematics","domain":"Physical Sciences","works_count":11},{"topic_name":"Numerical methods in inverse problems","subfield":"Mathematical Physics","field":"Mathematics","domain":"Physical Sciences","works_count":8},{"topic_name":"Fractional Differential Equations Solutions","subfield":"Modeling and Simulation","field":"Mathematics","domain":"Physical Sciences","works_count":3},{"topic_name":"Advanced Mathematical Physics Problems","subfield":"Mathematical Physics","field":"Mathematics","domain":"Physical Sciences","works_count":3},{"topic_name":"Nonlinear Differential Equations Analysis","subfield":"Applied Mathematics","field":"Mathematics","domain":"Physical Sciences","works_count":2}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'DIRECT AND INVERSE SOURCE PROBLEMS FOR GENERALIZED FRACTIONAL DIFFERENTIAL EQUATIONS; [Жалпыланған бөлшек реттi дифференциалдық теңдеулер үшiн тура және керi есептер]; [Прямые и обратные задачи источника для обобщённых дробных дифференциальных уравнений]', 2026, 'Article', 'https://doi.org/10.26577/JMMCS130220263', 'KazNU Bulletin. Mathematics, Mechanics, Computer Science Series',
+  'al-Farabi Kazakh State National University', 0, true, 'https://www.scopus.com/pages/publications/105042869690?origin=resultslist', '2-s2.0-105042869690', array['Caputo fractional derivative', 'direct problem', 'inverse source problem', 'Laplace transform', 'Riemann-Liouville fractional derivative']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105042869690');
+update public.publications set citations = 0, keywords = array['Caputo fractional derivative', 'direct problem', 'inverse source problem', 'Laplace transform', 'Riemann-Liouville fractional derivative']::text[] where scopus_eid = '2-s2.0-105042869690';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bayan.bekbolat') from public.publications where scopus_eid = '2-s2.0-105042869690' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Inverse Source Problem for Dunkl Heat Equation With bi-ordinal Hilfer Fractional Derivative', 2026, 'Article', 'https://doi.org/10.1007/s11785-025-01866-5', 'Complex Analysis and Operator Theory',
+  'Birkhauser', 0, false, 'https://www.scopus.com/pages/publications/105023532105?origin=resultslist', '2-s2.0-105023532105', array['Bi-ordinal Hilfer fractional derivative', 'Dunk operator', 'Heat equation', 'Inverse source problem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105023532105');
+update public.publications set citations = 0, keywords = array['Bi-ordinal Hilfer fractional derivative', 'Dunk operator', 'Heat equation', 'Inverse source problem']::text[] where scopus_eid = '2-s2.0-105023532105';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bayan.bekbolat') from public.publications where scopus_eid = '2-s2.0-105023532105' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The heat equation for singular Dunkl–Laplacian operator', 2025, 'Article', 'https://doi.org/10.1515/gmj-2025-2019', 'Georgian Mathematical Journal',
+  'Walter de Gruyter GmbH', 2, false, 'https://www.scopus.com/pages/publications/105001642348?origin=resultslist', '2-s2.0-105001642348', array['direct problem', 'Dunkl operator', 'heat equation', 'inverse source problem', 'singular Laplacian']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105001642348');
+update public.publications set citations = 2, keywords = array['direct problem', 'Dunkl operator', 'heat equation', 'inverse source problem', 'singular Laplacian']::text[] where scopus_eid = '2-s2.0-105001642348';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bayan.bekbolat') from public.publications where scopus_eid = '2-s2.0-105001642348' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Boundedness of the pseudo-differential operators generated by 1D-Dunkl operator', 2026, 'Article', 'https://doi.org/10.31489/2026m1/87-102', 'Bulletin of the Karaganda University. Mathematics Series',
+  'E.A. Buketov Karaganda University Publish house', 0, true, 'https://www.scopus.com/pages/publications/105035427113?origin=resultslist', '2-s2.0-105035427113', array['boundedness results', 'composition of pseudo-differential operators', 'Dunkl analysis', 'Dunkl kernel', 'Dunkl operator', 'Dunkl transform', 'inverse Dunkl transform', 'pseudo-differential operators']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105035427113');
+update public.publications set citations = 0, keywords = array['boundedness results', 'composition of pseudo-differential operators', 'Dunkl analysis', 'Dunkl kernel', 'Dunkl operator', 'Dunkl transform', 'inverse Dunkl transform', 'pseudo-differential operators']::text[] where scopus_eid = '2-s2.0-105035427113';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bayan.bekbolat') from public.publications where scopus_eid = '2-s2.0-105035427113' on conflict do nothing;
+
+-- Bekzat Zhakhayev
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('bekzat.zhakhayev', 'Bekzat', 'Zhakhayev', 'Bekzat Zhakhayev', 'Assistant Professor SDU', 'PhD', 'bekzat.zhakhayev@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-8694-5202', '57201358968', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Bekzat+Zhakhayev',
+  3, 1, 24, 3,
+  array['bicommutative superalgebras', 'cocharacters', 'codimensions', 'free bicommutative superalgebras', 'gröbner-shirshov basis', 'hilbert basissatz', 'hilbert series', 'specht property']::text[], '[{"topic_name":"Advanced Topics in Algebra","subfield":"Algebra and Number Theory","field":"Mathematics","domain":"Physical Sciences","works_count":10},{"topic_name":"Algebraic structures and combinatorial models","subfield":"Geometry and Topology","field":"Mathematics","domain":"Physical Sciences","works_count":6},{"topic_name":"Homotopy and Cohomology in Algebraic Topology","subfield":"Mathematical Physics","field":"Mathematics","domain":"Physical Sciences","works_count":3},{"topic_name":"Rings, Modules, and Algebras","subfield":"Algebra and Number Theory","field":"Mathematics","domain":"Physical Sciences","works_count":2},{"topic_name":"Advanced Algebra and Logic","subfield":"Computational Theory and Mathematics","field":"Computer Science","domain":"Physical Sciences","works_count":2}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Free bicommutative superalgebras', 2024, 'Article', 'https://doi.org/10.1016/j.jalgebra.2024.04.007', 'Journal of Algebra',
+  'Academic Press Inc.', 5, true, 'https://www.scopus.com/pages/publications/85192333675?origin=resultslist', '2-s2.0-85192333675', array['Bicommutative superalgebras', 'Cocharacters', 'Codimensions', 'Free bicommutative superalgebras', 'Gröbner-Shirshov basis', 'Hilbert Basissatz', 'Hilbert series', 'Specht property']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85192333675');
+update public.publications set citations = 5, keywords = array['Bicommutative superalgebras', 'Cocharacters', 'Codimensions', 'Free bicommutative superalgebras', 'Gröbner-Shirshov basis', 'Hilbert Basissatz', 'Hilbert series', 'Specht property']::text[] where scopus_eid = '2-s2.0-85192333675';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bekzat.zhakhayev') from public.publications where scopus_eid = '2-s2.0-85192333675' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Noetherianity and Specht problem for varieties of bicommutative algebras', 2018, 'Article', 'https://doi.org/10.1016/j.jalgebra.2017.12.012', 'Journal of Algebra',
+  'Academic Press Inc.', 16, true, 'https://www.scopus.com/pages/publications/85044446657?origin=resultslist', '2-s2.0-85044446657', array['Free bicommutative algebras', 'Specht problem', 'Varieties of bicommutative algebras', 'Weak noetherianity']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85044446657');
+update public.publications set citations = 16, keywords = array['Free bicommutative algebras', 'Specht problem', 'Varieties of bicommutative algebras', 'Weak noetherianity']::text[] where scopus_eid = '2-s2.0-85044446657';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bekzat.zhakhayev') from public.publications where scopus_eid = '2-s2.0-85044446657' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Assosymmetric operad', 2022, 'Article', 'https://doi.org/10.46298/cm.9740', 'Communications in Mathematics',
+  'Episciences', 3, true, 'https://www.scopus.com/pages/publications/85165215425?origin=resultslist', '2-s2.0-85165215425', array['Cocharacter', 'Codimension', 'Colength', 'Free assosymmetric algebras', 'Specht module', 'Weyl module']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85165215425');
+update public.publications set citations = 3, keywords = array['Cocharacter', 'Codimension', 'Colength', 'Free assosymmetric algebras', 'Specht module', 'Weyl module']::text[] where scopus_eid = '2-s2.0-85165215425';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bekzat.zhakhayev') from public.publications where scopus_eid = '2-s2.0-85165215425' on conflict do nothing;
+
+-- Binara Imankulova
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('binara.imankulova', 'Binara', 'Imankulova', 'Binara Imankulova', 'Senior Lecturer', 'Master', 'binara.imankulova@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-6488-6950', '59806789100', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Binara+Imankulova',
+  2, 0, 4, 3,
+  array['indoor air quality', 'internet of things', 'low-cost prototype', 'monitoring system', 'pollution level', 'data provenance', 'internet of things (iot)', 'iot security']::text[], '[{"topic_name":"Air Quality Monitoring and Forecasting","subfield":"Environmental Engineering","field":"Environmental Science","domain":"Physical Sciences","works_count":3},{"topic_name":"IoT Networks and Protocols","subfield":"Electrical and Electronic Engineering","field":"Engineering","domain":"Physical Sciences","works_count":2},{"topic_name":"Water Quality Monitoring Technologies","subfield":"Water Science and Technology","field":"Environmental Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Traffic Prediction and Management Techniques","subfield":"Building and Construction","field":"Engineering","domain":"Physical Sciences","works_count":1},{"topic_name":"Human Mobility and Location-Based Analysis","subfield":"Transportation","field":"Social Sciences","domain":"Social Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'IoT-based real-time indoor air quality monitoring and web server management system using Raspberry Pi', 2025, 'Conference paper', null, 'CEUR Workshop Proceedings',
+  'CEUR-WS', 2, false, 'https://www.scopus.com/pages/publications/105006918704?origin=resultslist', '2-s2.0-105006918704', array['Indoor air quality', 'Internet of Things', 'low-cost prototype', 'monitoring system', 'pollution level']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105006918704');
+update public.publications set citations = 2, keywords = array['Indoor air quality', 'Internet of Things', 'low-cost prototype', 'monitoring system', 'pollution level']::text[] where scopus_eid = '2-s2.0-105006918704';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'binara.imankulova') from public.publications where scopus_eid = '2-s2.0-105006918704' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Tracing Data Origins in Smart Cities: An IoT Perspective', 2025, 'Article', 'https://doi.org/10.1109/ACCESS.2025.3591277', 'IEEE Access',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, true, 'https://www.scopus.com/pages/publications/105011621870?origin=resultslist', '2-s2.0-105011621870', array['Data provenance', 'Internet of Things (IoT)', 'IoT security', 'provenance technologies', 'smart city']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105011621870');
+update public.publications set citations = 2, keywords = array['Data provenance', 'Internet of Things (IoT)', 'IoT security', 'provenance technologies', 'smart city']::text[] where scopus_eid = '2-s2.0-105011621870';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'binara.imankulova') from public.publications where scopus_eid = '2-s2.0-105011621870' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Patient’s Condition Classification Using Drug Reviews with NLP', 2025, 'Conference paper', 'https://doi.org/10.1007/978-3-031-82881-2_16', 'Lecture Notes in Networks and Systems',
+  'Springer Science and Business Media Deutschland GmbH', 0, false, 'https://www.scopus.com/pages/publications/105004637479?origin=resultslist', '2-s2.0-105004637479', array['Drug reviews', 'Multinomial Naive Bayes', 'Natural language processing', 'Passive aggressive classifier', 'Patient condition classification', 'TF-IDF']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105004637479');
+update public.publications set citations = 0, keywords = array['Drug reviews', 'Multinomial Naive Bayes', 'Natural language processing', 'Passive aggressive classifier', 'Patient condition classification', 'TF-IDF']::text[] where scopus_eid = '2-s2.0-105004637479';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'binara.imankulova') from public.publications where scopus_eid = '2-s2.0-105004637479' on conflict do nothing;
+
+-- Bizhigit Sagidolla
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('bizhigit.sagidolla', 'Bizhigit', 'Sagidolla', 'Bizhigit Sagidolla', 'Lecturer', 'Master', 'bizhigit.sagidolla@sdu.edu.kz',
+  null, 'https://orcid.org/0009-0009-3846-4701', '60168265400', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Bizhigit+Sagidolla',
+  1, 0, 1, 2,
+  array['actuarial principles', 'age stratification', 'disease dynamics', 'epidemic modeling', 'genetic algorithm', 'health insurance', 'hospitalization costs', 'parameter estimation']::text[], '[{"topic_name":"Insurance and Financial Risk Management","subfield":"Economics and Econometrics","field":"Economics, Econometrics and Finance","domain":"Social Sciences","works_count":3},{"topic_name":"Insurance, Mortality, Demography, Risk Management","subfield":"Demography","field":"Social Sciences","domain":"Social Sciences","works_count":2},{"topic_name":"Financial Risk and Volatility Modeling","subfield":"Finance","field":"Economics, Econometrics and Finance","domain":"Social Sciences","works_count":1},{"topic_name":"COVID-19 epidemiological studies","subfield":"Modeling and Simulation","field":"Mathematics","domain":"Physical Sciences","works_count":1},{"topic_name":"Stock Market Forecasting Methods","subfield":"Management Science and Operations Research","field":"Decision Sciences","domain":"Social Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A compartmental epidemic model with age stratification for insurance premium calculation', 2025, 'Article', 'https://doi.org/10.3934/mbe.2025114', 'Mathematical Biosciences and Engineering',
+  'American Institute of Mathematical Sciences', 1, true, 'https://www.scopus.com/pages/publications/105020675008?origin=resultslist', '2-s2.0-105020675008', array['actuarial principles', 'age stratification', 'disease dynamics', 'epidemic modeling', 'genetic algorithm', 'health insurance', 'hospitalization costs', 'parameter estimation', 'premium calculation', 'sensitivity analysis', 'SIRD model']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105020675008');
+update public.publications set citations = 1, keywords = array['actuarial principles', 'age stratification', 'disease dynamics', 'epidemic modeling', 'genetic algorithm', 'health insurance', 'hospitalization costs', 'parameter estimation', 'premium calculation', 'sensitivity analysis', 'SIRD model']::text[] where scopus_eid = '2-s2.0-105020675008';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bizhigit.sagidolla') from public.publications where scopus_eid = '2-s2.0-105020675008' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Deterministic solvency thresholds and RL-based premium calibration for life insurance under age-structured epidemics', 2026, 'Article', 'https://doi.org/10.3934/era.2026199', 'Electronic Research Archive',
+  'American Mathematical Society', 0, true, 'https://www.scopus.com/pages/publications/105041813865?origin=resultslist', '2-s2.0-105041813865', array['age-structured SEIRD model', 'epidemic risk modelling', 'insurance mathematics', 'life insurance solvency', 'numerical stress testing', 'premium calibration', 'reinforcement learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105041813865');
+update public.publications set citations = 0, keywords = array['age-structured SEIRD model', 'epidemic risk modelling', 'insurance mathematics', 'life insurance solvency', 'numerical stress testing', 'premium calibration', 'reinforcement learning']::text[] where scopus_eid = '2-s2.0-105041813865';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'bizhigit.sagidolla') from public.publications where scopus_eid = '2-s2.0-105041813865' on conflict do nothing;
+
+-- Cemil Turan
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('cemil.turan', 'Cemil', 'Turan', 'Cemil Turan', 'Professor SDU', 'PhD', 'cemil.turan@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-2879-2447', '56246423000', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Cemil+Turan',
+  8, 8, 202, 34,
+  array['deep learning', 'vehicle routing problem', 'system identification', 'computer vision', 'stochastic gradient descent', 'triplet loss', 'dynamic routing', 'histogram equalization']::text[], '[{"topic_name":"Speech and Audio Processing","subfield":"Signal Processing","field":"Computer Science","domain":"Physical Sciences","works_count":12},{"topic_name":"Advanced Adaptive Filtering Techniques","subfield":"Computational Mechanics","field":"Engineering","domain":"Physical Sciences","works_count":11},{"topic_name":"Blind Source Separation Techniques","subfield":"Signal Processing","field":"Computer Science","domain":"Physical Sciences","works_count":10},{"topic_name":"Currency Recognition and Detection","subfield":"Computer Vision and Pattern Recognition","field":"Computer Science","domain":"Physical Sciences","works_count":7},{"topic_name":"Face and Expression Recognition","subfield":"Computer Vision and Pattern Recognition","field":"Computer Science","domain":"Physical Sciences","works_count":6}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Sparse representation based face recognition under varying illumination', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634755', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, false, 'https://www.scopus.com/pages/publications/85062834262?origin=resultslist', '2-s2.0-85062834262', array['Principal Component Analysis', 'Sparse Representation', 'Steerable Gaussian Filter']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062834262');
+update public.publications set citations = 2, keywords = array['Principal Component Analysis', 'Sparse Representation', 'Steerable Gaussian Filter']::text[] where scopus_eid = '2-s2.0-85062834262';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85062834262' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Two-dimensional sparse LMS for image denoising', 2016, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2015.7416909', 'Proceedings of the 2015 12th International Conference on Electronics Computer and Computation, ICECCO 2015',
+  'Institute of Electrical and Electronics Engineers Inc.', 4, false, 'https://www.scopus.com/pages/publications/84964659868?origin=resultslist', '2-s2.0-84964659868', array['Image Denoising', 'Sparse Images', 'ZA-LMS Algorithm']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84964659868');
+update public.publications set citations = 4, keywords = array['Image Denoising', 'Sparse Images', 'ZA-LMS Algorithm']::text[] where scopus_eid = '2-s2.0-84964659868';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-84964659868' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Understanding Authorship Attributions of Kazakh Texts via Distance Measures', 2022, 'Conference paper', 'https://doi.org/10.1109/SIST54437.2022.9945707', 'SIST 2022 - 2022 International Conference on Smart Information Systems and Technologies, Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85143405846?origin=resultslist', '2-s2.0-85143405846', array['Authorship attribution', 'Burrows''s Delta', 'Eder''s Delta', 'Intertextual distance']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85143405846');
+update public.publications set citations = 0, keywords = array['Authorship attribution', 'Burrows''s Delta', 'Eder''s Delta', 'Intertextual distance']::text[] where scopus_eid = '2-s2.0-85143405846';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85143405846' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Pca and projection based hand gesture recognition', 2021, 'Article', null, 'Journal of Theoretical and Applied Information Technology',
+  'Little Lion Scientific', 0, false, 'https://www.scopus.com/pages/publications/85112491621?origin=resultslist', '2-s2.0-85112491621', array['Computer Vision', 'Hand Gesture Recognition', 'Human-Computer Interaction', 'kNN', 'PCA-TP', 'Sign Language', 'SRC', 'Stochastic Gradient Descent', 'Triplet Loss']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85112491621');
+update public.publications set citations = 0, keywords = array['Computer Vision', 'Hand Gesture Recognition', 'Human-Computer Interaction', 'kNN', 'PCA-TP', 'Sign Language', 'SRC', 'Stochastic Gradient Descent', 'Triplet Loss']::text[] where scopus_eid = '2-s2.0-85112491621';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85112491621' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Systematic Survey of Deep Fuzzy Computer Vision in Biomedical Research', 2024, 'Article', 'https://doi.org/10.26599/FIE.2024.9270043', 'Fuzzy Information and Engineering',
+  'Tsinghua University Press', 7, true, 'https://www.scopus.com/pages/publications/85210479085?origin=resultslist', '2-s2.0-85210479085', array['algorithm', 'artificial intellegence', 'biomedical research', 'deep learning', 'deep neural networks', 'fuzzy computer vision', 'image analysis']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85210479085');
+update public.publications set citations = 7, keywords = array['algorithm', 'artificial intellegence', 'biomedical research', 'deep learning', 'deep neural networks', 'fuzzy computer vision', 'image analysis']::text[] where scopus_eid = '2-s2.0-85210479085';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85210479085' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Robust face recognition via sparse reconstruction vector', 2017, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2017.8333342', '2017 13th International Conference on Electronics, Computer and Computation, ICECCO 2017',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/85050469126?origin=resultslist', '2-s2.0-85050469126', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85050469126');
+update public.publications set citations = 5, keywords = array[]::text[] where scopus_eid = '2-s2.0-85050469126';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85050469126' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Comprehensive Survey of Methods and Challenges of Vehicle Routing Problem with Uncertainties', 2025, 'Review', 'https://doi.org/10.3390/math13233782', 'Mathematics',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 13, true, 'https://www.scopus.com/pages/publications/105024580606?origin=resultslist', '2-s2.0-105024580606', array['demand variability', 'dynamic routing', 'reinforcement learning', 'transportation management', 'travel time variability', 'uncertainty', 'vehicle routing problem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105024580606');
+update public.publications set citations = 13, keywords = array['demand variability', 'dynamic routing', 'reinforcement learning', 'transportation management', 'travel time variability', 'uncertainty', 'vehicle routing problem']::text[] where scopus_eid = '2-s2.0-105024580606';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-105024580606' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Android Malware Classification by CNN-LSTM', 2022, 'Conference paper', 'https://doi.org/10.1109/SIST54437.2022.9945816', 'SIST 2022 - 2022 International Conference on Smart Information Systems and Technologies, Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 13, false, 'https://www.scopus.com/pages/publications/85143412246?origin=resultslist', '2-s2.0-85143412246', array['Android malware', 'CNN-LSTM', 'Deep Learning', 'Malware classification', 'Static analysis']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85143412246');
+update public.publications set citations = 13, keywords = array['Android malware', 'CNN-LSTM', 'Deep Learning', 'Malware classification', 'Static analysis']::text[] where scopus_eid = '2-s2.0-85143412246';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85143412246' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Performance Evaluation of Function-Controlled Variable Step-Size LMS in Delayed-Reference Adaptive Noise Cancellation', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488815', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038331793?origin=resultslist', '2-s2.0-105038331793', array['Adaptive filtering', 'adaptive noise cancellation', 'FCLMS algorithm', 'LMS algorithm', 'NLMS algorithm']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038331793');
+update public.publications set citations = 0, keywords = array['Adaptive filtering', 'adaptive noise cancellation', 'FCLMS algorithm', 'LMS algorithm', 'NLMS algorithm']::text[] where scopus_eid = '2-s2.0-105038331793';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-105038331793' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Recent developments in vehicle routing problem under time uncertainty: a comprehensive review', 2025, 'Article', 'https://doi.org/10.11591/eei.v14i2.8636', 'Bulletin of Electrical Engineering and Informatics',
+  'Institute of Advanced Engineering and Science', 17, true, 'https://www.scopus.com/pages/publications/85216509751?origin=resultslist', '2-s2.0-85216509751', array['Delivery optimization', 'Dynamic routing', 'Robust optimization', 'Time uncertainty', 'Vehicle routing problem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85216509751');
+update public.publications set citations = 17, keywords = array['Delivery optimization', 'Dynamic routing', 'Robust optimization', 'Time uncertainty', 'Vehicle routing problem']::text[] where scopus_eid = '2-s2.0-85216509751';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85216509751' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Computer Vision Based Pre-processing of Microscopic Images', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663812', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85124948062?origin=resultslist', '2-s2.0-85124948062', array['histogram equalization', 'Image pre-processing', 'microscopic images', 'morphological operation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124948062');
+update public.publications set citations = 0, keywords = array['histogram equalization', 'Image pre-processing', 'microscopic images', 'morphological operation']::text[] where scopus_eid = '2-s2.0-85124948062';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85124948062' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'State-of-the-Art Review of Deep Learning Methods in Fake Banknote Recognition Problem', 2024, 'Article', 'https://doi.org/10.14569/IJACSA.2024.0150185', 'International Journal of Advanced Computer Science and Applications',
+  'Science and Information Organization', 14, true, 'https://www.scopus.com/pages/publications/85185005495?origin=resultslist', '2-s2.0-85185005495', array['classification', 'detection', 'Fake banknote', 'recognition', 'review']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85185005495');
+update public.publications set citations = 14, keywords = array['classification', 'detection', 'Fake banknote', 'recognition', 'review']::text[] where scopus_eid = '2-s2.0-85185005495';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85185005495' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Plagiarism types and detection methods: a systematic survey of algorithms in text analysis', 2025, 'Review', 'https://doi.org/10.3389/fcomp.2025.1504725', 'Frontiers in Computer Science',
+  'Frontiers Media SA', 31, true, 'https://www.scopus.com/pages/publications/105001692132?origin=resultslist', '2-s2.0-105001692132', array['AI-generated content', 'machine learning', 'natural language processing', 'plagiarism detection', 'plagiarism types', 'text analysis']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105001692132');
+update public.publications set citations = 31, keywords = array['AI-generated content', 'machine learning', 'natural language processing', 'plagiarism detection', 'plagiarism types', 'text analysis']::text[] where scopus_eid = '2-s2.0-105001692132';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-105001692132' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Discovering Kazakh facial phenotype', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10146605', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85163794133?origin=resultslist', '2-s2.0-85163794133', array['Average face', 'Face detection', 'Face morphing']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163794133');
+update public.publications set citations = 0, keywords = array['Average face', 'Face detection', 'Face morphing']::text[] where scopus_eid = '2-s2.0-85163794133';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85163794133' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'An enhanced face recognition method for lighting problem', 2019, 'Conference paper', 'https://doi.org/10.1109/ICECCO48375.2019.9043199', '2019 15th International Conference on Electronics, Computer and Computation, ICECCO 2019',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, false, 'https://www.scopus.com/pages/publications/85083498167?origin=resultslist', '2-s2.0-85083498167', array['Adaptive Single Scale Retinex', 'Analysis', 'Face Recognition', 'Histogram Equalization', 'Principal Component']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85083498167');
+update public.publications set citations = 2, keywords = array['Adaptive Single Scale Retinex', 'Analysis', 'Face Recognition', 'Histogram Equalization', 'Principal Component']::text[] where scopus_eid = '2-s2.0-85083498167';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85083498167' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Overview of Deep Learning Models for Banknote Recognition', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147142', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/85163791570?origin=resultslist', '2-s2.0-85163791570', array['banknote recognition', 'convolutional neural networks (CNNs)', 'deep belief networks (DBNs)', 'deep learning models', 'recurrent neural networks (RNNs)']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163791570');
+update public.publications set citations = 7, keywords = array['banknote recognition', 'convolutional neural networks (CNNs)', 'deep belief networks (DBNs)', 'deep learning models', 'recurrent neural networks (RNNs)']::text[] where scopus_eid = '2-s2.0-85163791570';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85163791570' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select '2D face recognition using PCA and triplet similarity embedding', 2023, 'Article', 'https://doi.org/10.11591/eei.v12i1.4162', 'Bulletin of Electrical Engineering and Informatics',
+  'Institute of Advanced Engineering and Science', 4, true, 'https://www.scopus.com/pages/publications/85141357567?origin=resultslist', '2-s2.0-85141357567', array['Face recognition', 'K-nearest neighbor', 'Principal component analysis TP', 'Stochastic gradient descent', 'Triplet loss']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85141357567');
+update public.publications set citations = 4, keywords = array['Face recognition', 'K-nearest neighbor', 'Principal component analysis TP', 'Stochastic gradient descent', 'Triplet loss']::text[] where scopus_eid = '2-s2.0-85141357567';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85141357567' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Integrated Time–Cost–Risk Management in Industrial Construction: A Systematic Review and Unified Analytical Taxonomy', 2026, 'Review', 'https://doi.org/10.3390/math14173233', 'Mathematics',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 0, true, 'https://www.scopus.com/pages/publications/105050308365?origin=resultslist', '2-s2.0-105050308365', array['artificial intelligence', 'decision-support systems', 'industrial construction', 'optimization', 'systematic literature review', 'uncertainty modeling']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105050308365');
+update public.publications set citations = 0, keywords = array['artificial intelligence', 'decision-support systems', 'industrial construction', 'optimization', 'systematic literature review', 'uncertainty modeling']::text[] where scopus_eid = '2-s2.0-105050308365';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-105050308365' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A new sparse convex combination of ZA-LLMS and RZA-LLMS algorithms; [ZA-LLMS ve RZA-LLMS Algoritmalarinin Seyrek Sistemlerdeki Dişbükey Birleşimi]', 2015, 'Conference paper', 'https://doi.org/10.1109/SIU.2015.7129925', '2015 23rd Signal Processing and Communications Applications Conference, SIU 2015 - Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/84939167851?origin=resultslist', '2-s2.0-84939167851', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84939167851');
+update public.publications set citations = 1, keywords = array[]::text[] where scopus_eid = '2-s2.0-84939167851';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-84939167851' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Deep Learning in Crowd Analysis: A Survey of Current Research Trends', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147135', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85163733419?origin=resultslist', '2-s2.0-85163733419', array['artificial neural networks', 'Convolutional neural networks', 'crowd analysis', 'deep learning', 'recurrent neural networks']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163733419');
+update public.publications set citations = 1, keywords = array['artificial neural networks', 'Convolutional neural networks', 'crowd analysis', 'deep learning', 'recurrent neural networks']::text[] where scopus_eid = '2-s2.0-85163733419';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85163733419' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Speaker Recognition from Spectrogram Images', 2021, 'Conference paper', 'https://doi.org/10.1109/SIST50301.2021.9465954', 'SIST 2021 - 2021 IEEE International Conference on Smart Information Systems and Technologies',
+  'Institute of Electrical and Electronics Engineers Inc.', 12, false, 'https://www.scopus.com/pages/publications/85113849807?origin=resultslist', '2-s2.0-85113849807', array['computer vision', 'convolutional neural networks', 'deep learning', 'long short-term memory', 'speaker recognition', 'spectrogram']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85113849807');
+update public.publications set citations = 12, keywords = array['computer vision', 'convolutional neural networks', 'deep learning', 'long short-term memory', 'speaker recognition', 'spectrogram']::text[] where scopus_eid = '2-s2.0-85113849807';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85113849807' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'An Improved q-Least Mean Square Algorithm for Sparse System Identification', 2018, 'Conference paper', 'https://doi.org/10.1109/ICAICT.2018.8747133', 'IEEE 12th International Conference on Application of Information and Communication Technologies, AICT 2018 - Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85070206159?origin=resultslist', '2-s2.0-85070206159', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85070206159');
+update public.publications set citations = 0, keywords = array[]::text[] where scopus_eid = '2-s2.0-85070206159';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85070206159' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Optimizing Academic Trajectories: A Multi-Dimensional Psychometric Recommender System for Student Career Guidance', 2026, 'Article', 'https://doi.org/10.3390/informatics13060081', 'Informatics',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 0, true, 'https://www.scopus.com/pages/publications/105042776073?origin=resultslist', '2-s2.0-105042776073', array['academic guidance', 'educational data mining', 'psychometrics', 'recommender systems', 'vector space models']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105042776073');
+update public.publications set citations = 0, keywords = array['academic guidance', 'educational data mining', 'psychometrics', 'recommender systems', 'vector space models']::text[] where scopus_eid = '2-s2.0-105042776073';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-105042776073' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A block LMS-Type algorithm for sparse system identification with analysis', 2017, 'Conference paper', 'https://doi.org/10.1109/SIBCON.2017.7998557', '2017 International Siberian Conference on Control and Communications, SIBCON 2017 - Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85028517255?origin=resultslist', '2-s2.0-85028517255', array['Block LMS Algorithm', 'System Identification', 'Zero-Attracting']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85028517255');
+update public.publications set citations = 1, keywords = array['Block LMS Algorithm', 'System Identification', 'Zero-Attracting']::text[] where scopus_eid = '2-s2.0-85028517255';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85028517255' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Generating Job Recommendations Based on User Personality and Gallup Tests', 2025, 'Article', 'https://doi.org/10.3390/a18050275', 'Algorithms',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 2, true, 'https://www.scopus.com/pages/publications/105012733274?origin=resultslist', '2-s2.0-105012733274', array['career satisfaction', 'hard skills', 'job recommendation systems', 'personality traits', 'personality-based job matching', 'personalized recommendations', 'soft skills']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105012733274');
+update public.publications set citations = 2, keywords = array['career satisfaction', 'hard skills', 'job recommendation systems', 'personality traits', 'personality-based job matching', 'personalized recommendations', 'soft skills']::text[] where scopus_eid = '2-s2.0-105012733274';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-105012733274' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Gesture recognition based on sparse reconstruction', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634687', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, false, 'https://www.scopus.com/pages/publications/85062856258?origin=resultslist', '2-s2.0-85062856258', array['Gesture recognition', 'Recognition rate', 'Sparse representation classifier']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062856258');
+update public.publications set citations = 2, keywords = array['Gesture recognition', 'Recognition rate', 'Sparse representation classifier']::text[] where scopus_eid = '2-s2.0-85062856258';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85062856258' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A new variable step-size block LMS algorithm for a non-stationary sparse systems', 2016, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2015.7416869', 'Proceedings of the 2015 12th International Conference on Electronics Computer and Computation, ICECCO 2015',
+  'Institute of Electrical and Electronics Engineers Inc.', 6, false, 'https://www.scopus.com/pages/publications/84964579703?origin=resultslist', '2-s2.0-84964579703', array['Block LMS Algorithm', 'Non-stationary Systems', 'Sparse Systems', 'System Identification']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84964579703');
+update public.publications set citations = 6, keywords = array['Block LMS Algorithm', 'Non-stationary Systems', 'Sparse Systems', 'System Identification']::text[] where scopus_eid = '2-s2.0-84964579703';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-84964579703' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Computer Vision Supported Investigation on Anxiety-Success Relationship in Educational Processes', 2021, 'Conference paper', 'https://doi.org/10.1109/SIST50301.2021.9465880', 'SIST 2021 - 2021 IEEE International Conference on Smart Information Systems and Technologies',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85113853879?origin=resultslist', '2-s2.0-85113853879', array['anxietysuccess relationship', 'Emotion recognition', 'online proctoring']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85113853879');
+update public.publications set citations = 0, keywords = array['anxietysuccess relationship', 'Emotion recognition', 'online proctoring']::text[] where scopus_eid = '2-s2.0-85113853879';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85113853879' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A robust leaky-LMS algorithm for sparse system identification', 2016, 'Conference paper', 'https://doi.org/10.1007/978-3-319-44914-2_42', 'Lecture Notes in Computer Science (including subseries Lecture Notes in Artificial Intelligence and Lecture Notes in Bioinformatics)',
+  'Springer Verlag', 1, false, 'https://www.scopus.com/pages/publications/84987984304?origin=resultslist', '2-s2.0-84987984304', array['Adaptive filters', 'L<sub>0</sub>-norm penalty', 'Leaky LMS', 'Sparse system identification']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84987984304');
+update public.publications set citations = 1, keywords = array['Adaptive filters', 'L<sub>0</sub>-norm penalty', 'Leaky LMS', 'Sparse system identification']::text[] where scopus_eid = '2-s2.0-84987984304';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-84987984304' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Zero-Attracting Function Controlled VSSLMS Algorithm with Analysis', 2015, 'Article', 'https://doi.org/10.1007/s00034-015-9996-5', 'Circuits, Systems, and Signal Processing',
+  'Birkhauser Boston', 15, false, 'https://www.scopus.com/pages/publications/84938230811?origin=resultslist', '2-s2.0-84938230811', array['MRVSSLMS algorithm', 'Sparse systems', 'System identification', 'VSSLMS algorithm']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84938230811');
+update public.publications set citations = 15, keywords = array['MRVSSLMS algorithm', 'Sparse systems', 'System identification', 'VSSLMS algorithm']::text[] where scopus_eid = '2-s2.0-84938230811';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-84938230811' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Comparative analysis of machine learning approaches in Kazakh banknote classification', 2024, 'Article', 'https://doi.org/10.11591/eei.v13i5.8004', 'Bulletin of Electrical Engineering and Informatics',
+  'Institute of Advanced Engineering and Science', 8, true, 'https://www.scopus.com/pages/publications/85200974099?origin=resultslist', '2-s2.0-85200974099', array['Banknote classification', 'Hybrid approach', 'Kazakh banknotes', 'Machine learning', 'Model stacking', 'Traditional approach', 'Visual impairments']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85200974099');
+update public.publications set citations = 8, keywords = array['Banknote classification', 'Hybrid approach', 'Kazakh banknotes', 'Machine learning', 'Model stacking', 'Traditional approach', 'Visual impairments']::text[] where scopus_eid = '2-s2.0-85200974099';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85200974099' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'An Improved Face Recognition Algorithm Based on Sparse Representation', 2018, 'Conference paper', 'https://doi.org/10.1109/CoCoNet.2018.8476916', 'Proceedings of the 2nd International Conference on Computing and Network Communications, CoCoNet 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 4, false, 'https://www.scopus.com/pages/publications/85055986517?origin=resultslist', '2-s2.0-85055986517', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85055986517');
+update public.publications set citations = 4, keywords = array[]::text[] where scopus_eid = '2-s2.0-85055986517';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-85055986517' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A block LMS-type algorithm with a function controlled variable step-size for sparse system identification', 2015, 'Conference paper', 'https://doi.org/10.1109/ELMAR.2015.7334481', 'Proceedings Elmar - International Symposium Electronics in Marine',
+  null, 4, false, 'https://www.scopus.com/pages/publications/84958696787?origin=resultslist', '2-s2.0-84958696787', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84958696787');
+update public.publications set citations = 4, keywords = array[]::text[] where scopus_eid = '2-s2.0-84958696787';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-84958696787' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Deep reinforcement learning for dynamic vehicle routing with demand and traffic uncertainty', 2025, 'Article', 'https://doi.org/10.1016/j.orp.2025.100351', 'Operations Research Perspectives',
+  'Elsevier Ltd', 26, true, 'https://www.scopus.com/pages/publications/105012601830?origin=resultslist', '2-s2.0-105012601830', array['Combinatorial optimization', 'Deep reinforcement learning', 'Demand uncertainty', 'Graph neural networks', 'Markov Decision Process', 'Proximal policy optimization', 'Traffic uncertainty', 'Vehicle Routing Problem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105012601830');
+update public.publications set citations = 26, keywords = array['Combinatorial optimization', 'Deep reinforcement learning', 'Demand uncertainty', 'Graph neural networks', 'Markov Decision Process', 'Proximal policy optimization', 'Traffic uncertainty', 'Vehicle Routing Problem']::text[] where scopus_eid = '2-s2.0-105012601830';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'cemil.turan') from public.publications where scopus_eid = '2-s2.0-105012601830' on conflict do nothing;
+
+-- Dana Utebayeva
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('dana.utebayeva', 'Dana', 'Utebayeva', 'Dana Utebayeva', 'Assistant Professor SDU', 'PhD', 'dana.utebayeva@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-5535-9200', '57221521865', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Dana+Utebayeva',
+  3, 2, 52, 3,
+  array['and sound recognition', 'audio classification', 'deep learning', 'gated recurrent unit', 'gru', 'uav distance detection', 'acoustic data classification', 'lstm cnn']::text[], '[{"topic_name":"Speech and Audio Processing","subfield":"Signal Processing","field":"Computer Science","domain":"Physical Sciences","works_count":4},{"topic_name":"Music and Audio Processing","subfield":"Signal Processing","field":"Computer Science","domain":"Physical Sciences","works_count":4},{"topic_name":"Video Surveillance and Tracking Methods","subfield":"Computer Vision and Pattern Recognition","field":"Computer Science","domain":"Physical Sciences","works_count":3},{"topic_name":"Remote Sensing and LiDAR Applications","subfield":"Environmental Engineering","field":"Environmental Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Advanced Optical Sensing Technologies","subfield":"Instrumentation","field":"Physics and Astronomy","domain":"Physical Sciences","works_count":2}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Study a deep learning-based audio classification for detecting the distance of UAV', 2024, 'Conference paper', 'https://doi.org/10.1109/EAIS58494.2024.10569107', 'IEEE Conference on Evolving and Adaptive Intelligent Systems',
+  'Institute of Electrical and Electronics Engineers Inc.', 6, false, 'https://www.scopus.com/pages/publications/85199273380?origin=resultslist', '2-s2.0-85199273380', array['and sound recognition', 'audio classification', 'deep learning', 'Gated Recurrent Unit', 'GRU', 'UAV distance detection']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85199273380');
+update public.publications set citations = 6, keywords = array['and sound recognition', 'audio classification', 'deep learning', 'Gated Recurrent Unit', 'GRU', 'UAV distance detection']::text[] where scopus_eid = '2-s2.0-85199273380';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'dana.utebayeva') from public.publications where scopus_eid = '2-s2.0-85199273380' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Stacked BiLSTM-CNN for Multiple label UAV sound classification', 2020, 'Conference paper', 'https://doi.org/10.1109/IRC.2020.00089', 'Proceedings - 4th IEEE International Conference on Robotic Computing, IRC 2020',
+  'Institute of Electrical and Electronics Engineers Inc.', 14, false, 'https://www.scopus.com/pages/publications/85099390280?origin=resultslist', '2-s2.0-85099390280', array['acoustic data classification', 'LSTM CNN', 'Multi label sound classification', 'Stacked BiLSTM', 'UAV detection']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85099390280');
+update public.publications set citations = 14, keywords = array['acoustic data classification', 'LSTM CNN', 'Multi label sound classification', 'Stacked BiLSTM', 'UAV detection']::text[] where scopus_eid = '2-s2.0-85099390280';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'dana.utebayeva') from public.publications where scopus_eid = '2-s2.0-85099390280' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Multi-label UAV sound classification using Stacked Bidirectional LSTM', 2020, 'Conference paper', 'https://doi.org/10.1109/IRC.2020.00086', 'Proceedings - 4th IEEE International Conference on Robotic Computing, IRC 2020',
+  'Institute of Electrical and Electronics Engineers Inc.', 32, false, 'https://www.scopus.com/pages/publications/85099382258?origin=resultslist', '2-s2.0-85099382258', array['LSTM', 'Multi label classification', 'sound classification', 'Stacked Bidirectional LSTM', 'UAV sound classification']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85099382258');
+update public.publications set citations = 32, keywords = array['LSTM', 'Multi label classification', 'sound classification', 'Stacked Bidirectional LSTM', 'UAV sound classification']::text[] where scopus_eid = '2-s2.0-85099382258';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'dana.utebayeva') from public.publications where scopus_eid = '2-s2.0-85099382258' on conflict do nothing;
+
+-- Darkhan Kuanyshbay
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('darkhan.kuanyshbay', 'Darkhan', 'Kuanyshbay', 'Darkhan Kuanyshbay', 'Associate Professor  SDU', 'PhD', 'darkhan.kuanyshbay@sdu.edu.kz',
+  null, null, '57215602501', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Darkhan+Kuanyshbay',
+  2, 0, 18, 8,
+  array['acoustic model', 'ctc', 'data augmentation', 'language model', 'recurrent neural network', 'time warping', 'distributed event stores', 'event sourcing']::text[], '[{"topic_name":"Speech Recognition and Synthesis","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":3},{"topic_name":"Speech and Audio Processing","subfield":"Signal Processing","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Music and Audio Processing","subfield":"Signal Processing","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Speech and dialogue systems","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Linguistics and Cultural Studies","subfield":"Language and Linguistics","field":"Arts and Humanities","domain":"Social Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Automatic speech recognition system for Kazakh language using connectionist temporal classifier', 2020, 'Article', null, 'Journal of Theoretical and Applied Information Technology',
+  'Little Lion Scientific', 0, false, 'https://www.scopus.com/pages/publications/85081391939?origin=resultslist', '2-s2.0-85081391939', array['Acoustic Model', 'CTC', 'Data Augmentation', 'Language Model', 'Recurrent Neural Network', 'Time Warping']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85081391939');
+update public.publications set citations = 0, keywords = array['Acoustic Model', 'CTC', 'Data Augmentation', 'Language Model', 'Recurrent Neural Network', 'Time Warping']::text[] where scopus_eid = '2-s2.0-85081391939';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'darkhan.kuanyshbay') from public.publications where scopus_eid = '2-s2.0-85081391939' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Optimizing Event Replay with Hybrid Snapshotting in Event-Sourced Systems', 2026, 'Article', 'https://doi.org/10.12928/biste.v8i2.14214', 'Buletin Ilmiah Sarjana Teknik Elektro',
+  'Universitas Ahmad Dahlan', 0, false, 'https://www.scopus.com/pages/publications/105039785081?origin=resultslist', '2-s2.0-105039785081', array['Distributed Event Stores', 'Event Sourcing', 'Hybrid Snapshotting', 'Recovery Time Optimization', 'State Reconstruction Latency']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105039785081');
+update public.publications set citations = 0, keywords = array['Distributed Event Stores', 'Event Sourcing', 'Hybrid Snapshotting', 'Recovery Time Optimization', 'State Reconstruction Latency']::text[] where scopus_eid = '2-s2.0-105039785081';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'darkhan.kuanyshbay') from public.publications where scopus_eid = '2-s2.0-105039785081' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Speech data collection system for Kazakh language', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663771', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/85124949939?origin=resultslist', '2-s2.0-85124949939', array['audio', 'automatic speech recognition', 'dataset', 'recording']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124949939');
+update public.publications set citations = 7, keywords = array['audio', 'automatic speech recognition', 'dataset', 'recording']::text[] where scopus_eid = '2-s2.0-85124949939';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'darkhan.kuanyshbay') from public.publications where scopus_eid = '2-s2.0-85124949939' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of an AI-Based Communication Fraud Detection System', 2025, 'Article', 'https://doi.org/10.18576/amis/190419', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 7, false, 'https://www.scopus.com/pages/publications/105009436098?origin=resultslist', '2-s2.0-105009436098', array['AI fraud', 'Detecting fraud', 'fraud detection', 'fraud in messages', 'fraud in phone']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105009436098');
+update public.publications set citations = 7, keywords = array['AI fraud', 'Detecting fraud', 'fraud detection', 'fraud in messages', 'fraud in phone']::text[] where scopus_eid = '2-s2.0-105009436098';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'darkhan.kuanyshbay') from public.publications where scopus_eid = '2-s2.0-105009436098' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The Automated Method of Collecting and Labeling Data for Speech Emotion Recognition based on Face Emotion Recognition', 2025, 'Article', 'https://doi.org/10.18576/amis/190508', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 2, false, 'https://www.scopus.com/pages/publications/105022158868?origin=resultslist', '2-s2.0-105022158868', array['Face emotion recognition', 'labeling', 'machine learning', 'speech emotion recognition']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105022158868');
+update public.publications set citations = 2, keywords = array['Face emotion recognition', 'labeling', 'machine learning', 'speech emotion recognition']::text[] where scopus_eid = '2-s2.0-105022158868';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'darkhan.kuanyshbay') from public.publications where scopus_eid = '2-s2.0-105022158868' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Multimodal Deep Neural Network for Suicide Risk Classification Using Audio and Facial Features', 2026, 'Article', 'https://doi.org/10.18576/amis/200418', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 0, false, 'https://www.scopus.com/pages/publications/105046819976?origin=resultslist', '2-s2.0-105046819976', array['deep learning', 'MFCC', 'multimodal fusion', 'suicide classification', 'VGG16']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105046819976');
+update public.publications set citations = 0, keywords = array['deep learning', 'MFCC', 'multimodal fusion', 'suicide classification', 'VGG16']::text[] where scopus_eid = '2-s2.0-105046819976';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'darkhan.kuanyshbay') from public.publications where scopus_eid = '2-s2.0-105046819976' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Automated Chunking of Clinical Video Interviews: A Case Study in Multimodal Suicide Risk Assessment', 2026, 'Conference paper', 'https://doi.org/10.1109/CAI68641.2026.11536217', '2026 IEEE Conference on Artificial Intelligence, CAI 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105042116505?origin=resultslist', '2-s2.0-105042116505', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105042116505');
+update public.publications set citations = 0, keywords = array[]::text[] where scopus_eid = '2-s2.0-105042116505';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'darkhan.kuanyshbay') from public.publications where scopus_eid = '2-s2.0-105042116505' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'COMPARISON OF OPTIMIZATION ALGORITHMS OF CONNECTIONIST TEMPORAL CLASSIFIER FOR SPEECH RECOGNITION SYSTEM; [PORÓWNANIE ALGORYTMÓW OPTYMALIZACJI KLASYFIKATORA CZASOWEGO DO SYSTEMU ROZPOZNAWANIA MOWY]', 2019, 'Article', 'https://doi.org/10.35784/IAPGOS.234', 'Informatyka, Automatyka, Pomiary w Gospodarce i Ochronie Srodowiska',
+  null, 2, true, 'https://www.scopus.com/pages/publications/85178295494?origin=resultslist', '2-s2.0-85178295494', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85178295494');
+update public.publications set citations = 2, keywords = array[]::text[] where scopus_eid = '2-s2.0-85178295494';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'darkhan.kuanyshbay') from public.publications where scopus_eid = '2-s2.0-85178295494' on conflict do nothing;
+
+-- Darkhan Zholtayev
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('darkhan.zholtayev', 'Darkhan', 'Zholtayev', 'Darkhan Zholtayev', 'Assistant Professor SDU', 'PhD', 'darkhan.zholtayev@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0001-5347-2595', '57352835600', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Darkhan+Zholtayev',
+  1, 0, 4, 2,
+  array['anomaly detection', 'hybrid robot', 'in-pipe inspection', 'in-pipe maintenance', 'manipulator', 'autonomous mobile robot navigation', 'deep reinforcement learning', 'vision-based navigation']::text[], '[{"topic_name":"Wind Turbine Control Systems","subfield":"Electrical and Electronic Engineering","field":"Engineering","domain":"Physical Sciences","works_count":4},{"topic_name":"Microgrid Control and Optimization","subfield":"Control and Systems Engineering","field":"Engineering","domain":"Physical Sciences","works_count":3},{"topic_name":"Advanced Sensor and Energy Harvesting Materials","subfield":"Biomedical Engineering","field":"Engineering","domain":"Physical Sciences","works_count":2},{"topic_name":"Muscle activation and electromyography studies","subfield":"Biomedical Engineering","field":"Engineering","domain":"Physical Sciences","works_count":2},{"topic_name":"Soft Robotics and Applications","subfield":"Biomedical Engineering","field":"Engineering","domain":"Physical Sciences","works_count":2}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Novel Hybrid Robot for In-Pipe Maintenance and Inspection', 2025, 'Article', 'https://doi.org/10.1109/ACCESS.2025.3609193', 'IEEE Access',
+  'Institute of Electrical and Electronics Engineers Inc.', 4, true, 'https://www.scopus.com/pages/publications/105015971835?origin=resultslist', '2-s2.0-105015971835', array['Anomaly detection', 'hybrid robot', 'in-pipe inspection', 'in-pipe maintenance', 'manipulator']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105015971835');
+update public.publications set citations = 4, keywords = array['Anomaly detection', 'hybrid robot', 'in-pipe inspection', 'in-pipe maintenance', 'manipulator']::text[] where scopus_eid = '2-s2.0-105015971835';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'darkhan.zholtayev') from public.publications where scopus_eid = '2-s2.0-105015971835' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Hierarchical VLM-to-TD3 Framework with Novel Object Coordinate Estimation and Persistent Spatial Memory for Semantically Guided Indoor Navigation', 2026, 'Article', 'https://doi.org/10.3390/s26154661', 'Sensors',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 0, true, 'https://www.scopus.com/pages/publications/105047164059?origin=resultslist', '2-s2.0-105047164059', array['autonomous mobile robot navigation', 'deep reinforcement learning', 'vision-based navigation', 'vision–language models']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105047164059');
+update public.publications set citations = 0, keywords = array['autonomous mobile robot navigation', 'deep reinforcement learning', 'vision-based navigation', 'vision–language models']::text[] where scopus_eid = '2-s2.0-105047164059';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'darkhan.zholtayev') from public.publications where scopus_eid = '2-s2.0-105047164059' on conflict do nothing;
+
+-- Dauren Ayazbayev
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('dauren.ayazbayev', 'Dauren', 'Ayazbayev', 'Dauren Ayazbayev', 'Assistant Professor SDU', 'PhD', 'dauren.ayazbayev@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0001-9973-2145', '58027694900', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Dauren+Ayazbayev',
+  2, 1, 16, 3,
+  array['apache spark', 'cosine', 'faiss', 'natural language processing', 'semantically close words', 'vector', 'lexically compatibilities of words', 'skip-gram model']::text[], '[{"topic_name":"Topic Modeling","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":3},{"topic_name":"Natural Language Processing Techniques","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Text and Document Classification Technologies","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Sentiment Analysis and Opinion Mining","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Advanced Text Analysis Techniques","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Defining Semantically Close Words of Kazakh Language with Distributed System Apache Spark', 2023, 'Article', 'https://doi.org/10.3390/bdcc7040160', 'Big Data and Cognitive Computing',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 5, true, 'https://www.scopus.com/pages/publications/85180637999?origin=resultslist', '2-s2.0-85180637999', array['Apache Spark', 'cosine', 'FAISS', 'natural language processing', 'semantically close words', 'vector']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85180637999');
+update public.publications set citations = 5, keywords = array['Apache Spark', 'cosine', 'FAISS', 'natural language processing', 'semantically close words', 'vector']::text[] where scopus_eid = '2-s2.0-85180637999';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'dauren.ayazbayev') from public.publications where scopus_eid = '2-s2.0-85180637999' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Identifying lexical compatibilities of words by vectors of specialized words', 2020, 'Article', 'https://doi.org/10.26577/JMMCS.2020.v107.i3.07', 'KazNU Bulletin. Mathematics, Mechanics, Computer Science Series',
+  'al-Farabi Kazakh State National University', 0, true, 'https://www.scopus.com/pages/publications/85180236188?origin=resultslist', '2-s2.0-85180236188', array['lexically compatibilities of words', 'Skip-gram model', 'vectors of words']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85180236188');
+update public.publications set citations = 0, keywords = array['lexically compatibilities of words', 'Skip-gram model', 'vectors of words']::text[] where scopus_eid = '2-s2.0-85180236188';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'dauren.ayazbayev') from public.publications where scopus_eid = '2-s2.0-85180236188' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Classification of Scientific Documents in the Kazakh Language Using Deep Neural Networks and a Fusion of Images and Text', 2022, 'Article', 'https://doi.org/10.3390/bdcc6040123', 'Big Data and Cognitive Computing',
+  'MDPI', 11, true, 'https://www.scopus.com/pages/publications/85144598844?origin=resultslist', '2-s2.0-85144598844', array['convolutional neural network', 'document classification', 'word embedding']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85144598844');
+update public.publications set citations = 11, keywords = array['convolutional neural network', 'document classification', 'word embedding']::text[] where scopus_eid = '2-s2.0-85144598844';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'dauren.ayazbayev') from public.publications where scopus_eid = '2-s2.0-85144598844' on conflict do nothing;
+
+-- Dina Bakranova
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('dina.bakranova', 'Dina', 'Bakranova', 'Dina Bakranova', 'Associate Professor  SDU', 'PhD', 'dina.bakranova@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-0793-9905', '57189357367', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Dina+Bakranova',
+  1, 0, 9, 4,
+  array['carbon dioxide (co<sub>2</sub>) reduction', 'dye degradation', 'environmental remediation', 'machine learning', 'photocatalysis', 'silicon carbide', 'wastewater treatment', 'water splitting']::text[], '[{"topic_name":"Advanced Photocatalysis Techniques","subfield":"Renewable Energy, Sustainability and the Environment","field":"Energy","domain":"Physical Sciences","works_count":10},{"topic_name":"Advanced ceramic materials synthesis","subfield":"Ceramics and Composites","field":"Materials Science","domain":"Physical Sciences","works_count":8},{"topic_name":"Silicon Carbide Semiconductor Technologies","subfield":"Electrical and Electronic Engineering","field":"Engineering","domain":"Physical Sciences","works_count":6},{"topic_name":"ZnO doping and properties","subfield":"Materials Chemistry","field":"Materials Science","domain":"Physical Sciences","works_count":5},{"topic_name":"Copper-based nanomaterials and applications","subfield":"Materials Chemistry","field":"Materials Science","domain":"Physical Sciences","works_count":5}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Tunable SiC-Based Photocatalysts for Hydrogen Generation and Environmental Remediation', 2026, 'Review', 'https://doi.org/10.3390/ijms27020774', 'International Journal of Molecular Sciences',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 1, true, 'https://www.scopus.com/pages/publications/105028638621?origin=resultslist', '2-s2.0-105028638621', array['carbon dioxide (CO<sub>2</sub>) reduction', 'dye degradation', 'environmental remediation', 'machine learning', 'photocatalysis', 'silicon carbide', 'wastewater treatment', 'water splitting']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105028638621');
+update public.publications set citations = 1, keywords = array['carbon dioxide (CO<sub>2</sub>) reduction', 'dye degradation', 'environmental remediation', 'machine learning', 'photocatalysis', 'silicon carbide', 'wastewater treatment', 'water splitting']::text[] where scopus_eid = '2-s2.0-105028638621';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'dina.bakranova') from public.publications where scopus_eid = '2-s2.0-105028638621' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'SiC-based heterostructures and tandem PEC cells for efficient hydrogen production', 2025, 'Review', 'https://doi.org/10.1016/j.rineng.2025.106862', 'Results in Engineering',
+  null, 8, true, 'https://www.scopus.com/pages/publications/105014097560?origin=resultslist', '2-s2.0-105014097560', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105014097560');
+update public.publications set citations = 8, keywords = array[]::text[] where scopus_eid = '2-s2.0-105014097560';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'dina.bakranova') from public.publications where scopus_eid = '2-s2.0-105014097560' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Photoelectrochemical biosensors: critical review and foresight toward multiplexed and clinically relevant platforms', 2026, 'Review', 'https://doi.org/10.1016/j.ceja.2026.101315', 'Chemical Engineering Journal Advances',
+  null, 0, true, 'https://www.scopus.com/pages/publications/105042656716?origin=resultslist', '2-s2.0-105042656716', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105042656716');
+update public.publications set citations = 0, keywords = array[]::text[] where scopus_eid = '2-s2.0-105042656716';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'dina.bakranova') from public.publications where scopus_eid = '2-s2.0-105042656716' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Simulation of ZnO/BiVO4 Photoanode Performance in Photoelectrochemical Water Splitting', 2026, 'Article', 'https://doi.org/10.3390/eng7060287', 'Eng',
+  null, 0, true, 'https://www.scopus.com/pages/publications/105042987913?origin=resultslist', '2-s2.0-105042987913', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105042987913');
+update public.publications set citations = 0, keywords = array[]::text[] where scopus_eid = '2-s2.0-105042987913';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'dina.bakranova') from public.publications where scopus_eid = '2-s2.0-105042987913' on conflict do nothing;
+
+-- Dinara Khashimova
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('dinara.khashimova', 'Dinara', 'Khashimova', 'Dinara Khashimova', 'Senior Lecturer', 'Master', 'dinara.khashimova@sdu.edu.kz',
+  null, null, '58414213100', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Dinara+Khashimova',
+  1, 0, 7, 1,
+  array['course selection', 'elective courses', 'machine learning', 'matrix factorization', 'recommender systems', 'stochastic gradient descent']::text[], '[{"topic_name":"Recommender Systems and Techniques","subfield":"Information Systems","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Online Learning and Analytics","subfield":"Computer Science Applications","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Intelligent Tutoring Systems and Adaptive Learning","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Matrix Factorization-based Collaborative Filtering Framework for Course Recommendations in Higher Education', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147152', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/85163747394?origin=resultslist', '2-s2.0-85163747394', array['course selection', 'elective courses', 'machine learning', 'matrix factorization', 'recommender systems', 'stochastic gradient descent']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163747394');
+update public.publications set citations = 7, keywords = array['course selection', 'elective courses', 'machine learning', 'matrix factorization', 'recommender systems', 'stochastic gradient descent']::text[] where scopus_eid = '2-s2.0-85163747394';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'dinara.khashimova') from public.publications where scopus_eid = '2-s2.0-85163747394' on conflict do nothing;
+
+-- Duman Telman
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('duman.telman', 'Duman', 'Telman', 'Duman Telman', 'Coordinator for work with graduates and Career Development', 'Master', 'duman.telman@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0003-1387-5351', '60075365100', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Duman+Telman',
+  1, 0, 3, 3,
+  array['adaptive systems', 'affective computing', 'facial expression', 'gesture analysis', 'human–ai interaction', 'multimodal fusion', 'synchrony', 'dataset debiasing']::text[], '[{"topic_name":"Misinformation and Its Impacts","subfield":"Sociology and Political Science","field":"Social Sciences","domain":"Social Sciences","works_count":3},{"topic_name":"Spam and Phishing Detection","subfield":"Information Systems","field":"Computer Science","domain":"Physical Sciences","works_count":3},{"topic_name":"Topic Modeling","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Social Robot Interaction and HRI","subfield":"Social Psychology","field":"Psychology","domain":"Social Sciences","works_count":1},{"topic_name":"Information and Cyber Security","subfield":"Information Systems","field":"Computer Science","domain":"Physical Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Unified Visual Synchrony: A Framework for Face–Gesture Coherence in Multimodal Human–AI Interaction', 2026, 'Article', 'https://doi.org/10.3390/bdcc10030088', 'Big Data and Cognitive Computing',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 2, true, 'https://www.scopus.com/pages/publications/105034085611?origin=resultslist', '2-s2.0-105034085611', array['adaptive systems', 'affective computing', 'facial expression', 'gesture analysis', 'human–AI interaction', 'multimodal fusion', 'synchrony']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105034085611');
+update public.publications set citations = 2, keywords = array['adaptive systems', 'affective computing', 'facial expression', 'gesture analysis', 'human–AI interaction', 'multimodal fusion', 'synchrony']::text[] where scopus_eid = '2-s2.0-105034085611';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'duman.telman') from public.publications where scopus_eid = '2-s2.0-105034085611' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Source Bias in Fact-Check-Derived Fake News Corpora: A Debiasing Protocol and Baselines for Kazakh–Russian News', 2026, 'Article', 'https://doi.org/10.3390/a19080657', 'Algorithms',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 0, true, 'https://www.scopus.com/pages/publications/105048240278?origin=resultslist', '2-s2.0-105048240278', array['dataset debiasing', 'evaluation validity', 'fake news detection', 'Kazakh–Russian', 'low-resource NLP', 'RuBERT', 'shortcut learning', 'source bias', 'telegram', 'XLM-RoBERTa']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105048240278');
+update public.publications set citations = 0, keywords = array['dataset debiasing', 'evaluation validity', 'fake news detection', 'Kazakh–Russian', 'low-resource NLP', 'RuBERT', 'shortcut learning', 'source bias', 'telegram', 'XLM-RoBERTa']::text[] where scopus_eid = '2-s2.0-105048240278';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'duman.telman') from public.publications where scopus_eid = '2-s2.0-105048240278' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Cross-Lingual and Multilingual Approaches to Fake News Detection in the Kazakh Language', 2026, 'Conference paper', 'https://doi.org/10.1016/j.procs.2026.01.082', 'Procedia Computer Science',
+  'Elsevier B.V.', 1, true, 'https://www.scopus.com/pages/publications/105041038665?origin=resultslist', '2-s2.0-105041038665', array['Cross-lingual transfer', 'Logistic Regression', 'Low-resource languages', 'Misinformation Analysis', 'Text Classification', 'TF-IDF']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105041038665');
+update public.publications set citations = 1, keywords = array['Cross-lingual transfer', 'Logistic Regression', 'Low-resource languages', 'Misinformation Analysis', 'Text Classification', 'TF-IDF']::text[] where scopus_eid = '2-s2.0-105041038665';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'duman.telman') from public.publications where scopus_eid = '2-s2.0-105041038665' on conflict do nothing;
+
+-- Farikha Nauruzbayeva
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('farikha.nauruzbayeva', 'Farikha', 'Nauruzbayeva', 'Farikha Nauruzbayeva', 'Senior Lecturer', 'Master', 'farikha.nauruzbayeva@sdu.edu.kz',
+  null, null, '60821813900', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Farikha+Nauruzbayeva',
+  0, 0, 0, 1,
+  array['differential privacy', 'ehr cybersecurity', 'federated learning security', 'fedper', 'gradient inversion', 'medical record protection', 'membership inference', 'patient data privacy']::text[], '[{"topic_name":"Network Security and Intrusion Detection","subfield":"Computer Networks and Communications","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Algorithms and Data Compression","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Network Packet Processing and Optimization","subfield":"Hardware and Architecture","field":"Computer Science","domain":"Physical Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Personalized Federated Learning Systems for Secure and Private Analysis of Patient Medical Records', 2026, 'Conference paper', 'https://doi.org/10.1109/ICCSDFAI70505.2026.11648033', '2026 International Conference on Cybersecurity, Digital Forensics, and AI Applications, ICCSDFAI 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105049057098?origin=resultslist', '2-s2.0-105049057098', array['differential privacy', 'EHR cybersecurity', 'Federated learning security', 'FedPer', 'gradient inversion', 'medical record protection', 'membership inference', 'patient data privacy', 'secure aggregation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105049057098');
+update public.publications set citations = 0, keywords = array['differential privacy', 'EHR cybersecurity', 'Federated learning security', 'FedPer', 'gradient inversion', 'medical record protection', 'membership inference', 'patient data privacy', 'secure aggregation']::text[] where scopus_eid = '2-s2.0-105049057098';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farikha.nauruzbayeva') from public.publications where scopus_eid = '2-s2.0-105049057098' on conflict do nothing;
+
+-- Farukh Mashurov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('farukh.mashurov', 'Farukh', 'Mashurov', 'Farukh Mashurov', 'Associate Professor  SDU', 'PhD', 'farukh.mashurov@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0001-6049-6800', '57210822628', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Farukh+Mashurov',
+  5, 2, 85, 18,
+  array['polynomial identities', 'algebraic classification', 'perm algebras', 'n-lie algebra', 'central extension', 'simple algebra', 'transposed poisson algebra', 'assosymmetric algebras']::text[], '[{"topic_name":"Advanced Topics in Algebra","subfield":"Algebra and Number Theory","field":"Mathematics","domain":"Physical Sciences","works_count":25},{"topic_name":"Algebraic structures and combinatorial models","subfield":"Geometry and Topology","field":"Mathematics","domain":"Physical Sciences","works_count":22},{"topic_name":"Homotopy and Cohomology in Algebraic Topology","subfield":"Mathematical Physics","field":"Mathematics","domain":"Physical Sciences","works_count":8},{"topic_name":"Finite Group Theory Research","subfield":"Discrete Mathematics and Combinatorics","field":"Mathematics","domain":"Physical Sciences","works_count":4},{"topic_name":"Analytic Number Theory Research","subfield":"Algebra and Number Theory","field":"Mathematics","domain":"Physical Sciences","works_count":4}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Semi-Regular Continued Fractions with Fast-Growing Partial Quotients', 2024, 'Article', 'https://doi.org/10.3390/fractalfract8080436', 'Fractal and Fractional',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 2, true, 'https://www.scopus.com/pages/publications/85202598302?origin=resultslist', '2-s2.0-85202598302', array['box dimension', 'convergents', 'dimension theory', 'Hausdorff dimension', 'number theory', 'partial quotients', 'semi-regular continued fractions']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85202598302');
+update public.publications set citations = 2, keywords = array['box dimension', 'convergents', 'dimension theory', 'Hausdorff dimension', 'number theory', 'partial quotients', 'semi-regular continued fractions']::text[] where scopus_eid = '2-s2.0-85202598302';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-85202598302' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Unified computational approach to nilpotent algebra classification problems', 2021, 'Article', 'https://doi.org/10.2478/cm-2021-0019', 'Communications in Mathematics',
+  'Sciendo', 8, true, 'https://www.scopus.com/pages/publications/85111343804?origin=resultslist', '2-s2.0-85111343804', array['Algebra', 'algorithm', 'finite dimensional nilpotent algebra', 'Skjelbred-Sund classification', 'symbolic solver', 'Wolfram Mathematica']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85111343804');
+update public.publications set citations = 8, keywords = array['Algebra', 'algorithm', 'finite dimensional nilpotent algebra', 'Skjelbred-Sund classification', 'symbolic solver', 'Wolfram Mathematica']::text[] where scopus_eid = '2-s2.0-85111343804';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-85111343804' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On Zinbiel and Tortkara Superalgebras', 2025, 'Article', 'https://doi.org/10.1007/s00574-025-00474-3', 'Bulletin of the Brazilian Mathematical Society',
+  'Springer Science and Business Media Deutschland GmbH', 3, true, 'https://www.scopus.com/pages/publications/105014741373?origin=resultslist', '2-s2.0-105014741373', array['Algebraic classification', 'Lie element', 'Tortkara superalgebra', 'Zinbiel superalgebra']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105014741373');
+update public.publications set citations = 3, keywords = array['Algebraic classification', 'Lie element', 'Tortkara superalgebra', 'Zinbiel superalgebra']::text[] where scopus_eid = '2-s2.0-105014741373';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-105014741373' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Novikov Dialgebras and Perm Algebras', 2025, 'Article', 'https://doi.org/10.1007/s41980-025-00981-5', 'Bulletin of the Iranian Mathematical Society',
+  'Springer', 4, false, 'https://www.scopus.com/pages/publications/105010657781?origin=resultslist', '2-s2.0-105010657781', array['Free algebras', 'Novikov dialgebras', 'Perm algebras', 'Polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105010657781');
+update public.publications set citations = 4, keywords = array['Free algebras', 'Novikov dialgebras', 'Perm algebras', 'Polynomial identities']::text[] where scopus_eid = '2-s2.0-105010657781';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-105010657781' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Identities in Differential Perm Algebras', 2026, 'Article', 'https://doi.org/10.1007/s40840-026-02200-8', 'Bulletin of the Malaysian Mathematical Sciences Society',
+  'Springer', 0, false, 'https://www.scopus.com/pages/publications/105052728620?origin=resultslist', '2-s2.0-105052728620', array['Leibniz algebra', 'Lie algebra', 'Perm algebra', 'Polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105052728620');
+update public.publications set citations = 0, keywords = array['Leibniz algebra', 'Lie algebra', 'Perm algebra', 'Polynomial identities']::text[] where scopus_eid = '2-s2.0-105052728620';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-105052728620' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Metabelian Lie and perm algebras', 2024, 'Article', 'https://doi.org/10.1142/S0219498824500658', 'Journal of Algebra and its Applications',
+  'World Scientific', 14, false, 'https://www.scopus.com/pages/publications/85133866468?origin=resultslist', '2-s2.0-85133866468', array['Gröbner bases', 'Lie and Jordan elements', 'Perm algebras', 'polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85133866468');
+update public.publications set citations = 14, keywords = array['Gröbner bases', 'Lie and Jordan elements', 'Perm algebras', 'polynomial identities']::text[] where scopus_eid = '2-s2.0-85133866468';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-85133866468' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Simple n-Lie Poisson algebras', 2026, 'Article', 'https://doi.org/10.1007/s40879-026-00892-7', 'European Journal of Mathematics',
+  'Springer Science and Business Media Deutschland GmbH', 1, false, 'https://www.scopus.com/pages/publications/105035914352?origin=resultslist', '2-s2.0-105035914352', array['n-ary algebra', 'n-Lie algebra', 'n-Lie Poisson algebra', 'Simple algebra']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105035914352');
+update public.publications set citations = 1, keywords = array['n-ary algebra', 'n-Lie algebra', 'n-Lie Poisson algebra', 'Simple algebra']::text[] where scopus_eid = '2-s2.0-105035914352';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-105035914352' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Mutations of perm algebras', 2024, 'Article', 'https://doi.org/10.1007/s13398-024-01663-3', 'Revista de la Real Academia de Ciencias Exactas, Fisicas y Naturales - Serie A: Matematicas',
+  'Springer-Verlag Italia s.r.l.', 5, false, 'https://www.scopus.com/pages/publications/85205227713?origin=resultslist', '2-s2.0-85205227713', array['17A30', '17B01', '17B35', 'Mutation of algebras', 'Perm algebras', 'Polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85205227713');
+update public.publications set citations = 5, keywords = array['17A30', '17B01', '17B35', 'Mutation of algebras', 'Perm algebras', 'Polynomial identities']::text[] where scopus_eid = '2-s2.0-85205227713';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-85205227713' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Central extensions of n-Lie algebras', 2026, 'Article', 'https://doi.org/10.1007/s40879-026-00906-4', 'European Journal of Mathematics',
+  'Springer Science and Business Media Deutschland GmbH', 1, false, 'https://www.scopus.com/pages/publications/105043512680?origin=resultslist', '2-s2.0-105043512680', array['Central extension', 'n-Lie algebra', 'Second cohomology group']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105043512680');
+update public.publications set citations = 1, keywords = array['Central extension', 'n-Lie algebra', 'Second cohomology group']::text[] where scopus_eid = '2-s2.0-105043512680';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-105043512680' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On the generalized Poisson and transposed Poisson algebras', 2025, 'Article', 'https://doi.org/10.1142/S0219498826502683', 'Journal of Algebra and its Applications',
+  'World Scientific', 3, false, 'https://www.scopus.com/pages/publications/105009258420?origin=resultslist', '2-s2.0-105009258420', array['Generalized Poisson algebra', 'polynomial identities', 'transposed Poisson algebra']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105009258420');
+update public.publications set citations = 3, keywords = array['Generalized Poisson algebra', 'polynomial identities', 'transposed Poisson algebra']::text[] where scopus_eid = '2-s2.0-105009258420';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-105009258420' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On the transposed Poisson n-Lie algebras', 2026, 'Article', 'https://doi.org/10.1080/00927872.2026.2689550', 'Communications in Algebra',
+  'Taylor and Francis Ltd.', 1, true, 'https://www.scopus.com/pages/publications/105043804726?origin=resultslist', '2-s2.0-105043804726', array['n-Lie algebra', 'polynomial identity', 'simple algebra', 'transposed Poisson algebra']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105043804726');
+update public.publications set citations = 1, keywords = array['n-Lie algebra', 'polynomial identity', 'simple algebra', 'transposed Poisson algebra']::text[] where scopus_eid = '2-s2.0-105043804726';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-105043804726' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On algebras embeddable into bicommutative algebras', 2024, 'Article', 'https://doi.org/10.1080/00927872.2024.2358178', 'Communications in Algebra',
+  'Taylor and Francis Ltd.', 3, false, 'https://www.scopus.com/pages/publications/85195499681?origin=resultslist', '2-s2.0-85195499681', array['Bicommutative algebra', 'metabelian Lie algebra', 'speciality problem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85195499681');
+update public.publications set citations = 3, keywords = array['Bicommutative algebra', 'metabelian Lie algebra', 'speciality problem']::text[] where scopus_eid = '2-s2.0-85195499681';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-85195499681' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Actions of the additive group Gaon certain noncommutative deformations of the plane', 2021, 'Article', 'https://doi.org/10.2478/cm-2021-0024', 'Communications in Mathematics',
+  'Sciendo', 1, true, 'https://www.scopus.com/pages/publications/85111300723?origin=resultslist', '2-s2.0-85111300723', array['Derivations', 'iterative higher derivations', 'rings of differential operators', 'Weyl algebra']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85111300723');
+update public.publications set citations = 1, keywords = array['Derivations', 'iterative higher derivations', 'rings of differential operators', 'Weyl algebra']::text[] where scopus_eid = '2-s2.0-85111300723';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-85111300723' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Defining identities for mono and binary Zinbiel algebras', 2023, 'Article', 'https://doi.org/10.1142/S0219498823501657', 'Journal of Algebra and its Applications',
+  'World Scientific', 6, false, 'https://www.scopus.com/pages/publications/85126928356?origin=resultslist', '2-s2.0-85126928356', array['Dual Leibniz algebras', 'polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85126928356');
+update public.publications set citations = 6, keywords = array['Dual Leibniz algebras', 'polynomial identities']::text[] where scopus_eid = '2-s2.0-85126928356';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-85126928356' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Generalized continued fraction expansions for π and e', 2021, 'Article', 'https://doi.org/10.1080/09720529.2021.1936897', 'Journal of Discrete Mathematical Sciences and Cryptography',
+  'Taylor and Francis Ltd.', 3, false, 'https://www.scopus.com/pages/publications/85111827982?origin=resultslist', '2-s2.0-85111827982', array['11Y65', '30B70', 'Euler number e', 'Generalized continued fraction', 'Ramanujan machine', 'π']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85111827982');
+update public.publications set citations = 3, keywords = array['11Y65', '30B70', 'Euler number e', 'Generalized continued fraction', 'Ramanujan machine', 'π']::text[] where scopus_eid = '2-s2.0-85111827982';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-85111827982' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'One-generated nilpotent assosymmetric algebras', 2022, 'Article', 'https://doi.org/10.1142/S0219498822500311', 'Journal of Algebra and its Applications',
+  'World Scientific', 4, true, 'https://www.scopus.com/pages/publications/85096891856?origin=resultslist', '2-s2.0-85096891856', array['Algebraic classification', 'Assosymmetric algebras', 'Central extension', 'Nilpotent algebras']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85096891856');
+update public.publications set citations = 4, keywords = array['Algebraic classification', 'Assosymmetric algebras', 'Central extension', 'Nilpotent algebras']::text[] where scopus_eid = '2-s2.0-85096891856';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-85096891856' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The Algebraic and Geometric Classification of Nilpotent Assosymmetric Algebras', 2021, 'Article', 'https://doi.org/10.1007/s10468-019-09935-y', 'Algebras and Representation Theory',
+  'Springer Science and Business Media B.V.', 26, false, 'https://www.scopus.com/pages/publications/85077614365?origin=resultslist', '2-s2.0-85077614365', array['Algebraic classification', 'Assosymmetric algebras', 'Central extension', 'Degeneration', 'Geometric classification', 'Nilpotent algebras']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85077614365');
+update public.publications set citations = 26, keywords = array['Algebraic classification', 'Assosymmetric algebras', 'Central extension', 'Degeneration', 'Geometric classification', 'Nilpotent algebras']::text[] where scopus_eid = '2-s2.0-85077614365';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-85077614365' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Generalized sharped cubic form and split spin factor algebra', 2024, 'Article', 'https://doi.org/10.1080/00927872.2024.2317454', 'Communications in Algebra',
+  'Taylor and Francis Ltd.', 0, true, 'https://www.scopus.com/pages/publications/85186456566?origin=resultslist', '2-s2.0-85186456566', array['Lie triple system', 'sharped cubic form', 'split spin factor algebra']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85186456566');
+update public.publications set citations = 0, keywords = array['Lie triple system', 'sharped cubic form', 'split spin factor algebra']::text[] where scopus_eid = '2-s2.0-85186456566';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'farukh.mashurov') from public.publications where scopus_eid = '2-s2.0-85186456566' on conflict do nothing;
+
+-- Gaukhar Arepova
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('gaukhar.arepova', 'Gaukhar', 'Arepova', 'Gaukhar Arepova', 'Associate Professor  SDU', 'PhD', 'gaukhar.arepova@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0003-4127-7842', '57188559631', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Gaukhar+Arepova',
+  2, 0, 5, 2,
+  array['boundary vertices', 'dirichlet problem', 'fourier transform', 'generalized functions', 'internal vertex', 'kirchhoff joint condition', 'star graph', 'wave equation']::text[], '[{"topic_name":"Differential Equations and Boundary Problems","subfield":"Applied Mathematics","field":"Mathematics","domain":"Physical Sciences","works_count":7},{"topic_name":"Differential Equations and Numerical Methods","subfield":"Numerical Analysis","field":"Mathematics","domain":"Physical Sciences","works_count":6},{"topic_name":"Numerical methods in inverse problems","subfield":"Mathematical Physics","field":"Mathematics","domain":"Physical Sciences","works_count":5},{"topic_name":"Advanced Mathematical Modeling in Engineering","subfield":"Computational Theory and Mathematics","field":"Computer Science","domain":"Physical Sciences","works_count":3},{"topic_name":"Navier-Stokes equation solutions","subfield":"Applied Mathematics","field":"Mathematics","domain":"Physical Sciences","works_count":2}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Solution to the Dirichlet Problem of the Wave Equation on a Star Graph', 2023, 'Article', 'https://doi.org/10.3390/math11204234', 'Mathematics',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 3, true, 'https://www.scopus.com/pages/publications/85175057212?origin=resultslist', '2-s2.0-85175057212', array['boundary vertices', 'Dirichlet problem', 'Fourier transform', 'generalized functions', 'internal vertex', 'Kirchhoff joint condition', 'star graph', 'wave equation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85175057212');
+update public.publications set citations = 3, keywords = array['boundary vertices', 'Dirichlet problem', 'Fourier transform', 'generalized functions', 'internal vertex', 'Kirchhoff joint condition', 'star graph', 'wave equation']::text[] where scopus_eid = '2-s2.0-85175057212';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'gaukhar.arepova') from public.publications where scopus_eid = '2-s2.0-85175057212' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Bitsadze–Samarskii Boundary Conditions for an Elliptic-Parabolic Volume Potential with Smooth Matching', 2020, 'Article', 'https://doi.org/10.1134/S0012266120060075', 'Differential Equations',
+  'Pleiades Publishing', 2, false, 'https://www.scopus.com/pages/publications/85087383950?origin=resultslist', '2-s2.0-85087383950', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85087383950');
+update public.publications set citations = 2, keywords = array[]::text[] where scopus_eid = '2-s2.0-85087383950';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'gaukhar.arepova') from public.publications where scopus_eid = '2-s2.0-85087383950' on conflict do nothing;
+
+-- Gulfarida Tulemissova
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('g.tulemissova', 'Gulfarida', 'Tulemissova', 'Gulfarida Tulemissova', 'Associate Professor  SDU', 'Candidate of Science', 'g.tulemissova@sdu.edu.kz',
+  null, null, '57188755654', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=G+Tulemissova',
+  2, 1, 96, 4,
+  array['electronics industry', 'ems industry', 'fabless manufacturing', 'finfet technology', 'information technology industry', 'data analyse', 'destination earth', 'digital twin']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Review of Electronic Industry in Kazakhstan: Conditions and Opportunities', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663826', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85124983135?origin=resultslist', '2-s2.0-85124983135', array['Electronics industry', 'EMS industry', 'Fabless manufacturing', 'FinFET technology', 'Information technology industry']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124983135');
+update public.publications set citations = 0, keywords = array['Electronics industry', 'EMS industry', 'Fabless manufacturing', 'FinFET technology', 'Information technology industry']::text[] where scopus_eid = '2-s2.0-85124983135';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'g.tulemissova') from public.publications where scopus_eid = '2-s2.0-85124983135' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Conceptual approach to the formation of the digital twin of the Destination Earth (first glance)', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147128', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85163731608?origin=resultslist', '2-s2.0-85163731608', array['Data analyse', 'Destination Earth', 'Digital Twin', 'Global Hub', 'IoT']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163731608');
+update public.publications set citations = 0, keywords = array['Data analyse', 'Destination Earth', 'Digital Twin', 'Global Hub', 'IoT']::text[] where scopus_eid = '2-s2.0-85163731608';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'g.tulemissova') from public.publications where scopus_eid = '2-s2.0-85163731608' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Cyber security system of FPGA platform for wireless sensor networks', 2020, 'Conference paper', 'https://doi.org/10.34190/EWS.20.051', 'European Conference on Information Warfare and Security, ECCWS',
+  'Curran Associates Inc.', 2, false, 'https://www.scopus.com/pages/publications/85094667807?origin=resultslist', '2-s2.0-85094667807', array['FPGA bit stream algorithms', 'clustering intrusion detection methods', 'Information security', 'Machine learning', 'Multi-agent system', 'Wireless sensor network (WSN)']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85094667807');
+update public.publications set citations = 2, keywords = array['FPGA bit stream algorithms', 'clustering intrusion detection methods', 'Information security', 'Machine learning', 'Multi-agent system', 'Wireless sensor network (WSN)']::text[] where scopus_eid = '2-s2.0-85094667807';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'g.tulemissova') from public.publications where scopus_eid = '2-s2.0-85094667807' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Fast Facial Expression Recognition System: Selection of Models', 2023, 'Article', 'https://doi.org/10.18576/amis/170220', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 94, false, 'https://www.scopus.com/pages/publications/85151876125?origin=resultslist', '2-s2.0-85151876125', array['computer vision', 'deep convolutional neural networks (Deep CNN)', 'deep learning', 'facial expression recognition (FER)', 'pattern recognition']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85151876125');
+update public.publications set citations = 94, keywords = array['computer vision', 'deep convolutional neural networks (Deep CNN)', 'deep learning', 'facial expression recognition (FER)', 'pattern recognition']::text[] where scopus_eid = '2-s2.0-85151876125';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'g.tulemissova') from public.publications where scopus_eid = '2-s2.0-85151876125' on conflict do nothing;
+
+-- Gulnara Saimassay
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('gulnara.saimassay', 'Gulnara', 'Saimassay', 'Gulnara Saimassay', 'Senior Lecturer', 'Master', 'gulnara.saimassay@sdu.edu.kz',
+  null, 'https://orcid.org/0009-0001-6357-5608', '58411141100', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Gulnara+Saimassay',
+  2, 1, 20, 3,
+  array['apache spark', 'distributed systems', 'hr', 'human resources', 'machine learning in hr', 'recommendation systems', 'computer science in education', 'correlation in education']::text[], '[{"topic_name":"Lung Cancer Diagnosis and Treatment","subfield":"Pulmonary and Respiratory Medicine","field":"Medicine","domain":"Health Sciences","works_count":1},{"topic_name":"COVID-19 diagnosis using AI","subfield":"Radiology, Nuclear Medicine and Imaging","field":"Medicine","domain":"Health Sciences","works_count":1},{"topic_name":"Radiomics and Machine Learning in Medical Imaging","subfield":"Radiology, Nuclear Medicine and Imaging","field":"Medicine","domain":"Health Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Recommendation System for Human Resource Management by the Use of Apache Spark Cluster', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147129', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/85163752577?origin=resultslist', '2-s2.0-85163752577', array['Apache Spark', 'distributed systems', 'HR', 'human resources', 'machine learning in HR', 'recommendation systems']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163752577');
+update public.publications set citations = 5, keywords = array['Apache Spark', 'distributed systems', 'HR', 'human resources', 'machine learning in HR', 'recommendation systems']::text[] where scopus_eid = '2-s2.0-85163752577';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'gulnara.saimassay') from public.publications where scopus_eid = '2-s2.0-85163752577' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Analysis of Self-esteem on Students'' Performance in Online Programming Competition', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147137', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85163778650?origin=resultslist', '2-s2.0-85163778650', array['computer science in education', 'correlation in education', 'edtech', 'online programming competition', 'self-efficacy', 'self-esteem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163778650');
+update public.publications set citations = 0, keywords = array['computer science in education', 'correlation in education', 'edtech', 'online programming competition', 'self-efficacy', 'self-esteem']::text[] where scopus_eid = '2-s2.0-85163778650';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'gulnara.saimassay') from public.publications where scopus_eid = '2-s2.0-85163778650' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Enhanced U-Net Architecture for Lung Segmentation on Computed Tomography and X-Ray Images', 2024, 'Article', 'https://doi.org/10.14569/IJACSA.2024.0150594', 'International Journal of Advanced Computer Science and Applications',
+  'Science and Information Organization', 15, true, 'https://www.scopus.com/pages/publications/85197912093?origin=resultslist', '2-s2.0-85197912093', array['computed tomography', 'deep learning', 'diagnosis', 'Lung disease', 'segmentation', 'U-Net']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85197912093');
+update public.publications set citations = 15, keywords = array['computed tomography', 'deep learning', 'diagnosis', 'Lung disease', 'segmentation', 'U-Net']::text[] where scopus_eid = '2-s2.0-85197912093';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'gulnara.saimassay') from public.publications where scopus_eid = '2-s2.0-85197912093' on conflict do nothing;
+
+-- Gulsim Rysbayeva
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('gulsim.rysbayeva', 'Gulsim', 'Rysbayeva', 'Gulsim Rysbayeva', 'Assistant Professor SDU', 'PhD', 'gulsim.rysbayeva@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-7331-353X', '57697959900', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Gulsim+Rysbayeva',
+  2, 0, 13, 3,
+  array['signal-to-noise ratio', 'eddy current testing (ect)', 'in-line inspection', 'non-destructive testing (ndt) method', 'rail health monitoring system', 'eddy current testing', 'lift-off', 'non-destructive testing']::text[], '[{"topic_name":"Ultrasonics and Acoustic Wave Propagation","subfield":"Mechanics of Materials","field":"Engineering","domain":"Physical Sciences","works_count":3},{"topic_name":"Railway Engineering and Dynamics","subfield":"Mechanical Engineering","field":"Engineering","domain":"Physical Sciences","works_count":3},{"topic_name":"Non-Destructive Testing Techniques","subfield":"Mechanical Engineering","field":"Engineering","domain":"Physical Sciences","works_count":3},{"topic_name":"Recommender Systems and Techniques","subfield":"Information Systems","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Machine Fault Diagnosis Techniques","subfield":"Control and Systems Engineering","field":"Engineering","domain":"Physical Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Advanced real-time rail monitoring system based on directional eddy current probe', 2026, 'Article', 'https://doi.org/10.1016/j.ndteint.2025.103532', 'NDT and E International',
+  'Elsevier Ltd', 8, true, 'https://www.scopus.com/pages/publications/105014287481?origin=resultslist', '2-s2.0-105014287481', array['Eddy current testing (ECT)', 'In-line inspection', 'Non-destructive testing (NDT) method', 'Rail health monitoring system', 'Signal-to-noise ratio']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105014287481');
+update public.publications set citations = 8, keywords = array['Eddy current testing (ECT)', 'In-line inspection', 'Non-destructive testing (NDT) method', 'Rail health monitoring system', 'Signal-to-noise ratio']::text[] where scopus_eid = '2-s2.0-105014287481';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'gulsim.rysbayeva') from public.publications where scopus_eid = '2-s2.0-105014287481' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Design and real-time sensitivity evaluation of directional eddy current probes on extracted rails', 2026, 'Article', 'https://doi.org/10.1016/j.measurement.2025.119611', 'Measurement: Journal of the International Measurement Confederation',
+  'Elsevier B.V.', 3, true, 'https://www.scopus.com/pages/publications/105021088166?origin=resultslist', '2-s2.0-105021088166', array['Eddy current testing', 'Lift-off', 'Non-destructive testing', 'Probe optimization', 'Real-time inspection', 'Signal-to-noise ratio']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105021088166');
+update public.publications set citations = 3, keywords = array['Eddy current testing', 'Lift-off', 'Non-destructive testing', 'Probe optimization', 'Real-time inspection', 'Signal-to-noise ratio']::text[] where scopus_eid = '2-s2.0-105021088166';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'gulsim.rysbayeva') from public.publications where scopus_eid = '2-s2.0-105021088166' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'High-speed eddy current testing in ensuring rail integrity: an inspection-based study', 2026, 'Article', 'https://doi.org/10.1088/2631-8695/ae484e', 'Engineering Research Express',
+  null, 2, true, 'https://www.scopus.com/pages/publications/105032372120?origin=resultslist', '2-s2.0-105032372120', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105032372120');
+update public.publications set citations = 2, keywords = array[]::text[] where scopus_eid = '2-s2.0-105032372120';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'gulsim.rysbayeva') from public.publications where scopus_eid = '2-s2.0-105032372120' on conflict do nothing;
+
+-- Ingkar Baidaly
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('ingkar.baidaly', 'Ingkar', 'Baidaly', 'Ingkar Baidaly', 'Jas maman', 'Bachelor', 'ingkar.baidaly@sdu.edu.kz',
+  null, null, '60623891100', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Ingkar+Baidaly',
+  0, 0, 0, 1,
+  array['autnomous mobile robot navigation', 'deep reinforcement learning', 'multi-room navigation', 'robot operating system']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Autonomous Mobile Robot Navigation in Multi-Room Environments Using Twin Delayed Deep Deterministic Policy Gradient (TD3)', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488749', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038347898?origin=resultslist', '2-s2.0-105038347898', array['Autnomous mobile robot navigation', 'Deep reinforcement learning', 'Multi-room navigation', 'Robot operating system']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038347898');
+update public.publications set citations = 0, keywords = array['Autnomous mobile robot navigation', 'Deep reinforcement learning', 'Multi-room navigation', 'Robot operating system']::text[] where scopus_eid = '2-s2.0-105038347898';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ingkar.baidaly') from public.publications where scopus_eid = '2-s2.0-105038347898' on conflict do nothing;
+
+-- Kamila Orynbekova
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('kamila.orynbekova', 'Kamila', 'Orynbekova', 'Kamila Orynbekova', 'Assistant Professor SDU', 'PhD', 'kamila.orynbekova@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-2182-2914', '57207759934', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Kamila+Orynbekova',
+  3, 0, 17, 8,
+  array['apache spark', 'natural language processing', 'distributed system', 'knowledge-based approach', 'machine learning model', 'mapreduce', 'recommender system', 'text-based approach']::text[], '[{"topic_name":"Topic Modeling","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":3},{"topic_name":"Sentiment Analysis and Opinion Mining","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":3},{"topic_name":"Cloud Computing and Resource Management","subfield":"Information Systems","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Natural Language Processing Techniques","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":2},{"topic_name":"Data Stream Mining Techniques","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":2}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A novel recommender system for adapting single machine problems to distributed systems within MapReduce', 2025, 'Article', 'https://doi.org/10.11591/eei.v14i1.8370', 'Bulletin of Electrical Engineering and Informatics',
+  'Institute of Advanced Engineering and Science', 0, true, 'https://www.scopus.com/pages/publications/85210854573?origin=resultslist', '2-s2.0-85210854573', array['Distributed system', 'Knowledge-based approach', 'Machine learning model', 'MapReduce', 'Recommender system', 'Text-based approach']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85210854573');
+update public.publications set citations = 0, keywords = array['Distributed system', 'Knowledge-based approach', 'Machine learning model', 'MapReduce', 'Recommender system', 'Text-based approach']::text[] where scopus_eid = '2-s2.0-85210854573';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'kamila.orynbekova') from public.publications where scopus_eid = '2-s2.0-85210854573' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Defining Semantically Close Words of Kazakh Language with Distributed System Apache Spark', 2023, 'Article', 'https://doi.org/10.3390/bdcc7040160', 'Big Data and Cognitive Computing',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 5, true, 'https://www.scopus.com/pages/publications/85180637999?origin=resultslist', '2-s2.0-85180637999', array['Apache Spark', 'cosine', 'FAISS', 'natural language processing', 'semantically close words', 'vector']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85180637999');
+update public.publications set citations = 5, keywords = array['Apache Spark', 'cosine', 'FAISS', 'natural language processing', 'semantically close words', 'vector']::text[] where scopus_eid = '2-s2.0-85180637999';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'kamila.orynbekova') from public.publications where scopus_eid = '2-s2.0-85180637999' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Computing feature vectors of students for face recognition using Apache Spark', 2019, 'Conference paper', 'https://doi.org/10.1109/ICECCO48375.2019.9043282', '2019 15th International Conference on Electronics, Computer and Computation, ICECCO 2019',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85083494092?origin=resultslist', '2-s2.0-85083494092', array['Big Data', 'Face recognition', 'Feature vectors', 'Spark']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85083494092');
+update public.publications set citations = 0, keywords = array['Big Data', 'Face recognition', 'Feature vectors', 'Spark']::text[] where scopus_eid = '2-s2.0-85083494092';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'kamila.orynbekova') from public.publications where scopus_eid = '2-s2.0-85083494092' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Recommendation System for Human Resource Management by the Use of Apache Spark Cluster', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147129', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/85163752577?origin=resultslist', '2-s2.0-85163752577', array['Apache Spark', 'distributed systems', 'HR', 'human resources', 'machine learning in HR', 'recommendation systems']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163752577');
+update public.publications set citations = 5, keywords = array['Apache Spark', 'distributed systems', 'HR', 'human resources', 'machine learning in HR', 'recommendation systems']::text[] where scopus_eid = '2-s2.0-85163752577';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'kamila.orynbekova') from public.publications where scopus_eid = '2-s2.0-85163752577' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Algorithm for reduction of space allocation of the boxes in the warehouse', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634695', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85062875839?origin=resultslist', '2-s2.0-85062875839', array['Algorithm', 'Allocation', 'Database', 'Optimize', 'Smart', 'Space', 'Statistics', 'Time']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062875839');
+update public.publications set citations = 0, keywords = array['Algorithm', 'Allocation', 'Database', 'Optimize', 'Smart', 'Space', 'Statistics', 'Time']::text[] where scopus_eid = '2-s2.0-85062875839';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'kamila.orynbekova') from public.publications where scopus_eid = '2-s2.0-85062875839' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Evaluating Large Language Models for Kazakh Question Generation: A Comparative Study of ChatGPT and Gemma', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488827', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038342232?origin=resultslist', '2-s2.0-105038342232', array['ChatGPT', 'educational technology', 'Gemma', 'Kazakh language', 'Large language models', 'low-resource languages', 'natural language processing', 'question generation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038342232');
+update public.publications set citations = 0, keywords = array['ChatGPT', 'educational technology', 'Gemma', 'Kazakh language', 'Large language models', 'low-resource languages', 'natural language processing', 'question generation']::text[] where scopus_eid = '2-s2.0-105038342232';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'kamila.orynbekova') from public.publications where scopus_eid = '2-s2.0-105038342232' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'MBTI personality classification using Apache Spark', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663858', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 4, false, 'https://www.scopus.com/pages/publications/85124992958?origin=resultslist', '2-s2.0-85124992958', array['Apache Spark', 'Logistic Regression', 'MBTI', 'Naive Bayes', 'SVM']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124992958');
+update public.publications set citations = 4, keywords = array['Apache Spark', 'Logistic Regression', 'MBTI', 'Naive Bayes', 'SVM']::text[] where scopus_eid = '2-s2.0-85124992958';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'kamila.orynbekova') from public.publications where scopus_eid = '2-s2.0-85124992958' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'MapReduce Solutions Classification by Their Implementation', 2023, 'Article', 'https://doi.org/10.3991/ijep.v13i5.38867', 'International Journal of Engineering Pedagogy',
+  null, 3, true, 'https://www.scopus.com/pages/publications/85166402233?origin=resultslist', '2-s2.0-85166402233', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85166402233');
+update public.publications set citations = 3, keywords = array[]::text[] where scopus_eid = '2-s2.0-85166402233';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'kamila.orynbekova') from public.publications where scopus_eid = '2-s2.0-85166402233' on conflict do nothing;
+
+-- Kanat Khazimov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('kanat.khazimov', 'Kanat', 'Khazimov', 'Kanat Khazimov', 'Assistant Professor SDU', 'PhD', 'kanat.khazimov@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0001-7926-2940', '56469755000', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Kanat+Khazimov',
+  2, 0, 7, 3,
+  array['bee products', 'solar dryer', 'solar energy', 'temperature', 'ansys fluent', 'bee bread granule', 'python', 'shelving']::text[], '[{"topic_name":"Soil Mechanics and Vehicle Dynamics","subfield":"Civil and Structural Engineering","field":"Engineering","domain":"Physical Sciences","works_count":3},{"topic_name":"Heat Transfer and Optimization","subfield":"Mechanical Engineering","field":"Engineering","domain":"Physical Sciences","works_count":2},{"topic_name":"Insect Pest Control Strategies","subfield":"Plant Science","field":"Agricultural and Biological Sciences","domain":"Life Sciences","works_count":2},{"topic_name":"Bee Products Chemical Analysis","subfield":"Insect Science","field":"Agricultural and Biological Sciences","domain":"Life Sciences","works_count":2},{"topic_name":"Insect and Pesticide Research","subfield":"Insect Science","field":"Agricultural and Biological Sciences","domain":"Life Sciences","works_count":2}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Bee Bread Granule Drying in a Solar Dryer with Mobile Shelves', 2025, 'Article', 'https://doi.org/10.3390/en18205472', 'Energies',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 2, true, 'https://www.scopus.com/pages/publications/105020239415?origin=resultslist', '2-s2.0-105020239415', array['ANSYS Fluent', 'bee bread granule', 'bee products', 'Python', 'shelving', 'solar dryer', 'solar energy', 'temperature']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105020239415');
+update public.publications set citations = 2, keywords = array['ANSYS Fluent', 'bee bread granule', 'bee products', 'Python', 'shelving', 'solar dryer', 'solar energy', 'temperature']::text[] where scopus_eid = '2-s2.0-105020239415';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'kanat.khazimov') from public.publications where scopus_eid = '2-s2.0-105020239415' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Bee Bread Drying Process Intensification in Combs Using Solar Energy', 2025, 'Article', 'https://doi.org/10.3390/en18092226', 'Energies',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 2, true, 'https://www.scopus.com/pages/publications/105004861250?origin=resultslist', '2-s2.0-105004861250', array['bee bread', 'bee products', 'energy', 'solar dryer', 'solar energy', 'temperature']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105004861250');
+update public.publications set citations = 2, keywords = array['bee bread', 'bee products', 'energy', 'solar dryer', 'solar energy', 'temperature']::text[] where scopus_eid = '2-s2.0-105004861250';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'kanat.khazimov') from public.publications where scopus_eid = '2-s2.0-105004861250' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Thermal Welding in the Neck of Vacuum Flexible Container with Self-propelled Welding Module', 2024, 'Article', 'https://doi.org/10.14716/ijtech.v15i4.6486', 'International Journal of Technology',
+  null, 3, true, 'https://www.scopus.com/pages/publications/85199115213?origin=resultslist', '2-s2.0-85199115213', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85199115213');
+update public.publications set citations = 3, keywords = array[]::text[] where scopus_eid = '2-s2.0-85199115213';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'kanat.khazimov') from public.publications where scopus_eid = '2-s2.0-85199115213' on conflict do nothing;
+
+-- Lyazzat Atymtayeva
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('lyazzat.atymtayeva', 'Lyazzat', 'Atymtayeva', 'Lyazzat Atymtayeva', 'Associate Professor', 'Doctor of Science', 'lyazzat.atymtayeva@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0001-9201-1118', '42061007500', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Lyazzat+Atymtayeva',
+  4, 1, 126, 8,
+  array['machine learning', 'computer vision', 'deep learning', 'animal recognition and identification', 'artificial neural network (ann)', 'detection', 'face recognition', 'non-invasive automated monitoring']::text[], '[{"topic_name":"Network Security and Intrusion Detection","subfield":"Computer Networks and Communications","field":"Computer Science","domain":"Physical Sciences","works_count":4},{"topic_name":"Information and Cyber Security","subfield":"Information Systems","field":"Computer Science","domain":"Physical Sciences","works_count":4},{"topic_name":"Big Data and Business Intelligence","subfield":"Management Information Systems","field":"Business, Management and Accounting","domain":"Social Sciences","works_count":3},{"topic_name":"Advanced Data Processing Techniques","subfield":"Control and Systems Engineering","field":"Engineering","domain":"Physical Sciences","works_count":3},{"topic_name":"Building Energy and Comfort Optimization","subfield":"Building and Construction","field":"Engineering","domain":"Physical Sciences","works_count":2}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Neural network methods for the detection of farm animals in dense dynamic groups on images', 2024, 'Article', 'https://doi.org/10.18576/amis/180204', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 5, false, 'https://www.scopus.com/pages/publications/85185945423?origin=resultslist', '2-s2.0-85185945423', array['animal recognition and identification', 'artificial neural network (ANN)', 'detection', 'face recognition', 'non-invasive automated monitoring', 'tracking', 'YOLOv5']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85185945423');
+update public.publications set citations = 5, keywords = array['animal recognition and identification', 'artificial neural network (ANN)', 'detection', 'face recognition', 'non-invasive automated monitoring', 'tracking', 'YOLOv5']::text[] where scopus_eid = '2-s2.0-85185945423';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'lyazzat.atymtayeva') from public.publications where scopus_eid = '2-s2.0-85185945423' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Choosing the intelligent thermostats for the effective decision making in BEMS', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147131', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 3, false, 'https://www.scopus.com/pages/publications/85163716586?origin=resultslist', '2-s2.0-85163716586', array['Building Energy Management Systems (BEMS)', 'geolocation', 'heating system', 'individual room control and remote control', 'smart temperature regulators', 'ventilation and air conditioning (HVAC)']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163716586');
+update public.publications set citations = 3, keywords = array['Building Energy Management Systems (BEMS)', 'geolocation', 'heating system', 'individual room control and remote control', 'smart temperature regulators', 'ventilation and air conditioning (HVAC)']::text[] where scopus_eid = '2-s2.0-85163716586';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'lyazzat.atymtayeva') from public.publications where scopus_eid = '2-s2.0-85163716586' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Machine Learning Approach to Microclimate Monitoring and Fault Detection', 2025, 'Article', 'https://doi.org/10.18576/amis/190209', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 7, false, 'https://www.scopus.com/pages/publications/85215395196?origin=resultslist', '2-s2.0-85215395196', array['and Air Conditioning (HVAC)', 'Cross-Industry Standard Process for Data Mining(CRISP-DM)', 'Data Variability and Noise in FDD', 'Energy Efficiency in Buildings', 'Fault Detection and Diagnosis (FDD)', 'Heating', 'Machine Learning (ML) in HVAC Systems', 'Microclimate Parameters', 'Principal Component Analysis (PCA)', 'Ventilation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85215395196');
+update public.publications set citations = 7, keywords = array['and Air Conditioning (HVAC)', 'Cross-Industry Standard Process for Data Mining(CRISP-DM)', 'Data Variability and Noise in FDD', 'Energy Efficiency in Buildings', 'Fault Detection and Diagnosis (FDD)', 'Heating', 'Machine Learning (ML) in HVAC Systems', 'Microclimate Parameters', 'Principal Component Analysis (PCA)', 'Ventilation']::text[] where scopus_eid = '2-s2.0-85215395196';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'lyazzat.atymtayeva') from public.publications where scopus_eid = '2-s2.0-85215395196' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Automated system for monitoring of educational processes: collection, management, and modeling of data', 2020, 'Conference paper', 'https://doi.org/10.1007/978-3-030-52306-0_24', 'Lecture Notes in Business Information Processing',
+  'Springer', 4, false, 'https://www.scopus.com/pages/publications/85088511833?origin=resultslist', '2-s2.0-85088511833', array['Data collection', 'Data modeling', 'Education', 'Machine learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85088511833');
+update public.publications set citations = 4, keywords = array['Data collection', 'Data modeling', 'Education', 'Machine learning']::text[] where scopus_eid = '2-s2.0-85088511833';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'lyazzat.atymtayeva') from public.publications where scopus_eid = '2-s2.0-85088511833' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Using the Object Perimeters in MGA Algorithms for the Best Choice of Cybernetic Security Means', 2025, 'Article', 'https://doi.org/10.18576/amis/190318', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 0, false, 'https://www.scopus.com/pages/publications/105032913793?origin=resultslist', '2-s2.0-105032913793', array['distributed computing system', 'genetic algorithm', 'information security', 'optimization']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105032913793');
+update public.publications set citations = 0, keywords = array['distributed computing system', 'genetic algorithm', 'information security', 'optimization']::text[] where scopus_eid = '2-s2.0-105032913793';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'lyazzat.atymtayeva') from public.publications where scopus_eid = '2-s2.0-105032913793' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Fast Facial Expression Recognition System: Selection of Models', 2023, 'Article', 'https://doi.org/10.18576/amis/170220', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 94, false, 'https://www.scopus.com/pages/publications/85151876125?origin=resultslist', '2-s2.0-85151876125', array['computer vision', 'deep convolutional neural networks (Deep CNN)', 'deep learning', 'facial expression recognition (FER)', 'pattern recognition']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85151876125');
+update public.publications set citations = 94, keywords = array['computer vision', 'deep convolutional neural networks (Deep CNN)', 'deep learning', 'facial expression recognition (FER)', 'pattern recognition']::text[] where scopus_eid = '2-s2.0-85151876125';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'lyazzat.atymtayeva') from public.publications where scopus_eid = '2-s2.0-85151876125' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Improved facial expression recognition with xception deep net and preprocessed images', 2019, 'Article', 'https://doi.org/10.18576/amis/130520', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 4, false, 'https://www.scopus.com/pages/publications/85080055103?origin=resultslist', '2-s2.0-85080055103', array['Computer vision', 'Convolutional neural networks', 'Deep learning', 'Facial expression recognition']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85080055103');
+update public.publications set citations = 4, keywords = array['Computer vision', 'Convolutional neural networks', 'Deep learning', 'Facial expression recognition']::text[] where scopus_eid = '2-s2.0-85080055103';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'lyazzat.atymtayeva') from public.publications where scopus_eid = '2-s2.0-85080055103' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Survey of Applications of Machine Learning for Fault Detection, Diagnosis and Prediction in Microclimate Control Systems', 2023, 'Review', 'https://doi.org/10.3390/en16083508', 'Energies',
+  'MDPI', 9, true, 'https://www.scopus.com/pages/publications/85156146528?origin=resultslist', '2-s2.0-85156146528', array['fault detection and diagnosis', 'machine learning', 'microclimate control systems', 'prediction methods']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85156146528');
+update public.publications set citations = 9, keywords = array['fault detection and diagnosis', 'machine learning', 'microclimate control systems', 'prediction methods']::text[] where scopus_eid = '2-s2.0-85156146528';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'lyazzat.atymtayeva') from public.publications where scopus_eid = '2-s2.0-85156146528' on conflict do nothing;
+
+-- Madina Alimanova
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('madina.alimanova', 'Madina', 'Alimanova', 'Madina Alimanova', 'Associate Professor  SDU', 'PhD', 'madina.alimanova@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-7282-0820', '55938129800', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Madina+Alimanova',
+  6, 5, 153, 18,
+  array['gamification', 'artificial intelligence', '3d printing', 'leap motion', 'virtual reality', 'computer science', 'modeling', 'unity 3d']::text[], '[{"topic_name":"Educational Games and Gamification","subfield":"Developmental and Educational Psychology","field":"Psychology","domain":"Social Sciences","works_count":7},{"topic_name":"Autism Spectrum Disorder Research","subfield":"Cognitive Neuroscience","field":"Neuroscience","domain":"Life Sciences","works_count":5},{"topic_name":"Virtual Reality Applications and Impacts","subfield":"Human-Computer Interaction","field":"Computer Science","domain":"Physical Sciences","works_count":4},{"topic_name":"Stroke Rehabilitation and Recovery","subfield":"Rehabilitation","field":"Medicine","domain":"Health Sciences","works_count":3},{"topic_name":"Engineering Technology and Methodologies","subfield":"Industrial and Manufacturing Engineering","field":"Engineering","domain":"Physical Sciences","works_count":3}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Application of game design elements on higher education in Computer Science', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663756', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85124952330?origin=resultslist', '2-s2.0-85124952330', array['computer science', 'distance learning', 'game design', 'gamification', 'higher education']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124952330');
+update public.publications set citations = 0, keywords = array['computer science', 'distance learning', 'game design', 'gamification', 'higher education']::text[] where scopus_eid = '2-s2.0-85124952330';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-85124952330' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select '3D game with weapons of Kazakh Khanate', 2016, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2015.7416866', 'Proceedings of the 2015 12th International Conference on Electronics Computer and Computation, ICECCO 2015',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/84964691937?origin=resultslist', '2-s2.0-84964691937', array['3D modeling', 'computer game', 'Kazakh history', 'traditional weapons', 'war style']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84964691937');
+update public.publications set citations = 0, keywords = array['3D modeling', 'computer game', 'Kazakh history', 'traditional weapons', 'war style']::text[] where scopus_eid = '2-s2.0-84964691937';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-84964691937' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Advances in artificial intelligence-driven 3D model generation: a review of GAN and VAE methodologies', 2025, 'Article', 'https://doi.org/10.11591/eei.v14i6.10755', 'Bulletin of Electrical Engineering and Informatics',
+  'Institute of Advanced Engineering and Science', 0, true, 'https://www.scopus.com/pages/publications/105024093702?origin=resultslist', '2-s2.0-105024093702', array['3D model generation', '3D reconstruction', 'Artificial intelligence', 'Generative adversarial networks', 'Latent space', 'Polygon mesh', 'Variational autoencoder']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105024093702');
+update public.publications set citations = 0, keywords = array['3D model generation', '3D reconstruction', 'Artificial intelligence', 'Generative adversarial networks', 'Latent space', 'Polygon mesh', 'Variational autoencoder']::text[] where scopus_eid = '2-s2.0-105024093702';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-105024093702' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Mobile program for voicing books', 2016, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2015.7416893', 'Proceedings of the 2015 12th International Conference on Electronics Computer and Computation, ICECCO 2015',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/84964691603?origin=resultslist', '2-s2.0-84964691603', array['Kazakh language', 'mobile application', 'programing', 'scoring', 'text reader']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84964691603');
+update public.publications set citations = 0, keywords = array['Kazakh language', 'mobile application', 'programing', 'scoring', 'text reader']::text[] where scopus_eid = '2-s2.0-84964691603';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-84964691603' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Gamification of hand rehabilitation process using virtual reality tools: Using leap motion for hand rehabilitation', 2017, 'Conference paper', 'https://doi.org/10.1109/IRC.2017.76', 'Proceedings - 2017 1st IEEE International Conference on Robotic Computing, IRC 2017',
+  'Institute of Electrical and Electronics Engineers Inc.', 84, false, 'https://www.scopus.com/pages/publications/85020229587?origin=resultslist', '2-s2.0-85020229587', array['3D printing', 'Bionic controlled robot arm', 'Gamification', 'Leap Motion', 'Modeling', 'Unity 3D', 'Virtual reality']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85020229587');
+update public.publications set citations = 84, keywords = array['3D printing', 'Bionic controlled robot arm', 'Gamification', 'Leap Motion', 'Modeling', 'Unity 3D', 'Virtual reality']::text[] where scopus_eid = '2-s2.0-85020229587';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-85020229587' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The 3D printing in Kazakhstan: Problems and solutions', 2016, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2015.7416905', 'Proceedings of the 2015 12th International Conference on Electronics Computer and Computation, ICECCO 2015',
+  'Institute of Electrical and Electronics Engineers Inc.', 3, false, 'https://www.scopus.com/pages/publications/84964666300?origin=resultslist', '2-s2.0-84964666300', array['3D content', '3D technology', 'education', 'science']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84964666300');
+update public.publications set citations = 3, keywords = array['3D content', '3D technology', 'education', 'science']::text[] where scopus_eid = '2-s2.0-84964666300';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-84964666300' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Gameful strategies in the education of autistic children: a systematic literature review, scientometric analysis, and future research roadmap', 2024, 'Review', 'https://doi.org/10.1186/s40561-024-00309-6', 'Smart Learning Environments',
+  'Springer', 10, true, 'https://www.scopus.com/pages/publications/85195373160?origin=resultslist', '2-s2.0-85195373160', array['Early years education', 'Gameful approaches', 'Special needs education', 'Systematic review', 'Teaching/learning strategies']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85195373160');
+update public.publications set citations = 10, keywords = array['Early years education', 'Gameful approaches', 'Special needs education', 'Systematic review', 'Teaching/learning strategies']::text[] where scopus_eid = '2-s2.0-85195373160';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-85195373160' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The Solution of Semi-empirical Equation of Turbulent Diffusion in Problems of Polluting Impurity Transfer by Gauss Approach', 2016, 'Conference paper', 'https://doi.org/10.1016/j.procs.2016.08.057', 'Procedia Computer Science',
+  'Elsevier B.V.', 6, true, 'https://www.scopus.com/pages/publications/84985914420?origin=resultslist', '2-s2.0-84985914420', array['air quality', 'concentration', 'equation of turbulent diffusion', 'Gauss function', 'pollution monitoring robot system']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84985914420');
+update public.publications set citations = 6, keywords = array['air quality', 'concentration', 'equation of turbulent diffusion', 'Gauss function', 'pollution monitoring robot system']::text[] where scopus_eid = '2-s2.0-84985914420';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-84985914420' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A model of virtual training application for simulation of technological processes', 2015, 'Conference paper', 'https://doi.org/10.1016/j.procs.2015.07.192', 'Procedia Computer Science',
+  'Elsevier B.V.', 12, true, 'https://www.scopus.com/pages/publications/84939210945?origin=resultslist', '2-s2.0-84939210945', array['Control system', 'Human-machine interface', 'In situ leaching', 'Simulation of technological processes', 'Supervisory Control and Data Acquisition (SCADA)', 'Virtual training application', 'Web applications', 'Workflow']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84939210945');
+update public.publications set citations = 12, keywords = array['Control system', 'Human-machine interface', 'In situ leaching', 'Simulation of technological processes', 'Supervisory Control and Data Acquisition (SCADA)', 'Virtual training application', 'Web applications', 'Workflow']::text[] where scopus_eid = '2-s2.0-84939210945';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-84939210945' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Comparison of the development of 3D printing in Kazakhstan relative to the world level', 2019, 'Conference paper', 'https://doi.org/10.1109/ICECCO48375.2019.9043212', '2019 15th International Conference on Electronics, Computer and Computation, ICECCO 2019',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85083498051?origin=resultslist', '2-s2.0-85083498051', array['3d printing', 'Additive technologies', 'Bioprinting', 'Comparative analysis', 'Modeling', 'New technology']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85083498051');
+update public.publications set citations = 0, keywords = array['3d printing', 'Additive technologies', 'Bioprinting', 'Comparative analysis', 'Modeling', 'New technology']::text[] where scopus_eid = '2-s2.0-85083498051';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-85083498051' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Developing an Immersive Virtual Reality Training System to Enrich Social Interaction and Communication Skills for Children With Autism Spectrum Disorder', 2022, 'Conference paper', 'https://doi.org/10.1109/SIST54437.2022.9945733', 'SIST 2022 - 2022 International Conference on Smart Information Systems and Technologies, Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 14, false, 'https://www.scopus.com/pages/publications/85143428570?origin=resultslist', '2-s2.0-85143428570', array['Artificial Intelligence', 'Autism spectrum disorders', 'Communicational skills', 'Immersive Virtual reality', 'Social interaction']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85143428570');
+update public.publications set citations = 14, keywords = array['Artificial Intelligence', 'Autism spectrum disorders', 'Communicational skills', 'Immersive Virtual reality', 'Social interaction']::text[] where scopus_eid = '2-s2.0-85143428570';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-85143428570' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Understanding experiences and interactions of children with Asperger’s syndrome in Virtual Reality-based learning systems', 2025, 'Article', 'https://doi.org/10.1080/10494820.2024.2364250', 'Interactive Learning Environments',
+  'Routledge', 6, true, 'https://www.scopus.com/pages/publications/105001273050?origin=resultslist', '2-s2.0-105001273050', array['Asperger’s syndrome', 'Autism Spectrum Disorder', 'learning technologies', 'social interaction', 'virtual reality']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105001273050');
+update public.publications set citations = 6, keywords = array['Asperger’s syndrome', 'Autism Spectrum Disorder', 'learning technologies', 'social interaction', 'virtual reality']::text[] where scopus_eid = '2-s2.0-105001273050';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-105001273050' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Training unity machine learning agents using reinforcement learning method', 2019, 'Conference paper', 'https://doi.org/10.1109/ICECCO48375.2019.9043194', '2019 15th International Conference on Electronics, Computer and Computation, ICECCO 2019',
+  'Institute of Electrical and Electronics Engineers Inc.', 10, false, 'https://www.scopus.com/pages/publications/85083502635?origin=resultslist', '2-s2.0-85083502635', array['Artificial Intelligence', 'Computer Science', 'Game Development', 'Machine Learning', 'Unity']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85083502635');
+update public.publications set citations = 10, keywords = array['Artificial Intelligence', 'Computer Science', 'Game Development', 'Machine Learning', 'Unity']::text[] where scopus_eid = '2-s2.0-85083502635';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-85083502635' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Overview of a low-cost self-made 3D food printer', 2017, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2017.8333332', '2017 13th International Conference on Electronics, Computer and Computation, ICECCO 2017',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/85050514143?origin=resultslist', '2-s2.0-85050514143', array['3D printer', 'additive manufacturing', 'cost-effective', 'food printing', 'prototyping', 'Stereolithography(STL)']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85050514143');
+update public.publications set citations = 5, keywords = array['3D printer', 'additive manufacturing', 'cost-effective', 'food printing', 'prototyping', 'Stereolithography(STL)']::text[] where scopus_eid = '2-s2.0-85050514143';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-85050514143' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The development of education methods of electricity and magnetism discipline in higher educational institutions', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634665', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85062852983?origin=resultslist', '2-s2.0-85062852983', array['Electrical phenomena', 'Electrodynamics', 'Electromagnetic field', 'Electromagnetic induction', 'Experiments', 'Physics', 'Teaching methods', 'Technical education']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062852983');
+update public.publications set citations = 0, keywords = array['Electrical phenomena', 'Electrodynamics', 'Electromagnetic field', 'Electromagnetic induction', 'Experiments', 'Physics', 'Teaching methods', 'Technical education']::text[] where scopus_eid = '2-s2.0-85062852983';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-85062852983' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Design of a hand rehabilitation gaming platform using IoT technologies', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663754', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85124997162?origin=resultslist', '2-s2.0-85124997162', array['3D printing', 'Arduino', 'Gamification', 'Leap Motion', 'Robotic Arm', 'Virtual reality (VR)']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124997162');
+update public.publications set citations = 0, keywords = array['3D printing', 'Arduino', 'Gamification', 'Leap Motion', 'Robotic Arm', 'Virtual reality (VR)']::text[] where scopus_eid = '2-s2.0-85124997162';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-85124997162' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Application of Gamification Tool in Hand Rehabilitation Process', 2021, 'Conference paper', 'https://doi.org/10.1109/SIST50301.2021.9465956', 'SIST 2021 - 2021 IEEE International Conference on Smart Information Systems and Technologies',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85113879582?origin=resultslist', '2-s2.0-85113879582', array['FPV', 'gamification', 'Leap Motion', 'TPV', 'Unity 3D', 'virtual reality']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85113879582');
+update public.publications set citations = 1, keywords = array['FPV', 'gamification', 'Leap Motion', 'TPV', 'Unity 3D', 'virtual reality']::text[] where scopus_eid = '2-s2.0-85113879582';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-85113879582' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The development of conceptual model of creation of an intelligent system: Application on robotic systems', 2017, 'Conference paper', 'https://doi.org/10.1109/IRC.2017.75', 'Proceedings - 2017 1st IEEE International Conference on Robotic Computing, IRC 2017',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, false, 'https://www.scopus.com/pages/publications/85020228995?origin=resultslist', '2-s2.0-85020228995', array['Decision making processes', 'Intelligent systems', 'Multiagent systems', 'Planing', 'Robots']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85020228995');
+update public.publications set citations = 2, keywords = array['Decision making processes', 'Intelligent systems', 'Multiagent systems', 'Planing', 'Robots']::text[] where scopus_eid = '2-s2.0-85020228995';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'madina.alimanova') from public.publications where scopus_eid = '2-s2.0-85020228995' on conflict do nothing;
+
+-- Magzhan Kairanbay
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('magzhan.kairanbay', 'Magzhan', 'Kairanbay', 'Magzhan Kairanbay', 'Senior Lecturer', 'PhD', 'magzhan.kairanbay@sdu.edu.kz',
+  null, null, '57170931700', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Magzhan+Kairanbay',
+  1, 1, 31, 2,
+  array['childhood of apraxia of speech', 'detection of abnormal behaviour', 'posenet', 'deep dilated mask', 'gesture recognition', 'ssd-cnn', 'svm', 'video sequences']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Detection Childhood of Apraxia of Speech From the Video Data Using PoseNet', 2022, 'Conference paper', 'https://doi.org/10.1109/SIST54437.2022.9945794', 'SIST 2022 - 2022 International Conference on Smart Information Systems and Technologies, Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85143401052?origin=resultslist', '2-s2.0-85143401052', array['Childhood of Apraxia of Speech', 'detection of abnormal behaviour', 'PoseNet']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85143401052');
+update public.publications set citations = 1, keywords = array['Childhood of Apraxia of Speech', 'detection of abnormal behaviour', 'PoseNet']::text[] where scopus_eid = '2-s2.0-85143401052';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'magzhan.kairanbay') from public.publications where scopus_eid = '2-s2.0-85143401052' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Single Shot Detector CNN and Deep Dilated Masks for Vision-Based Hand Gesture Recognition From Video Sequences', 2024, 'Article', 'https://doi.org/10.1109/ACCESS.2024.3360857', 'IEEE Access',
+  'Institute of Electrical and Electronics Engineers Inc.', 30, true, 'https://www.scopus.com/pages/publications/85184333719?origin=resultslist', '2-s2.0-85184333719', array['deep dilated mask', 'Gesture recognition', 'SSD-CNN', 'SVM', 'video sequences']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85184333719');
+update public.publications set citations = 30, keywords = array['deep dilated mask', 'Gesture recognition', 'SSD-CNN', 'SVM', 'video sequences']::text[] where scopus_eid = '2-s2.0-85184333719';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'magzhan.kairanbay') from public.publications where scopus_eid = '2-s2.0-85184333719' on conflict do nothing;
+
+-- Makhambet Yerzhan
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('makhambet.yerzhan', 'Makhambet', 'Yerzhan', 'Makhambet Yerzhan', 'Lecturer', 'Bachelor', 'makhambet.yerzhan@sdu.edu.kz',
+  null, null, '59255906700', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Makhambet+Yerzhan',
+  1, 0, 8, 1,
+  array['banknote classification', 'hybrid approach', 'kazakh banknotes', 'machine learning', 'model stacking', 'traditional approach', 'visual impairments']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Comparative analysis of machine learning approaches in Kazakh banknote classification', 2024, 'Article', 'https://doi.org/10.11591/eei.v13i5.8004', 'Bulletin of Electrical Engineering and Informatics',
+  'Institute of Advanced Engineering and Science', 8, true, 'https://www.scopus.com/pages/publications/85200974099?origin=resultslist', '2-s2.0-85200974099', array['Banknote classification', 'Hybrid approach', 'Kazakh banknotes', 'Machine learning', 'Model stacking', 'Traditional approach', 'Visual impairments']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85200974099');
+update public.publications set citations = 8, keywords = array['Banknote classification', 'Hybrid approach', 'Kazakh banknotes', 'Machine learning', 'Model stacking', 'Traditional approach', 'Visual impairments']::text[] where scopus_eid = '2-s2.0-85200974099';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'makhambet.yerzhan') from public.publications where scopus_eid = '2-s2.0-85200974099' on conflict do nothing;
+
+-- Maksat Galiyev
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('maksat.galiyev', 'Maksat', 'Galiyev', 'Maksat Galiyev', 'Vice Dean for Social Affairs', 'Master', 'maksat.galiyev@sdu.edu.kz',
+  null, 'https://orcid.org/0009-0006-2045-7907', '60479615800', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Maksat+Galiyev',
+  0, 0, 0, 1,
+  array[]::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Numerical modeling and forecasting of water overflow through dams on the Syrdarya river', 2026, 'Article', 'https://doi.org/10.1515/eng-2025-0152', 'Open Engineering',
+  null, 0, true, 'https://www.scopus.com/pages/publications/105032546411?origin=resultslist', '2-s2.0-105032546411', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105032546411');
+update public.publications set citations = 0, keywords = array[]::text[] where scopus_eid = '2-s2.0-105032546411';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'maksat.galiyev') from public.publications where scopus_eid = '2-s2.0-105032546411' on conflict do nothing;
+
+-- Marat Urmanov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('marat.urmanov', 'Marat', 'Urmanov', 'Marat Urmanov', 'Educational Program Coordinator', 'Master', 'marat.urmanov@sdu.edu.kz',
+  null, null, '57216436545', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Marat+Urmanov',
+  3, 2, 30, 5,
+  array['computer science', 'gamification', 'artificial intelligence', 'social interaction', 'distance learning', 'game design', 'higher education', 'autism spectrum disorders']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Application of game design elements on higher education in Computer Science', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663756', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85124952330?origin=resultslist', '2-s2.0-85124952330', array['computer science', 'distance learning', 'game design', 'gamification', 'higher education']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124952330');
+update public.publications set citations = 0, keywords = array['computer science', 'distance learning', 'game design', 'gamification', 'higher education']::text[] where scopus_eid = '2-s2.0-85124952330';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'marat.urmanov') from public.publications where scopus_eid = '2-s2.0-85124952330' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Developing an Immersive Virtual Reality Training System to Enrich Social Interaction and Communication Skills for Children With Autism Spectrum Disorder', 2022, 'Conference paper', 'https://doi.org/10.1109/SIST54437.2022.9945733', 'SIST 2022 - 2022 International Conference on Smart Information Systems and Technologies, Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 14, false, 'https://www.scopus.com/pages/publications/85143428570?origin=resultslist', '2-s2.0-85143428570', array['Artificial Intelligence', 'Autism spectrum disorders', 'Communicational skills', 'Immersive Virtual reality', 'Social interaction']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85143428570');
+update public.publications set citations = 14, keywords = array['Artificial Intelligence', 'Autism spectrum disorders', 'Communicational skills', 'Immersive Virtual reality', 'Social interaction']::text[] where scopus_eid = '2-s2.0-85143428570';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'marat.urmanov') from public.publications where scopus_eid = '2-s2.0-85143428570' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Understanding experiences and interactions of children with Asperger’s syndrome in Virtual Reality-based learning systems', 2025, 'Article', 'https://doi.org/10.1080/10494820.2024.2364250', 'Interactive Learning Environments',
+  'Routledge', 6, true, 'https://www.scopus.com/pages/publications/105001273050?origin=resultslist', '2-s2.0-105001273050', array['Asperger’s syndrome', 'Autism Spectrum Disorder', 'learning technologies', 'social interaction', 'virtual reality']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105001273050');
+update public.publications set citations = 6, keywords = array['Asperger’s syndrome', 'Autism Spectrum Disorder', 'learning technologies', 'social interaction', 'virtual reality']::text[] where scopus_eid = '2-s2.0-105001273050';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'marat.urmanov') from public.publications where scopus_eid = '2-s2.0-105001273050' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Training unity machine learning agents using reinforcement learning method', 2019, 'Conference paper', 'https://doi.org/10.1109/ICECCO48375.2019.9043194', '2019 15th International Conference on Electronics, Computer and Computation, ICECCO 2019',
+  'Institute of Electrical and Electronics Engineers Inc.', 10, false, 'https://www.scopus.com/pages/publications/85083502635?origin=resultslist', '2-s2.0-85083502635', array['Artificial Intelligence', 'Computer Science', 'Game Development', 'Machine Learning', 'Unity']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85083502635');
+update public.publications set citations = 10, keywords = array['Artificial Intelligence', 'Computer Science', 'Game Development', 'Machine Learning', 'Unity']::text[] where scopus_eid = '2-s2.0-85083502635';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'marat.urmanov') from public.publications where scopus_eid = '2-s2.0-85083502635' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Design of a hand rehabilitation gaming platform using IoT technologies', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663754', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85124997162?origin=resultslist', '2-s2.0-85124997162', array['3D printing', 'Arduino', 'Gamification', 'Leap Motion', 'Robotic Arm', 'Virtual reality (VR)']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124997162');
+update public.publications set citations = 0, keywords = array['3D printing', 'Arduino', 'Gamification', 'Leap Motion', 'Robotic Arm', 'Virtual reality (VR)']::text[] where scopus_eid = '2-s2.0-85124997162';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'marat.urmanov') from public.publications where scopus_eid = '2-s2.0-85124997162' on conflict do nothing;
+
+-- Meiram Akhymbek
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('meiram.akhymbek', 'Meiram', 'Akhymbek', 'Meiram Akhymbek', 'Assistant Professor SDU', 'PhD', 'meiram.akhymbek@sdu.edu.kz',
+  null, null, '56367166700', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Meiram+Akhymbek',
+  0, 0, 0, 1,
+  array['35l71', '46l51', '47c15', 'gagliardo-nirenberg inequality', 'global well-posedness', 'nonlinear wave equations', 'quantum tori']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Global existence result for a semilinear wave equation on quantum tori', 2026, 'Book chapter', 'https://doi.org/10.1007/978-3-032-22493-4_1', 'Trends in Mathematics',
+  'Springer Science and Business Media Deutschland GmbH', 0, false, 'https://www.scopus.com/pages/publications/105049071731?origin=resultslist', '2-s2.0-105049071731', array['35L71', '46L51', '47C15', 'Gagliardo-Nirenberg inequality', 'Global well-posedness', 'Nonlinear wave equations', 'Quantum tori']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105049071731');
+update public.publications set citations = 0, keywords = array['35L71', '46L51', '47C15', 'Gagliardo-Nirenberg inequality', 'Global well-posedness', 'Nonlinear wave equations', 'Quantum tori']::text[] where scopus_eid = '2-s2.0-105049071731';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meiram.akhymbek') from public.publications where scopus_eid = '2-s2.0-105049071731' on conflict do nothing;
+
+-- Meirambek Zhaparov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('meirambek.zhaparov', 'Meirambek', 'Zhaparov', 'Meirambek Zhaparov', 'Assistant Professor SDU', 'PhD', 'meirambek.zhaparov@sdu.edu.kz',
+  null, null, '55637264200', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Meirambek+Zhaparov',
+  7, 5, 153, 17,
+  array['educational robots', 'internet of things', 'education', 'genetic algorithm', 'higher education', 'preference satisfaction', 'psychological compatibility', 'student-supervisor matching']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Optimizing preference satisfaction with genetic algorithm in matching students to supervisors', 2024, 'Article', 'https://doi.org/10.18576/amis/180114', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 11, false, 'https://www.scopus.com/pages/publications/85185475476?origin=resultslist', '2-s2.0-85185475476', array['genetic algorithm', 'higher education', 'preference satisfaction', 'psychological compatibility', 'student-supervisor matching']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85185475476');
+update public.publications set citations = 11, keywords = array['genetic algorithm', 'higher education', 'preference satisfaction', 'psychological compatibility', 'student-supervisor matching']::text[] where scopus_eid = '2-s2.0-85185475476';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-85185475476' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select '3D modelling based on virtual reality', 2016, 'Conference paper', 'https://doi.org/10.1109/CONFLUENCE.2016.7508151', 'Proceedings of the 2016 6th International Conference - Cloud System and Big Data Engineering, Confluence 2016',
+  'Institute of Electrical and Electronics Engineers Inc.', 3, false, 'https://www.scopus.com/pages/publications/85017295934?origin=resultslist', '2-s2.0-85017295934', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85017295934');
+update public.publications set citations = 3, keywords = array[]::text[] where scopus_eid = '2-s2.0-85017295934';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-85017295934' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Holistic Approach to Use Educational Robots for Supporting Computer Science Courses', 2024, 'Article', 'https://doi.org/10.3390/computers13040102', 'Computers',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 25, true, 'https://www.scopus.com/pages/publications/85191292133?origin=resultslist', '2-s2.0-85191292133', array['computer science', 'computer science curriculum', 'educational robots', 'FOSSBot']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85191292133');
+update public.publications set citations = 25, keywords = array['computer science', 'computer science curriculum', 'educational robots', 'FOSSBot']::text[] where scopus_eid = '2-s2.0-85191292133';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-85191292133' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Analysis of Self-esteem on Students'' Performance in Online Programming Competition', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147137', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85163778650?origin=resultslist', '2-s2.0-85163778650', array['computer science in education', 'correlation in education', 'edtech', 'online programming competition', 'self-efficacy', 'self-esteem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163778650');
+update public.publications set citations = 0, keywords = array['computer science in education', 'correlation in education', 'edtech', 'online programming competition', 'self-efficacy', 'self-esteem']::text[] where scopus_eid = '2-s2.0-85163778650';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-85163778650' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of an Educational Robot for Exploring the Internet of Things', 2024, 'Article', 'https://doi.org/10.14569/IJACSA.2024.01504120', 'International Journal of Advanced Computer Science and Applications',
+  'Science and Information Organization', 5, true, 'https://www.scopus.com/pages/publications/85192054891?origin=resultslist', '2-s2.0-85192054891', array['Arduino for Education', 'Educational robots', 'Internet of Things', 'IoT Education', 'IoT Educational Kit']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85192054891');
+update public.publications set citations = 5, keywords = array['Arduino for Education', 'Educational robots', 'Internet of Things', 'IoT Education', 'IoT Educational Kit']::text[] where scopus_eid = '2-s2.0-85192054891';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-85192054891' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Educational software of learning Kazakh language for children', 2014, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2014.6997543', 'Proceedings of the 11th International Conference on Electronics, Computer and Computation, ICECCO 2014',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/84921788050?origin=resultslist', '2-s2.0-84921788050', array['desktop', 'education', 'programming', 'Qt']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84921788050');
+update public.publications set citations = 0, keywords = array['desktop', 'education', 'programming', 'Qt']::text[] where scopus_eid = '2-s2.0-84921788050';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-84921788050' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Recognition of traffic signs', 2014, 'Conference paper', 'https://doi.org/10.1109/ICAICT.2014.7035948', '8th IEEE International Conference on Application of Information and Communication Technologies, AICT 2014 - Conference Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/84988241340?origin=resultslist', '2-s2.0-84988241340', array['Computer vision', 'Object detection', 'OpenCV', 'Traffic sign']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84988241340');
+update public.publications set citations = 0, keywords = array['Computer vision', 'Object detection', 'OpenCV', 'Traffic sign']::text[] where scopus_eid = '2-s2.0-84988241340';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-84988241340' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Personality Classification by Applying k-Means Clustering', 2020, 'Conference paper', 'https://doi.org/10.1109/ICAIIC48513.2020.9065244', '2020 International Conference on Artificial Intelligence in Information and Communication, ICAIIC 2020',
+  'Institute of Electrical and Electronics Engineers Inc.', 8, false, 'https://www.scopus.com/pages/publications/85084071154?origin=resultslist', '2-s2.0-85084071154', array['Jungian Type Inventory', 'k-means clustering on personality test', 'personality types and machine learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85084071154');
+update public.publications set citations = 8, keywords = array['Jungian Type Inventory', 'k-means clustering on personality test', 'personality types and machine learning']::text[] where scopus_eid = '2-s2.0-85084071154';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-85084071154' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Analysis of data to improve system of an educational organization', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634709', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 6, false, 'https://www.scopus.com/pages/publications/85062885396?origin=resultslist', '2-s2.0-85062885396', array['Data analysis', 'Education', 'Education system', 'Learning improvement', 'Summer camp']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062885396');
+update public.publications set citations = 6, keywords = array['Data analysis', 'Education', 'Education system', 'Learning improvement', 'Summer camp']::text[] where scopus_eid = '2-s2.0-85062885396';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-85062885396' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'AIoT in the Education Sector', 2024, 'Book chapter', 'https://doi.org/10.1002/9781119905202.ch20', 'Reshaping Intelligent Business and Industry: Convergence of AI and IoT at the Cutting Edge',
+  'wiley', 1, false, 'https://www.scopus.com/pages/publications/85207913146?origin=resultslist', '2-s2.0-85207913146', array['AIoT', 'Artificial intelligence', 'internet of things', 'IoT in education sector', 'IoT roadmap', 'smart campus']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85207913146');
+update public.publications set citations = 1, keywords = array['AIoT', 'Artificial intelligence', 'internet of things', 'IoT in education sector', 'IoT roadmap', 'smart campus']::text[] where scopus_eid = '2-s2.0-85207913146';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-85207913146' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The research and development of the information system on mobile devices for micro-learning in educational institutes', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634653', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/85062827206?origin=resultslist', '2-s2.0-85062827206', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062827206');
+update public.publications set citations = 7, keywords = array[]::text[] where scopus_eid = '2-s2.0-85062827206';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-85062827206' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Augmented reality based on Kazakh instrument "Dombyra"', 2014, 'Conference paper', 'https://doi.org/10.1109/ICAICT.2014.7035929', '8th IEEE International Conference on Application of Information and Communication Technologies, AICT 2014 - Conference Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 3, false, 'https://www.scopus.com/pages/publications/84988287263?origin=resultslist', '2-s2.0-84988287263', array['Android', 'Augmented reality', 'Modeling']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84988287263');
+update public.publications set citations = 3, keywords = array['Android', 'Augmented reality', 'Modeling']::text[] where scopus_eid = '2-s2.0-84988287263';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-84988287263' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Implementation and evaluation of flipped classroom as IoT element into learning process of computer network education', 2018, 'Article', 'https://doi.org/10.4018/IJICTE.2018040103', 'International Journal of Information and Communication Technology Education',
+  'IGI Global', 21, false, 'https://www.scopus.com/pages/publications/85060578669?origin=resultslist', '2-s2.0-85060578669', array['Computer network education', 'Flipped classroom', 'Gamification', 'IoT element', 'Learning process', 'Smart devices', 'Teaching methods', 'Traditional learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85060578669');
+update public.publications set citations = 21, keywords = array['Computer network education', 'Flipped classroom', 'Gamification', 'IoT element', 'Learning process', 'Smart devices', 'Teaching methods', 'Traditional learning']::text[] where scopus_eid = '2-s2.0-85060578669';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-85060578669' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Collecting context data generated by mobile devices', 2016, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2015.7416878', 'Proceedings of the 2015 12th International Conference on Electronics Computer and Computation, ICECCO 2015',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/84964659526?origin=resultslist', '2-s2.0-84964659526', array['api', 'application', 'architecture', 'context', 'mobile', 'rest', 'services']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84964659526');
+update public.publications set citations = 0, keywords = array['api', 'application', 'architecture', 'context', 'mobile', 'rest', 'services']::text[] where scopus_eid = '2-s2.0-84964659526';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-84964659526' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Personality classification experiment by applying k-means clustering', 2020, 'Article', 'https://doi.org/10.3991/ijet.v15i16.15049', 'International Journal of Emerging Technologies in Learning',
+  null, 19, true, 'https://www.scopus.com/pages/publications/85090100474?origin=resultslist', '2-s2.0-85090100474', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85090100474');
+update public.publications set citations = 19, keywords = array[]::text[] where scopus_eid = '2-s2.0-85090100474';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-85090100474' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Best Practices in Running IT Hackathons Based on Paragon University Dataset', 2020, 'Article', 'https://doi.org/10.3991/ijet.v15i19.15523', 'International Journal of Emerging Technologies in Learning',
+  null, 5, true, 'https://www.scopus.com/pages/publications/85097578858?origin=resultslist', '2-s2.0-85097578858', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85097578858');
+update public.publications set citations = 5, keywords = array[]::text[] where scopus_eid = '2-s2.0-85097578858';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-85097578858' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Python to learn programming', 2013, 'Conference paper', 'https://doi.org/10.1088/1742-6596/423/1/012027', 'Journal of Physics: Conference Series',
+  'Institute of Physics Publishing', 39, true, 'https://www.scopus.com/pages/publications/84876874511?origin=resultslist', '2-s2.0-84876874511', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84876874511');
+update public.publications set citations = 39, keywords = array[]::text[] where scopus_eid = '2-s2.0-84876874511';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meirambek.zhaparov') from public.publications where scopus_eid = '2-s2.0-84876874511' on conflict do nothing;
+
+-- Meraryslan Meraliyev
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('meraryslan.meraliyev', 'Meraryslan', 'Meraliyev', 'Meraryslan Meraliyev', 'Assistant Professor SDU', 'PhD', 'meraryslan.meraliyev@sdu.edu.kz',
+  null, null, '57207760258', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Meraryslan+Meraliyev',
+  5, 2, 165, 8,
+  array['reinforcement learning', 'neural combinatorial optimization', 'vehicle routing', 'algorithm', 'allocation', 'database', 'optimize', 'smart']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Algorithm for reduction of space allocation of the boxes in the warehouse', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634695', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85062875839?origin=resultslist', '2-s2.0-85062875839', array['Algorithm', 'Allocation', 'Database', 'Optimize', 'Smart', 'Space', 'Statistics', 'Time']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062875839');
+update public.publications set citations = 0, keywords = array['Algorithm', 'Allocation', 'Database', 'Optimize', 'Smart', 'Space', 'Statistics', 'Time']::text[] where scopus_eid = '2-s2.0-85062875839';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meraryslan.meraliyev') from public.publications where scopus_eid = '2-s2.0-85062875839' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Interoperability Challenges in Wearable Iot for Healthcare with Federated Learning: A Review', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488778', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/105038334072?origin=resultslist', '2-s2.0-105038334072', array['Edge Computing', 'Federated Learning', 'FHIR Standards', 'Interoperability', 'IoMT', 'Wearable IoT']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038334072');
+update public.publications set citations = 1, keywords = array['Edge Computing', 'Federated Learning', 'FHIR Standards', 'Interoperability', 'IoMT', 'Wearable IoT']::text[] where scopus_eid = '2-s2.0-105038334072';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meraryslan.meraliyev') from public.publications where scopus_eid = '2-s2.0-105038334072' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Evaluating Large Language Models for Kazakh Question Generation: A Comparative Study of ChatGPT and Gemma', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488827', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038342232?origin=resultslist', '2-s2.0-105038342232', array['ChatGPT', 'educational technology', 'Gemma', 'Kazakh language', 'Large language models', 'low-resource languages', 'natural language processing', 'question generation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038342232');
+update public.publications set citations = 0, keywords = array['ChatGPT', 'educational technology', 'Gemma', 'Kazakh language', 'Large language models', 'low-resource languages', 'natural language processing', 'question generation']::text[] where scopus_eid = '2-s2.0-105038342232';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meraryslan.meraliyev') from public.publications where scopus_eid = '2-s2.0-105038342232' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Comprehensive Survey of Methods and Challenges of Vehicle Routing Problem with Uncertainties', 2025, 'Review', 'https://doi.org/10.3390/math13233782', 'Mathematics',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 13, true, 'https://www.scopus.com/pages/publications/105024580606?origin=resultslist', '2-s2.0-105024580606', array['demand variability', 'dynamic routing', 'reinforcement learning', 'transportation management', 'travel time variability', 'uncertainty', 'vehicle routing problem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105024580606');
+update public.publications set citations = 13, keywords = array['demand variability', 'dynamic routing', 'reinforcement learning', 'transportation management', 'travel time variability', 'uncertainty', 'vehicle routing problem']::text[] where scopus_eid = '2-s2.0-105024580606';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meraryslan.meraliyev') from public.publications where scopus_eid = '2-s2.0-105024580606' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of an AI-Based Communication Fraud Detection System', 2025, 'Article', 'https://doi.org/10.18576/amis/190419', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 7, false, 'https://www.scopus.com/pages/publications/105009436098?origin=resultslist', '2-s2.0-105009436098', array['AI fraud', 'Detecting fraud', 'fraud detection', 'fraud in messages', 'fraud in phone']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105009436098');
+update public.publications set citations = 7, keywords = array['AI fraud', 'Detecting fraud', 'fraud detection', 'fraud in messages', 'fraud in phone']::text[] where scopus_eid = '2-s2.0-105009436098';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meraryslan.meraliyev') from public.publications where scopus_eid = '2-s2.0-105009436098' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Reinforcement Learning for Efficient Drone-Assisted Vehicle Routing', 2025, 'Article', 'https://doi.org/10.3390/app15042007', 'Applied Sciences (Switzerland)',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 9, true, 'https://www.scopus.com/pages/publications/85218464270?origin=resultslist', '2-s2.0-85218464270', array['neural combinatorial optimization', 'reinforcement learning', 'vehicle routing']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85218464270');
+update public.publications set citations = 9, keywords = array['neural combinatorial optimization', 'reinforcement learning', 'vehicle routing']::text[] where scopus_eid = '2-s2.0-85218464270';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meraryslan.meraliyev') from public.publications where scopus_eid = '2-s2.0-85218464270' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Machine Learning to Solve Vehicle Routing Problems: A Survey', 2024, 'Article', 'https://doi.org/10.1109/TITS.2023.3334976', 'IEEE Transactions on Intelligent Transportation Systems',
+  'Institute of Electrical and Electronics Engineers Inc.', 130, false, 'https://www.scopus.com/pages/publications/85181555979?origin=resultslist', '2-s2.0-85181555979', array['neural combinatorial optimization', 'Reinforcement learning', 'supervised learning', 'vehicle routing']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85181555979');
+update public.publications set citations = 130, keywords = array['neural combinatorial optimization', 'Reinforcement learning', 'supervised learning', 'vehicle routing']::text[] where scopus_eid = '2-s2.0-85181555979';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meraryslan.meraliyev') from public.publications where scopus_eid = '2-s2.0-85181555979' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Face extraction and recognition from public images using HIPI', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634718', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/85062850131?origin=resultslist', '2-s2.0-85062850131', array['Face detection', 'Face recognition', 'Hadoop', 'HIPI', 'Image collection', 'Parallel image processing']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062850131');
+update public.publications set citations = 5, keywords = array['Face detection', 'Face recognition', 'Hadoop', 'HIPI', 'Image collection', 'Parallel image processing']::text[] where scopus_eid = '2-s2.0-85062850131';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'meraryslan.meraliyev') from public.publications where scopus_eid = '2-s2.0-85062850131' on conflict do nothing;
+
+-- Mohammed Alaa Fadhil Al-hadeethi
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('m.al-hadeethi', 'Mohammed Alaa Fadhil', 'Al-hadeethi', 'Mohammed Alaa Fadhil Al-hadeethi', 'Associate Professor  SDU', 'PhD', 'm.al-hadeethi@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-0005-7037', '60515304100', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=M+Al-hadeethi',
+  1, 0, 3, 2,
+  array['binary search tree', 'n-ary tree', 'red-black tree', 'search tree', 'segment tree', 'ternary tree', 'backend web frameworks', 'containerized microservices']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Search Trees: A Review and Comparative Study', 2025, 'Conference paper', 'https://doi.org/10.1109/WPMC67460.2025.11351047', 'International Symposium on Wireless Personal Multimedia Communications, WPMC',
+  'IEEE Computer Society', 3, false, 'https://www.scopus.com/pages/publications/105033353339?origin=resultslist', '2-s2.0-105033353339', array['Binary search tree', 'n-ary tree', 'red-black tree', 'search tree', 'segment tree', 'ternary tree']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105033353339');
+update public.publications set citations = 3, keywords = array['Binary search tree', 'n-ary tree', 'red-black tree', 'search tree', 'segment tree', 'ternary tree']::text[] where scopus_eid = '2-s2.0-105033353339';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'm.al-hadeethi') from public.publications where scopus_eid = '2-s2.0-105033353339' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Throughput and Latency Benchmarking of Backend Web Frameworks Under Resource-Constrained Environments', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECET65726.2026.11632913', 'International Conference on Electrical, Computer, and Energy Technologies, ICECET 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105048964801?origin=resultslist', '2-s2.0-105048964801', array['Backend web frameworks', 'Containerized microservices', 'Performance benchmarking', 'Resource-constrained environments', 'Throughput and latency']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105048964801');
+update public.publications set citations = 0, keywords = array['Backend web frameworks', 'Containerized microservices', 'Performance benchmarking', 'Resource-constrained environments', 'Throughput and latency']::text[] where scopus_eid = '2-s2.0-105048964801';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'm.al-hadeethi') from public.publications where scopus_eid = '2-s2.0-105048964801' on conflict do nothing;
+
+-- Mukhtar Amirkumar
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('mukhtar.amirkumar', 'Mukhtar', 'Amirkumar', 'Mukhtar Amirkumar', 'Senior Lecturer', 'Master', 'mukhtar.amirkumar@sdu.edu.kz',
+  null, null, '58416507700', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Mukhtar+Amirkumar',
+  1, 0, 5, 2,
+  array['chatgpt', 'educational technology', 'gemma', 'kazakh language', 'large language models', 'low-resource languages', 'natural language processing', 'question generation']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Evaluating Large Language Models for Kazakh Question Generation: A Comparative Study of ChatGPT and Gemma', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488827', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038342232?origin=resultslist', '2-s2.0-105038342232', array['ChatGPT', 'educational technology', 'Gemma', 'Kazakh language', 'Large language models', 'low-resource languages', 'natural language processing', 'question generation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038342232');
+update public.publications set citations = 0, keywords = array['ChatGPT', 'educational technology', 'Gemma', 'Kazakh language', 'Large language models', 'low-resource languages', 'natural language processing', 'question generation']::text[] where scopus_eid = '2-s2.0-105038342232';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'mukhtar.amirkumar') from public.publications where scopus_eid = '2-s2.0-105038342232' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'MBTI-based recommendation system for extracurricular activities for high school students', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147138', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/85163728686?origin=resultslist', '2-s2.0-85163728686', array['extracurricular activities', 'MBTI', 'personality types', 'personalized approach', 'recommendation systems']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163728686');
+update public.publications set citations = 5, keywords = array['extracurricular activities', 'MBTI', 'personality types', 'personalized approach', 'recommendation systems']::text[] where scopus_eid = '2-s2.0-85163728686';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'mukhtar.amirkumar') from public.publications where scopus_eid = '2-s2.0-85163728686' on conflict do nothing;
+
+-- Nargiza Tazabekova
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('nargiza.tazabekova', 'Nargiza', 'Tazabekova', 'Nargiza Tazabekova', 'Senior Lecturer', 'Master', 'nargiza.tazabekova@sdu.edu.kz',
+  null, null, '60161770700', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Nargiza+Tazabekova',
+  0, 0, 0, 2,
+  array['almost orthogonality', 'weak orthogonality', 'convex closure', 'linear order', 'monotonicity', 'number of countable models', 'small theory', 'weak convex orthogonality']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On One Laura Mayer’s Theorem', 2025, 'Article', 'https://doi.org/10.3390/sym17101641', 'Symmetry',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 0, true, 'https://www.scopus.com/pages/publications/105020175331?origin=resultslist', '2-s2.0-105020175331', array['almost orthogonality', 'convex closure', 'linear order', 'monotonicity', 'number of countable models', 'small theory', 'weak convex orthogonality', 'weak orthogonality', 'weakly o-minimal theory']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105020175331');
+update public.publications set citations = 0, keywords = array['almost orthogonality', 'convex closure', 'linear order', 'monotonicity', 'number of countable models', 'small theory', 'weak convex orthogonality', 'weak orthogonality', 'weakly o-minimal theory']::text[] where scopus_eid = '2-s2.0-105020175331';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nargiza.tazabekova') from public.publications where scopus_eid = '2-s2.0-105020175331' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Orthogonality of 1-Types over Sets, Neighborhoods of Sets in 1-Types in Weakly Ordered Minimal Theories', 2025, 'Article', 'https://doi.org/10.3390/math13203271', 'Mathematics',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 0, true, 'https://www.scopus.com/pages/publications/105020180464?origin=resultslist', '2-s2.0-105020180464', array['almost orthogonality', 'convex set', 'irrational type', 'quasirational type', 'quasisolitary type', 'weak orthogonality', 'weakly o-minimal theories']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105020180464');
+update public.publications set citations = 0, keywords = array['almost orthogonality', 'convex set', 'irrational type', 'quasirational type', 'quasisolitary type', 'weak orthogonality', 'weakly o-minimal theories']::text[] where scopus_eid = '2-s2.0-105020180464';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nargiza.tazabekova') from public.publications where scopus_eid = '2-s2.0-105020180464' on conflict do nothing;
+
+-- Nauryzbay Sapargali
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('nauryzbay.sapargali', 'Nauryzbay', 'Sapargali', 'Nauryzbay Sapargali', 'Senior Lecturer', 'Master', 'nauryzbay.sapargali@sdu.edu.kz',
+  null, null, '57460155900', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Nauryzbay+Sapargali',
+  1, 0, 2, 2,
+  array['machine learning', '3d convolutional neural networks', 'crime detection', 'computer vision', 'education', 'face recognition algorithms']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Using CNN Models to Identify Suspicious and Criminal Behavior-A Survey of Current Research Trends', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663850', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85124965418?origin=resultslist', '2-s2.0-85124965418', array['3d convolutional neural networks', 'crime detection', 'machine learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124965418');
+update public.publications set citations = 1, keywords = array['3d convolutional neural networks', 'crime detection', 'machine learning']::text[] where scopus_eid = '2-s2.0-85124965418';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nauryzbay.sapargali') from public.publications where scopus_eid = '2-s2.0-85124965418' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Effective Ways to Pass Exams in Programming Disciplines and Optimize the Process of Analyzing Results. Case Study: Suleyman Demirel University', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663777', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85124964442?origin=resultslist', '2-s2.0-85124964442', array['computer vision', 'education', 'face recognition algorithms', 'machine learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124964442');
+update public.publications set citations = 1, keywords = array['computer vision', 'education', 'face recognition algorithms', 'machine learning']::text[] where scopus_eid = '2-s2.0-85124964442';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nauryzbay.sapargali') from public.publications where scopus_eid = '2-s2.0-85124964442' on conflict do nothing;
+
+-- Nazerke Sultanova
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('nazerke.sultanova', 'Nazerke', 'Sultanova', 'Nazerke Sultanova', 'Assistant Professor SDU', 'PhD', 'nazerke.sultanova@sdu.edu.kz',
+  null, null, '57215220048', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Nazerke+Sultanova',
+  2, 0, 12, 5,
+  array['natural language processing', 'deep neural networks', 'kazakh language', 'machine learning', 'social networks', 'suicide recognition', 'language modeling', 'mfcc']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Algorithms Towards the Automated Customer Inquiry Classification', 2021, 'Book chapter', 'https://doi.org/10.1007/978-3-030-58930-1_14', 'Studies in Computational Intelligence',
+  'Springer Science and Business Media Deutschland GmbH', 0, false, 'https://www.scopus.com/pages/publications/85097939520?origin=resultslist', '2-s2.0-85097939520', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85097939520');
+update public.publications set citations = 0, keywords = array[]::text[] where scopus_eid = '2-s2.0-85097939520';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nazerke.sultanova') from public.publications where scopus_eid = '2-s2.0-85097939520' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Content Analysis of Extracted Suicide Texts from Social Media Networks by Using Natural Language Processing and Machine Learning Techniques', 2021, 'Conference paper', 'https://doi.org/10.1109/SIST50301.2021.9466001', 'SIST 2021 - 2021 IEEE International Conference on Smart Information Systems and Technologies',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85113863332?origin=resultslist', '2-s2.0-85113863332', array['machine learning', 'natural language processing', 'social networks', 'suicide recognition']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85113863332');
+update public.publications set citations = 1, keywords = array['machine learning', 'natural language processing', 'social networks', 'suicide recognition']::text[] where scopus_eid = '2-s2.0-85113863332';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nazerke.sultanova') from public.publications where scopus_eid = '2-s2.0-85113863332' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Kazakh language open vocabulary language model with deep neural networks', 2019, 'Conference paper', 'https://doi.org/10.1109/ICECCO48375.2019.9043182', '2019 15th International Conference on Electronics, Computer and Computation, ICECCO 2019',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85083515346?origin=resultslist', '2-s2.0-85083515346', array['Deep neural networks', 'Language modeling', 'Natural language processing']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85083515346');
+update public.publications set citations = 1, keywords = array['Deep neural networks', 'Language modeling', 'Natural language processing']::text[] where scopus_eid = '2-s2.0-85083515346';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nazerke.sultanova') from public.publications where scopus_eid = '2-s2.0-85083515346' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Speech emotion recognition for Kazakh and Russian languages', 2020, 'Article', 'https://doi.org/10.18576/AMIS/140108', 'Applied Mathematics and Information Sciences',
+  'Natural Sciences Publishing', 4, false, 'https://www.scopus.com/pages/publications/85084071691?origin=resultslist', '2-s2.0-85084071691', array['Deep neural networks', 'Kazakh language', 'MFCC', 'Russian language', 'Spectral audio features', 'Speech emotion recognition']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85084071691');
+update public.publications set citations = 4, keywords = array['Deep neural networks', 'Kazakh language', 'MFCC', 'Russian language', 'Spectral audio features', 'Speech emotion recognition']::text[] where scopus_eid = '2-s2.0-85084071691';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nazerke.sultanova') from public.publications where scopus_eid = '2-s2.0-85084071691' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Stemming algorithm for kazakh language using rule-based approach', 2019, 'Conference paper', 'https://doi.org/10.1109/ICECCO48375.2019.9043253', '2019 15th International Conference on Electronics, Computer and Computation, ICECCO 2019',
+  'Institute of Electrical and Electronics Engineers Inc.', 6, false, 'https://www.scopus.com/pages/publications/85083512518?origin=resultslist', '2-s2.0-85083512518', array['Kazakh language', 'Natural language processing', 'Stemming']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85083512518');
+update public.publications set citations = 6, keywords = array['Kazakh language', 'Natural language processing', 'Stemming']::text[] where scopus_eid = '2-s2.0-85083512518';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nazerke.sultanova') from public.publications where scopus_eid = '2-s2.0-85083512518' on conflict do nothing;
+
+-- Nurbek Kakharman
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('nurbek.kakharman', 'Nurbek', 'Kakharman', 'Nurbek Kakharman', 'Associate Professor  SDU', 'PhD', 'nurbek.kakharman@sdu.edu.kz',
+  null, null, '57571444600', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Nurbek+Kakharman',
+  1, 0, 5, 4,
+  array['correct restriction', 'maximal operator', 'minimal operator', 'regular boundary value problem', 'singular second-order differential equation', 'hyperbolic equation with characteristic degeneration', 'modified cauchy problem', 'nonlocal boundary condition']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'REGULAR BOUNDARY VALUE PROBLEMS FOR A SINGULAR SECOND-ORDER EQUATION; [Eкiншi реттi сингулярлық дифференциалдық теңдеу үшiн регулярлық шеттiк есептер]; [Регулярные краевые задачи для сингулярного дифференциального уравнения второго порядка]', 2026, 'Article', 'https://doi.org/10.26577/JMMCS130220266', 'KazNU Bulletin. Mathematics, Mechanics, Computer Science Series',
+  'al-Farabi Kazakh State National University', 0, true, 'https://www.scopus.com/pages/publications/105042419032?origin=resultslist', '2-s2.0-105042419032', array['correct restriction', 'maximal operator', 'minimal operator', 'regular boundary value problem', 'singular second-order differential equation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105042419032');
+update public.publications set citations = 0, keywords = array['correct restriction', 'maximal operator', 'minimal operator', 'regular boundary value problem', 'singular second-order differential equation']::text[] where scopus_eid = '2-s2.0-105042419032';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurbek.kakharman') from public.publications where scopus_eid = '2-s2.0-105042419032' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Modified Cauchy Problem With Nonlocal Boundary Condition for a Degenerate Hyperbolic Equation', 2025, 'Article', 'https://doi.org/10.1002/mma.10800', 'Mathematical Methods in the Applied Sciences',
+  'John Wiley and Sons Ltd', 4, false, 'https://www.scopus.com/pages/publications/105004417311?origin=resultslist', '2-s2.0-105004417311', array['hyperbolic equation with characteristic degeneration', 'modified Cauchy problem', 'nonlocal boundary condition']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105004417311');
+update public.publications set citations = 4, keywords = array['hyperbolic equation with characteristic degeneration', 'modified Cauchy problem', 'nonlocal boundary condition']::text[] where scopus_eid = '2-s2.0-105004417311';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurbek.kakharman') from public.publications where scopus_eid = '2-s2.0-105004417311' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On the Eigenvalues of the Biharmonic Steklov Problem on a Thin Set', 2026, 'Article', 'https://doi.org/10.1002/mma.70850', 'Mathematical Methods in the Applied Sciences',
+  'John Wiley and Sons Ltd', 0, false, 'https://www.scopus.com/pages/publications/105042119738?origin=resultslist', '2-s2.0-105042119738', array['biharmonic operator', 'Steklov boundary condition', 'thin domain']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105042119738');
+update public.publications set citations = 0, keywords = array['biharmonic operator', 'Steklov boundary condition', 'thin domain']::text[] where scopus_eid = '2-s2.0-105042119738';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurbek.kakharman') from public.publications where scopus_eid = '2-s2.0-105042119738' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Green''s functions for certain biharmonic boundary-value problems', 2025, 'Article', 'https://doi.org/10.1080/17476933.2025.2572097', 'Complex Variables and Elliptic Equations',
+  'Taylor and Francis Ltd.', 1, false, 'https://www.scopus.com/pages/publications/105021432392?origin=resultslist', '2-s2.0-105021432392', array['Green''s function', 'inhomogeneous biharmonic equation', 'Robin-type boundary condition']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105021432392');
+update public.publications set citations = 1, keywords = array['Green''s function', 'inhomogeneous biharmonic equation', 'Robin-type boundary condition']::text[] where scopus_eid = '2-s2.0-105021432392';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurbek.kakharman') from public.publications where scopus_eid = '2-s2.0-105021432392' on conflict do nothing;
+
+-- Nurbol Sabitov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('nurbol.sabitov', 'Nurbol', 'Sabitov', 'Nurbol Sabitov', 'Assistant-instructor', 'Bachelor', 'nurbol.sabitov@sdu.edu.kz',
+  null, null, '60623244600', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Nurbol+Sabitov',
+  0, 0, 0, 1,
+  array['adaptive algorithms', 'collaborative learning', 'community-based approach', 'crowdsourcing', 'kazakh language', 'language learning systems', 'machine translation', 'morphological complexity']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of a Crowdsourcing-Based Adaptive Kazakh - English Translation System for the Kazakh Language', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488829', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038371619?origin=resultslist', '2-s2.0-105038371619', array['adaptive algorithms', 'collaborative learning', 'community-based approach', 'crowdsourcing', 'Kazakh language', 'language learning systems', 'machine translation', 'morphological complexity', 'translation accuracy', 'user feedback']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038371619');
+update public.publications set citations = 0, keywords = array['adaptive algorithms', 'collaborative learning', 'community-based approach', 'crowdsourcing', 'Kazakh language', 'language learning systems', 'machine translation', 'morphological complexity', 'translation accuracy', 'user feedback']::text[] where scopus_eid = '2-s2.0-105038371619';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurbol.sabitov') from public.publications where scopus_eid = '2-s2.0-105038371619' on conflict do nothing;
+
+-- Nurgissa Yessirkegenov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('n.yessirkegenov', 'Nurgissa', 'Yessirkegenov', 'Nurgissa Yessirkegenov', 'Associate Professor', 'PhD', 'n.yessirkegenov@sdu.edu.kz',
+  null, null, '56368611100', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=N+Yessirkegenov',
+  4, 1, 54, 11,
+  array['stratified lie group', 'graded lie group', 'rockland operator', 'hardy inequality', 'critical sobolev type inequality', '22e30', '43a80', 'caffarelli–kohn–nirenberg inequality']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Hardy, weighted Trudinger-Moser and Caffarelli-Kohn-Nirenberg type inequalities on Riemannian manifolds with negative curvature', 2022, 'Article', 'https://doi.org/10.1016/j.jmaa.2021.125795', 'Journal of Mathematical Analysis and Applications',
+  'Academic Press Inc.', 2, true, 'https://www.scopus.com/pages/publications/85119280904?origin=resultslist', '2-s2.0-85119280904', array['Caffarelli-Kohn-Nirenberg inequality', 'Hardy inequality', 'Hyperbolic space', 'Non-positive curvature', 'Riemannian manifold', 'Trudinger-Moser inequality']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85119280904');
+update public.publications set citations = 2, keywords = array['Caffarelli-Kohn-Nirenberg inequality', 'Hardy inequality', 'Hyperbolic space', 'Non-positive curvature', 'Riemannian manifold', 'Trudinger-Moser inequality']::text[] where scopus_eid = '2-s2.0-85119280904';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'n.yessirkegenov') from public.publications where scopus_eid = '2-s2.0-85119280904' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A comparison principle for higher order nonlinear hypoelliptic heat operators on graded Lie groups', 2022, 'Article', 'https://doi.org/10.1016/j.na.2021.112621', 'Nonlinear Analysis, Theory, Methods and Applications',
+  'Elsevier Ltd', 7, true, 'https://www.scopus.com/pages/publications/85117731886?origin=resultslist', '2-s2.0-85117731886', array['Blow-up', 'Comparison principle', 'Global solution', 'Graded Lie group', 'Nonlinear hypoelliptic heat equation', 'p-sub-Laplacian', 'Rockland operator', 'Stratified Lie group']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85117731886');
+update public.publications set citations = 7, keywords = array['Blow-up', 'Comparison principle', 'Global solution', 'Graded Lie group', 'Nonlinear hypoelliptic heat equation', 'p-sub-Laplacian', 'Rockland operator', 'Stratified Lie group']::text[] where scopus_eid = '2-s2.0-85117731886';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'n.yessirkegenov') from public.publications where scopus_eid = '2-s2.0-85117731886' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Cylindrical extensions of critical Sobolev type inequalities and identities', 2026, 'Article', 'https://doi.org/10.1016/j.jmaa.2025.129899', 'Journal of Mathematical Analysis and Applications',
+  'Academic Press Inc.', 0, true, 'https://www.scopus.com/pages/publications/105011266466?origin=resultslist', '2-s2.0-105011266466', array['Critical Caffarelli-Kohn-Nirenberg inequality', 'Critical Sobolev type inequality', 'Heisenberg group', 'Homogeneous Lie group', 'Stratified Lie group']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105011266466');
+update public.publications set citations = 0, keywords = array['Critical Caffarelli-Kohn-Nirenberg inequality', 'Critical Sobolev type inequality', 'Heisenberg group', 'Homogeneous Lie group', 'Stratified Lie group']::text[] where scopus_eid = '2-s2.0-105011266466';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'n.yessirkegenov') from public.publications where scopus_eid = '2-s2.0-105011266466' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Hypoelliptic functional inequalities', 2024, 'Article', 'https://doi.org/10.1007/s00209-024-03493-w', 'Mathematische Zeitschrift',
+  'Springer Science and Business Media Deutschland GmbH', 6, true, 'https://www.scopus.com/pages/publications/85191836509?origin=resultslist', '2-s2.0-85191836509', array['22E30', '43A80', '46E35', 'Caffarelli–Kohn–Nirenberg inequality', 'Gagliardo–Nirenberg inequality', 'Graded Lie group', 'Hardy and critical Hardy inequalities', 'Hardy–Littlewood–Sobolev inequality', 'Rellich inequality', 'Rockland operator', 'Stratified Lie group']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85191836509');
+update public.publications set citations = 6, keywords = array['22E30', '43A80', '46E35', 'Caffarelli–Kohn–Nirenberg inequality', 'Gagliardo–Nirenberg inequality', 'Graded Lie group', 'Hardy and critical Hardy inequalities', 'Hardy–Littlewood–Sobolev inequality', 'Rellich inequality', 'Rockland operator', 'Stratified Lie group']::text[] where scopus_eid = '2-s2.0-85191836509';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'n.yessirkegenov') from public.publications where scopus_eid = '2-s2.0-85191836509' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Hardy–Sobolev–Rellich, Hardy–Littlewood–Sobolev and Caffarelli–Kohn–Nirenberg Inequalities on General Lie Groups', 2024, 'Article', 'https://doi.org/10.1007/s12220-024-01614-9', 'Journal of Geometric Analysis',
+  'Springer', 5, true, 'https://www.scopus.com/pages/publications/85191726379?origin=resultslist', '2-s2.0-85191726379', array['Caffarelli–Kohn–Nirenberg inequality', 'Hardy inequality', 'Hardy–Littlewood–Sobolev inequality', 'Lie groups', 'Rellich inequality', 'Sobolev embeddings', 'Sobolev spaces']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85191726379');
+update public.publications set citations = 5, keywords = array['Caffarelli–Kohn–Nirenberg inequality', 'Hardy inequality', 'Hardy–Littlewood–Sobolev inequality', 'Lie groups', 'Rellich inequality', 'Sobolev embeddings', 'Sobolev spaces']::text[] where scopus_eid = '2-s2.0-85191726379';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'n.yessirkegenov') from public.publications where scopus_eid = '2-s2.0-85191726379' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Critical Sobolev-Type Identities and Inequalities on Stratified Lie Groups', 2024, 'Book chapter', 'https://doi.org/10.1007/978-3-031-42539-4_16', 'Trends in Mathematics',
+  'Springer Science and Business Media Deutschland GmbH', 1, false, 'https://www.scopus.com/pages/publications/85188805999?origin=resultslist', '2-s2.0-85188805999', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85188805999');
+update public.publications set citations = 1, keywords = array[]::text[] where scopus_eid = '2-s2.0-85188805999';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'n.yessirkegenov') from public.publications where scopus_eid = '2-s2.0-85188805999' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Critical Gagliardo-Nirenberg, Trudinger, Brezis-Gallouet-Wainger inequalities on graded groups and ground states', 2022, 'Article', 'https://doi.org/10.1142/S0219199721500619', 'Communications in Contemporary Mathematics',
+  'World Scientific', 4, true, 'https://www.scopus.com/pages/publications/85113860200?origin=resultslist', '2-s2.0-85113860200', array['Gagliardo-Nirenberg inequality', 'graded Lie group', 'Rockland operator', 'Sobolev inequality', 'stratified Lie group', 'sub-Laplacian', 'Trudinger inequality']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85113860200');
+update public.publications set citations = 4, keywords = array['Gagliardo-Nirenberg inequality', 'graded Lie group', 'Rockland operator', 'Sobolev inequality', 'stratified Lie group', 'sub-Laplacian', 'Trudinger inequality']::text[] where scopus_eid = '2-s2.0-85113860200';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'n.yessirkegenov') from public.publications where scopus_eid = '2-s2.0-85113860200' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Sharp remainder of the Poincaré inequality for Baouendi-Grushin vector fields', 2023, 'Article', 'https://doi.org/10.1142/S1793557123500419', 'Asian-European Journal of Mathematics',
+  'World Scientific', 1, false, 'https://www.scopus.com/pages/publications/85135481243?origin=resultslist', '2-s2.0-85135481243', array['Baouendi-Grushin operator', 'blow-up solution', 'eigenfunction', 'Poincaré inequalitiy']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85135481243');
+update public.publications set citations = 1, keywords = array['Baouendi-Grushin operator', 'blow-up solution', 'eigenfunction', 'Poincaré inequalitiy']::text[] where scopus_eid = '2-s2.0-85135481243';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'n.yessirkegenov') from public.publications where scopus_eid = '2-s2.0-85135481243' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Rellich, Gagliardo—Nirenberg, Trudinger and Caffarelli—Kohn—Nirenberg inequalities for Dunkl operators and applications', 2022, 'Article', 'https://doi.org/10.1007/s11856-021-2261-7', 'Israel Journal of Mathematics',
+  'Hebrew University Magnes Press', 2, true, 'https://www.scopus.com/pages/publications/85121622501?origin=resultslist', '2-s2.0-85121622501', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85121622501');
+update public.publications set citations = 2, keywords = array[]::text[] where scopus_eid = '2-s2.0-85121622501';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'n.yessirkegenov') from public.publications where scopus_eid = '2-s2.0-85121622501' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Cylindrical and Horizontal Extensions of Critical Sobolev Type Inequalities and Identities', 2024, 'Book chapter', 'https://doi.org/10.1007/978-3-031-56732-2_16', 'Trends in Mathematics',
+  'Springer Science and Business Media Deutschland GmbH', 1, false, 'https://www.scopus.com/pages/publications/85200474135?origin=resultslist', '2-s2.0-85200474135', array['22E30', '43A80', 'Critical Sobolev type inequality', 'Cylindrical Sobolev type inequality', 'Extended Hardy inequality', 'Stratified Lie group']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85200474135');
+update public.publications set citations = 1, keywords = array['22E30', '43A80', 'Critical Sobolev type inequality', 'Cylindrical Sobolev type inequality', 'Extended Hardy inequality', 'Stratified Lie group']::text[] where scopus_eid = '2-s2.0-85200474135';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'n.yessirkegenov') from public.publications where scopus_eid = '2-s2.0-85200474135' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Existence and non-existence of global solutions for semilinear heat equations and inequalities on sub-Riemannian manifolds, and Fujita exponent on unimodular Lie groups', 2022, 'Article', 'https://doi.org/10.1016/j.jde.2021.10.058', 'Journal of Differential Equations',
+  'Academic Press Inc.', 25, true, 'https://www.scopus.com/pages/publications/85119286951?origin=resultslist', '2-s2.0-85119286951', array['Differential inequality', 'Global well-posedness', 'Semilinear heat equation', 'Sub-Laplacian', 'Sub-Riemannian manifold', 'Unimodular Lie group']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85119286951');
+update public.publications set citations = 25, keywords = array['Differential inequality', 'Global well-posedness', 'Semilinear heat equation', 'Sub-Laplacian', 'Sub-Riemannian manifold', 'Unimodular Lie group']::text[] where scopus_eid = '2-s2.0-85119286951';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'n.yessirkegenov') from public.publications where scopus_eid = '2-s2.0-85119286951' on conflict do nothing;
+
+-- Nurlan Ismailov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('nurlan.ismailov', 'Nurlan', 'Ismailov', 'Nurlan Ismailov', 'Associate Professor  SDU', 'PhD', 'nurlan.ismailov@sdu.edu.kz',
+  null, null, '56273196000', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Nurlan+Ismailov',
+  5, 4, 113, 9,
+  array['polynomial identities', 'degeneration', 'bicommutative superalgebras', 'cocharacters', 'codimensions', 'free bicommutative superalgebras', 'gröbner-shirshov basis', 'hilbert basissatz']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Free bicommutative superalgebras', 2024, 'Article', 'https://doi.org/10.1016/j.jalgebra.2024.04.007', 'Journal of Algebra',
+  'Academic Press Inc.', 5, true, 'https://www.scopus.com/pages/publications/85192333675?origin=resultslist', '2-s2.0-85192333675', array['Bicommutative superalgebras', 'Cocharacters', 'Codimensions', 'Free bicommutative superalgebras', 'Gröbner-Shirshov basis', 'Hilbert Basissatz', 'Hilbert series', 'Specht property']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85192333675');
+update public.publications set citations = 5, keywords = array['Bicommutative superalgebras', 'Cocharacters', 'Codimensions', 'Free bicommutative superalgebras', 'Gröbner-Shirshov basis', 'Hilbert Basissatz', 'Hilbert series', 'Specht property']::text[] where scopus_eid = '2-s2.0-85192333675';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurlan.ismailov') from public.publications where scopus_eid = '2-s2.0-85192333675' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On the commutator in Leibniz algebras', 2022, 'Article', 'https://doi.org/10.1142/S0218196722500333', 'International Journal of Algebra and Computation',
+  'World Scientific', 3, false, 'https://www.scopus.com/pages/publications/85125532494?origin=resultslist', '2-s2.0-85125532494', array['anti-commutator', 'commutator', 'computer algebra', 'Leibniz algebras', 'polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85125532494');
+update public.publications set citations = 3, keywords = array['anti-commutator', 'commutator', 'computer algebra', 'Leibniz algebras', 'polynomial identities']::text[] where scopus_eid = '2-s2.0-85125532494';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurlan.ismailov') from public.publications where scopus_eid = '2-s2.0-85125532494' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The geometric classification of Leibniz algebras', 2018, 'Article', 'https://doi.org/10.1142/S0129167X18500350', 'International Journal of Mathematics',
+  'World Scientific Publishing Co. Pte Ltd', 44, true, 'https://www.scopus.com/pages/publications/85046006364?origin=resultslist', '2-s2.0-85046006364', array['degeneration', 'Grunewald-O''Halloran conjecture', 'Leibniz algebra', 'orbit closure', 'rigid algebra', 'Vergne conjecture']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85046006364');
+update public.publications set citations = 44, keywords = array['degeneration', 'Grunewald-O''Halloran conjecture', 'Leibniz algebra', 'orbit closure', 'rigid algebra', 'Vergne conjecture']::text[] where scopus_eid = '2-s2.0-85046006364';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurlan.ismailov') from public.publications where scopus_eid = '2-s2.0-85046006364' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On the generalized Poisson and transposed Poisson algebras', 2025, 'Article', 'https://doi.org/10.1142/S0219498826502683', 'Journal of Algebra and its Applications',
+  'World Scientific', 3, false, 'https://www.scopus.com/pages/publications/105009258420?origin=resultslist', '2-s2.0-105009258420', array['Generalized Poisson algebra', 'polynomial identities', 'transposed Poisson algebra']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105009258420');
+update public.publications set citations = 3, keywords = array['Generalized Poisson algebra', 'polynomial identities', 'transposed Poisson algebra']::text[] where scopus_eid = '2-s2.0-105009258420';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurlan.ismailov') from public.publications where scopus_eid = '2-s2.0-105009258420' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Polynomial identities of bicommutative algebras, Lie and Jordan elements', 2018, 'Article', 'https://doi.org/10.1080/00927872.2018.1461890', 'Communications in Algebra',
+  'Taylor and Francis Inc.', 13, false, 'https://www.scopus.com/pages/publications/85046421002?origin=resultslist', '2-s2.0-85046421002', array['Bicommutative algebras', 'Jordan elements', 'Lie elements', 'polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85046421002');
+update public.publications set citations = 13, keywords = array['Bicommutative algebras', 'Jordan elements', 'Lie elements', 'polynomial identities']::text[] where scopus_eid = '2-s2.0-85046421002';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurlan.ismailov') from public.publications where scopus_eid = '2-s2.0-85046421002' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On algebras embeddable into bicommutative algebras', 2024, 'Article', 'https://doi.org/10.1080/00927872.2024.2358178', 'Communications in Algebra',
+  'Taylor and Francis Ltd.', 3, false, 'https://www.scopus.com/pages/publications/85195499681?origin=resultslist', '2-s2.0-85195499681', array['Bicommutative algebra', 'metabelian Lie algebra', 'speciality problem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85195499681');
+update public.publications set citations = 3, keywords = array['Bicommutative algebra', 'metabelian Lie algebra', 'speciality problem']::text[] where scopus_eid = '2-s2.0-85195499681';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurlan.ismailov') from public.publications where scopus_eid = '2-s2.0-85195499681' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Sn- and GL n-module structures on free Novikov algebras', 2014, 'Article', 'https://doi.org/10.1016/j.jalgebra.2014.06.013', 'Journal of Algebra',
+  'Academic Press Inc.', 10, true, 'https://www.scopus.com/pages/publications/84904333323?origin=resultslist', '2-s2.0-84904333323', array['Novikov algebra', 'Specht module', 'Weyl module']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84904333323');
+update public.publications set citations = 10, keywords = array['Novikov algebra', 'Specht module', 'Weyl module']::text[] where scopus_eid = '2-s2.0-84904333323';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurlan.ismailov') from public.publications where scopus_eid = '2-s2.0-84904333323' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Defining identities for mono and binary Zinbiel algebras', 2023, 'Article', 'https://doi.org/10.1142/S0219498823501657', 'Journal of Algebra and its Applications',
+  'World Scientific', 6, false, 'https://www.scopus.com/pages/publications/85126928356?origin=resultslist', '2-s2.0-85126928356', array['Dual Leibniz algebras', 'polynomial identities']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85126928356');
+update public.publications set citations = 6, keywords = array['Dual Leibniz algebras', 'polynomial identities']::text[] where scopus_eid = '2-s2.0-85126928356';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurlan.ismailov') from public.publications where scopus_eid = '2-s2.0-85126928356' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The Algebraic and Geometric Classification of Nilpotent Assosymmetric Algebras', 2021, 'Article', 'https://doi.org/10.1007/s10468-019-09935-y', 'Algebras and Representation Theory',
+  'Springer Science and Business Media B.V.', 26, false, 'https://www.scopus.com/pages/publications/85077614365?origin=resultslist', '2-s2.0-85077614365', array['Algebraic classification', 'Assosymmetric algebras', 'Central extension', 'Degeneration', 'Geometric classification', 'Nilpotent algebras']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85077614365');
+update public.publications set citations = 26, keywords = array['Algebraic classification', 'Assosymmetric algebras', 'Central extension', 'Degeneration', 'Geometric classification', 'Nilpotent algebras']::text[] where scopus_eid = '2-s2.0-85077614365';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurlan.ismailov') from public.publications where scopus_eid = '2-s2.0-85077614365' on conflict do nothing;
+
+-- Nurlan Yerkinbayev
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('nurlan.yerkinbayev', 'Nurlan', 'Yerkinbayev', 'Nurlan Yerkinbayev', 'Senior Lecturer', 'PhD', 'nurlan.yerkinbayev@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-3543-3258', '57491646300', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Nurlan+Yerkinbayev',
+  0, 0, 0, 1,
+  array['besov spaces', 'dirichlet problem', 'existence and uniqueness', 'green''s function', 'quasilinear elliptic equations']::text[], '[{"topic_name":"Advanced Harmonic Analysis Research","subfield":"Applied Mathematics","field":"Mathematics","domain":"Physical Sciences","works_count":3},{"topic_name":"Mathematical Analysis and Transform Methods","subfield":"Applied Mathematics","field":"Mathematics","domain":"Physical Sciences","works_count":2},{"topic_name":"Algebraic and Geometric Analysis","subfield":"Applied Mathematics","field":"Mathematics","domain":"Physical Sciences","works_count":2},{"topic_name":"Differential Equations and Boundary Problems","subfield":"Applied Mathematics","field":"Mathematics","domain":"Physical Sciences","works_count":2},{"topic_name":"Nonlinear Partial Differential Equations","subfield":"Applied Mathematics","field":"Mathematics","domain":"Physical Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Dirichlet problem for two-dimensional quasilinear second-order elliptic equations in Besov spaces', 2026, 'Article', 'https://doi.org/10.3934/math.20261135', 'AIMS Mathematics',
+  'American Institute of Mathematical Sciences', 0, true, 'https://www.scopus.com/pages/publications/105049666826?origin=resultslist', '2-s2.0-105049666826', array['Besov spaces', 'dirichlet problem', 'existence and uniqueness', 'Green''s function', 'quasilinear elliptic equations']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105049666826');
+update public.publications set citations = 0, keywords = array['Besov spaces', 'dirichlet problem', 'existence and uniqueness', 'Green''s function', 'quasilinear elliptic equations']::text[] where scopus_eid = '2-s2.0-105049666826';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'nurlan.yerkinbayev') from public.publications where scopus_eid = '2-s2.0-105049666826' on conflict do nothing;
+
+-- Olimzhon Baimuratov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('olimzhon.baimuratov', 'Olimzhon', 'Baimuratov', 'Olimzhon Baimuratov', 'Associate Professor  SDU', 'PhD', 'olimzhon.baimuratov@sdu.edu.kz',
+  null, null, '55832104800', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Olimzhon+Baimuratov',
+  4, 1, 43, 14,
+  array['contact center', 'control system', 'multi-agent system', 'agent based modeling', 'harms', 'heterogeneous robots', 'locust control', 'lexically compatibilities of words']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Multi-agent based anti-locust territory protection system', 2015, 'Conference paper', 'https://doi.org/10.1016/j.procs.2015.07.238', 'Procedia Computer Science',
+  'Elsevier B.V.', 8, true, 'https://www.scopus.com/pages/publications/84939207696?origin=resultslist', '2-s2.0-84939207696', array['Agent based modeling', 'HARMS', 'Heterogeneous robots', 'Locust control']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84939207696');
+update public.publications set citations = 8, keywords = array['Agent based modeling', 'HARMS', 'Heterogeneous robots', 'Locust control']::text[] where scopus_eid = '2-s2.0-84939207696';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'olimzhon.baimuratov') from public.publications where scopus_eid = '2-s2.0-84939207696' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Identifying lexical compatibilities of words by vectors of specialized words', 2020, 'Article', 'https://doi.org/10.26577/JMMCS.2020.v107.i3.07', 'KazNU Bulletin. Mathematics, Mechanics, Computer Science Series',
+  'al-Farabi Kazakh State National University', 0, true, 'https://www.scopus.com/pages/publications/85180236188?origin=resultslist', '2-s2.0-85180236188', array['lexically compatibilities of words', 'Skip-gram model', 'vectors of words']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85180236188');
+update public.publications set citations = 0, keywords = array['lexically compatibilities of words', 'Skip-gram model', 'vectors of words']::text[] where scopus_eid = '2-s2.0-85180236188';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'olimzhon.baimuratov') from public.publications where scopus_eid = '2-s2.0-85180236188' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Analysis and development of agent architecture for pest control systems', 2015, 'Conference paper', 'https://doi.org/10.1016/j.procs.2015.07.186', 'Procedia Computer Science',
+  'Elsevier B.V.', 3, true, 'https://www.scopus.com/pages/publications/84939194380?origin=resultslist', '2-s2.0-84939194380', array['Agent', 'Agent architecture', 'Coltrol', 'Multi-agent systems', 'Pest control systems']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84939194380');
+update public.publications set citations = 3, keywords = array['Agent', 'Agent architecture', 'Coltrol', 'Multi-agent systems', 'Pest control systems']::text[] where scopus_eid = '2-s2.0-84939194380';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'olimzhon.baimuratov') from public.publications where scopus_eid = '2-s2.0-84939194380' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Analysis of Key Elements for Modern Contact Center Systems to Improve Quality', 2021, 'Conference paper', 'https://doi.org/10.1007/978-3-030-80472-5_14', 'Lecture Notes on Data Engineering and Communications Technologies',
+  'Springer Science and Business Media Deutschland GmbH', 0, false, 'https://www.scopus.com/pages/publications/85111931233?origin=resultslist', '2-s2.0-85111931233', array['Contact center', 'Object-oriented organizational model', 'Organizational model', 'Organizational processes', 'Resource accounting', 'Resource management']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85111931233');
+update public.publications set citations = 0, keywords = array['Contact center', 'Object-oriented organizational model', 'Organizational model', 'Organizational processes', 'Resource accounting', 'Resource management']::text[] where scopus_eid = '2-s2.0-85111931233';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'olimzhon.baimuratov') from public.publications where scopus_eid = '2-s2.0-85111931233' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Review of Electronic Industry in Kazakhstan: Conditions and Opportunities', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663826', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85124983135?origin=resultslist', '2-s2.0-85124983135', array['Electronics industry', 'EMS industry', 'Fabless manufacturing', 'FinFET technology', 'Information technology industry']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124983135');
+update public.publications set citations = 0, keywords = array['Electronics industry', 'EMS industry', 'Fabless manufacturing', 'FinFET technology', 'Information technology industry']::text[] where scopus_eid = '2-s2.0-85124983135';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'olimzhon.baimuratov') from public.publications where scopus_eid = '2-s2.0-85124983135' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Mobile Application for Healthy Maternal Behavior to Reduce Fetal Mortality', 2022, 'Conference paper', 'https://doi.org/10.1007/978-3-031-14841-5_31', 'Communications in Computer and Information Science',
+  'Springer Science and Business Media Deutschland GmbH', 0, false, 'https://www.scopus.com/pages/publications/85138769718?origin=resultslist', '2-s2.0-85138769718', array['Expert system', 'Mobile application', 'Mortality prediction', 'National health system', 'Pregnancy risk', 'Pregnant women']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85138769718');
+update public.publications set citations = 0, keywords = array['Expert system', 'Mobile application', 'Mortality prediction', 'National health system', 'Pregnancy risk', 'Pregnant women']::text[] where scopus_eid = '2-s2.0-85138769718';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'olimzhon.baimuratov') from public.publications where scopus_eid = '2-s2.0-85138769718' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A model of virtual training application for simulation of technological processes', 2015, 'Conference paper', 'https://doi.org/10.1016/j.procs.2015.07.192', 'Procedia Computer Science',
+  'Elsevier B.V.', 12, true, 'https://www.scopus.com/pages/publications/84939210945?origin=resultslist', '2-s2.0-84939210945', array['Control system', 'Human-machine interface', 'In situ leaching', 'Simulation of technological processes', 'Supervisory Control and Data Acquisition (SCADA)', 'Virtual training application', 'Web applications', 'Workflow']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84939210945');
+update public.publications set citations = 12, keywords = array['Control system', 'Human-machine interface', 'In situ leaching', 'Simulation of technological processes', 'Supervisory Control and Data Acquisition (SCADA)', 'Virtual training application', 'Web applications', 'Workflow']::text[] where scopus_eid = '2-s2.0-84939210945';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'olimzhon.baimuratov') from public.publications where scopus_eid = '2-s2.0-84939210945' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Speech data collection system for Kazakh language', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663771', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/85124949939?origin=resultslist', '2-s2.0-85124949939', array['audio', 'automatic speech recognition', 'dataset', 'recording']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124949939');
+update public.publications set citations = 7, keywords = array['audio', 'automatic speech recognition', 'dataset', 'recording']::text[] where scopus_eid = '2-s2.0-85124949939';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'olimzhon.baimuratov') from public.publications where scopus_eid = '2-s2.0-85124949939' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Cyber security system of FPGA platform for wireless sensor networks', 2020, 'Conference paper', 'https://doi.org/10.34190/EWS.20.051', 'European Conference on Information Warfare and Security, ECCWS',
+  'Curran Associates Inc.', 2, false, 'https://www.scopus.com/pages/publications/85094667807?origin=resultslist', '2-s2.0-85094667807', array['FPGA bit stream algorithms', 'clustering intrusion detection methods', 'Information security', 'Machine learning', 'Multi-agent system', 'Wireless sensor network (WSN)']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85094667807');
+update public.publications set citations = 2, keywords = array['FPGA bit stream algorithms', 'clustering intrusion detection methods', 'Information security', 'Machine learning', 'Multi-agent system', 'Wireless sensor network (WSN)']::text[] where scopus_eid = '2-s2.0-85094667807';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'olimzhon.baimuratov') from public.publications where scopus_eid = '2-s2.0-85094667807' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Design and construction a model of remote control software mobile robot for MAS', 2014, 'Conference paper', 'https://doi.org/10.1109/ICAICT.2014.7035965', '8th IEEE International Conference on Application of Information and Communication Technologies, AICT 2014 - Conference Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/84988231346?origin=resultslist', '2-s2.0-84988231346', array['Mobile robot', 'Multi-agent system', 'Remote control', 'Robotic agents', 'Teleoperation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84988231346');
+update public.publications set citations = 5, keywords = array['Mobile robot', 'Multi-agent system', 'Remote control', 'Robotic agents', 'Teleoperation']::text[] where scopus_eid = '2-s2.0-84988231346';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'olimzhon.baimuratov') from public.publications where scopus_eid = '2-s2.0-84988231346' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Noise Immunity of Devices of Automated Systems for Technological Control of Energy Facilities in the Almaty Region', 2022, 'Book chapter', 'https://doi.org/10.1007/978-3-030-87675-3_17', 'Studies in Systems, Decision and Control',
+  'Springer Science and Business Media Deutschland GmbH', 1, false, 'https://www.scopus.com/pages/publications/85120889327?origin=resultslist', '2-s2.0-85120889327', array['Aggregated interference', 'Automated process of control systems', 'Electrical substation', 'Electromagnetic compatibility', 'Electromagnetic environment', 'Electromagnetic interference', 'Grounding device', 'Radiated pulse interference', 'Relay protection and automation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85120889327');
+update public.publications set citations = 1, keywords = array['Aggregated interference', 'Automated process of control systems', 'Electrical substation', 'Electromagnetic compatibility', 'Electromagnetic environment', 'Electromagnetic interference', 'Grounding device', 'Radiated pulse interference', 'Relay protection and automation']::text[] where scopus_eid = '2-s2.0-85120889327';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'olimzhon.baimuratov') from public.publications where scopus_eid = '2-s2.0-85120889327' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of the system with NMR based on electromagnetic coils for milk processing', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634747', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, false, 'https://www.scopus.com/pages/publications/85062870854?origin=resultslist', '2-s2.0-85062870854', array['Changing the properties of milk', 'Control system', 'Improving the quality of milk', 'Magnetic treatment', 'Quality control of milk', 'The stabilization of the magnetic field']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062870854');
+update public.publications set citations = 2, keywords = array['Changing the properties of milk', 'Control system', 'Improving the quality of milk', 'Magnetic treatment', 'Quality control of milk', 'The stabilization of the magnetic field']::text[] where scopus_eid = '2-s2.0-85062870854';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'olimzhon.baimuratov') from public.publications where scopus_eid = '2-s2.0-85062870854' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The analysis of indexes quality of a healthcare in Kazakhstan', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634681', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85062878115?origin=resultslist', '2-s2.0-85062878115', array['Healthcare development', 'Medical services', 'Quality of medical services']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062878115');
+update public.publications set citations = 0, keywords = array['Healthcare development', 'Medical services', 'Quality of medical services']::text[] where scopus_eid = '2-s2.0-85062878115';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'olimzhon.baimuratov') from public.publications where scopus_eid = '2-s2.0-85062878115' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Contact Centers Management Models: Analysis and Recommendations', 2021, 'Conference paper', 'https://doi.org/10.1109/SIST50301.2021.9465921', 'SIST 2021 - 2021 IEEE International Conference on Smart Information Systems and Technologies',
+  'Institute of Electrical and Electronics Engineers Inc.', 3, false, 'https://www.scopus.com/pages/publications/85113898640?origin=resultslist', '2-s2.0-85113898640', array['Call Center', 'Contact Center', 'IT company', 'IT management', 'IT management models', 'IT service efficiency', 'operational cycle']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85113898640');
+update public.publications set citations = 3, keywords = array['Call Center', 'Contact Center', 'IT company', 'IT management', 'IT management models', 'IT service efficiency', 'operational cycle']::text[] where scopus_eid = '2-s2.0-85113898640';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'olimzhon.baimuratov') from public.publications where scopus_eid = '2-s2.0-85113898640' on conflict do nothing;
+
+-- Ramis Akhmedov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('ramis.akhmedov', 'Ramis', 'Akhmedov', 'Ramis Akhmedov', 'Dean', 'PhD', 'ramis.akhmedov@sdu.edu.kz',
+  null, null, '57189049749', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Ramis+Akhmedov',
+  1, 0, 4, 2,
+  array['binary search tree', 'n-ary tree', 'red-black tree', 'search tree', 'segment tree', 'ternary tree', 'asgi', 'fastapi']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Search Trees: A Review and Comparative Study', 2025, 'Conference paper', 'https://doi.org/10.1109/WPMC67460.2025.11351047', 'International Symposium on Wireless Personal Multimedia Communications, WPMC',
+  'IEEE Computer Society', 3, false, 'https://www.scopus.com/pages/publications/105033353339?origin=resultslist', '2-s2.0-105033353339', array['Binary search tree', 'n-ary tree', 'red-black tree', 'search tree', 'segment tree', 'ternary tree']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105033353339');
+update public.publications set citations = 3, keywords = array['Binary search tree', 'n-ary tree', 'red-black tree', 'search tree', 'segment tree', 'ternary tree']::text[] where scopus_eid = '2-s2.0-105033353339';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ramis.akhmedov') from public.publications where scopus_eid = '2-s2.0-105033353339' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Performance Evaluation of Flask (WSGI) and Fastapi (ASGI) under High-Concurrency Workloads', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488817', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/105038318181?origin=resultslist', '2-s2.0-105038318181', array['ASGI', 'FastAPI', 'Flask', 'Python', 'Scalability', 'Web Frameworks', 'WSGI']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038318181');
+update public.publications set citations = 1, keywords = array['ASGI', 'FastAPI', 'Flask', 'Python', 'Scalability', 'Web Frameworks', 'WSGI']::text[] where scopus_eid = '2-s2.0-105038318181';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ramis.akhmedov') from public.publications where scopus_eid = '2-s2.0-105038318181' on conflict do nothing;
+
+-- Rashid Baimukashev
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('rashid.baimukashev', 'Rashid', 'Baimukashev', 'Rashid Baimukashev', 'Senior Lecturer', 'Master', 'rashid.baimukashev@sdu.edu.kz',
+  null, null, '58414975800', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Rashid+Baimukashev',
+  6, 2, 60, 8,
+  array['deep learning', 'algorithm', 'artificial intellegence', 'biomedical research', 'deep neural networks', 'fuzzy computer vision', 'image analysis', 'adaptive filtering']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Systematic Survey of Deep Fuzzy Computer Vision in Biomedical Research', 2024, 'Article', 'https://doi.org/10.26599/FIE.2024.9270043', 'Fuzzy Information and Engineering',
+  'Tsinghua University Press', 7, true, 'https://www.scopus.com/pages/publications/85210479085?origin=resultslist', '2-s2.0-85210479085', array['algorithm', 'artificial intellegence', 'biomedical research', 'deep learning', 'deep neural networks', 'fuzzy computer vision', 'image analysis']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85210479085');
+update public.publications set citations = 7, keywords = array['algorithm', 'artificial intellegence', 'biomedical research', 'deep learning', 'deep neural networks', 'fuzzy computer vision', 'image analysis']::text[] where scopus_eid = '2-s2.0-85210479085';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'rashid.baimukashev') from public.publications where scopus_eid = '2-s2.0-85210479085' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Performance Evaluation of Function-Controlled Variable Step-Size LMS in Delayed-Reference Adaptive Noise Cancellation', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488815', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038331793?origin=resultslist', '2-s2.0-105038331793', array['Adaptive filtering', 'adaptive noise cancellation', 'FCLMS algorithm', 'LMS algorithm', 'NLMS algorithm']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038331793');
+update public.publications set citations = 0, keywords = array['Adaptive filtering', 'adaptive noise cancellation', 'FCLMS algorithm', 'LMS algorithm', 'NLMS algorithm']::text[] where scopus_eid = '2-s2.0-105038331793';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'rashid.baimukashev') from public.publications where scopus_eid = '2-s2.0-105038331793' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'State-of-the-Art Review of Deep Learning Methods in Fake Banknote Recognition Problem', 2024, 'Article', 'https://doi.org/10.14569/IJACSA.2024.0150185', 'International Journal of Advanced Computer Science and Applications',
+  'Science and Information Organization', 14, true, 'https://www.scopus.com/pages/publications/85185005495?origin=resultslist', '2-s2.0-85185005495', array['classification', 'detection', 'Fake banknote', 'recognition', 'review']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85185005495');
+update public.publications set citations = 14, keywords = array['classification', 'detection', 'Fake banknote', 'recognition', 'review']::text[] where scopus_eid = '2-s2.0-85185005495';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'rashid.baimukashev') from public.publications where scopus_eid = '2-s2.0-85185005495' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Overview of Deep Learning Models for Banknote Recognition', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147142', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/85163791570?origin=resultslist', '2-s2.0-85163791570', array['banknote recognition', 'convolutional neural networks (CNNs)', 'deep belief networks (DBNs)', 'deep learning models', 'recurrent neural networks (RNNs)']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163791570');
+update public.publications set citations = 7, keywords = array['banknote recognition', 'convolutional neural networks (CNNs)', 'deep belief networks (DBNs)', 'deep learning models', 'recurrent neural networks (RNNs)']::text[] where scopus_eid = '2-s2.0-85163791570';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'rashid.baimukashev') from public.publications where scopus_eid = '2-s2.0-85163791570' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Multi-Task Learning with CORAL-Based Feature Alignment for Cross-Domain Plant Disease Detection', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488762', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038334375?origin=resultslist', '2-s2.0-105038334375', array['CORAL', 'cross-domain generalization', 'domain shift', 'multi-task learning', 'plant disease detection']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038334375');
+update public.publications set citations = 0, keywords = array['CORAL', 'cross-domain generalization', 'domain shift', 'multi-task learning', 'plant disease detection']::text[] where scopus_eid = '2-s2.0-105038334375';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'rashid.baimukashev') from public.publications where scopus_eid = '2-s2.0-105038334375' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Intrusion Detection System for Wireless Networks', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663787', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 9, true, 'https://www.scopus.com/pages/publications/85124960597?origin=resultslist', '2-s2.0-85124960597', array['Intrusion Detection System', 'NSL-KDD', 'Wireless networks']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124960597');
+update public.publications set citations = 9, keywords = array['Intrusion Detection System', 'NSL-KDD', 'Wireless networks']::text[] where scopus_eid = '2-s2.0-85124960597';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'rashid.baimukashev') from public.publications where scopus_eid = '2-s2.0-85124960597' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Enhanced U-Net Architecture for Lung Segmentation on Computed Tomography and X-Ray Images', 2024, 'Article', 'https://doi.org/10.14569/IJACSA.2024.0150594', 'International Journal of Advanced Computer Science and Applications',
+  'Science and Information Organization', 15, true, 'https://www.scopus.com/pages/publications/85197912093?origin=resultslist', '2-s2.0-85197912093', array['computed tomography', 'deep learning', 'diagnosis', 'Lung disease', 'segmentation', 'U-Net']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85197912093');
+update public.publications set citations = 15, keywords = array['computed tomography', 'deep learning', 'diagnosis', 'Lung disease', 'segmentation', 'U-Net']::text[] where scopus_eid = '2-s2.0-85197912093';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'rashid.baimukashev') from public.publications where scopus_eid = '2-s2.0-85197912093' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Comparative analysis of machine learning approaches in Kazakh banknote classification', 2024, 'Article', 'https://doi.org/10.11591/eei.v13i5.8004', 'Bulletin of Electrical Engineering and Informatics',
+  'Institute of Advanced Engineering and Science', 8, true, 'https://www.scopus.com/pages/publications/85200974099?origin=resultslist', '2-s2.0-85200974099', array['Banknote classification', 'Hybrid approach', 'Kazakh banknotes', 'Machine learning', 'Model stacking', 'Traditional approach', 'Visual impairments']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85200974099');
+update public.publications set citations = 8, keywords = array['Banknote classification', 'Hybrid approach', 'Kazakh banknotes', 'Machine learning', 'Model stacking', 'Traditional approach', 'Visual impairments']::text[] where scopus_eid = '2-s2.0-85200974099';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'rashid.baimukashev') from public.publications where scopus_eid = '2-s2.0-85200974099' on conflict do nothing;
+
+-- Ruslan Jantayev
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('ruslan.jantayev', 'Ruslan', 'Jantayev', 'Ruslan Jantayev', 'Senior Lecturer', 'Master', 'ruslan.jantayev@sdu.edu.kz',
+  null, null, '57207776943', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Ruslan+Jantayev',
+  2, 0, 13, 4,
+  array['cnn', 'principal component analysis', 'sparse representation', 'steerable gaussian filter', 'bidirectional lstm', 'computer vision', 'document processing', 'htr']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Sparse representation based face recognition under varying illumination', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634755', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, false, 'https://www.scopus.com/pages/publications/85062834262?origin=resultslist', '2-s2.0-85062834262', array['Principal Component Analysis', 'Sparse Representation', 'Steerable Gaussian Filter']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062834262');
+update public.publications set citations = 2, keywords = array['Principal Component Analysis', 'Sparse Representation', 'Steerable Gaussian Filter']::text[] where scopus_eid = '2-s2.0-85062834262';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ruslan.jantayev') from public.publications where scopus_eid = '2-s2.0-85062834262' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Complete Kazakh handwritten page recognition using start, follow and read method', 2021, 'Article', null, 'Journal of Theoretical and Applied Information Technology',
+  'Little Lion Scientific', 0, false, 'https://www.scopus.com/pages/publications/85110715853?origin=resultslist', '2-s2.0-85110715853', array['Bidirectional LSTM', 'CNN', 'Computer Vision', 'Document Processing', 'HTR', 'Kazakh Handwritten', 'Text line cutting', 'Text Line Follower']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85110715853');
+update public.publications set citations = 0, keywords = array['Bidirectional LSTM', 'CNN', 'Computer Vision', 'Document Processing', 'HTR', 'Kazakh Handwritten', 'Text line cutting', 'Text Line Follower']::text[] where scopus_eid = '2-s2.0-85110715853';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ruslan.jantayev') from public.publications where scopus_eid = '2-s2.0-85110715853' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Improved handwritten digit recognition method using deep learning Algorithm', 2019, 'Conference paper', 'https://doi.org/10.1109/ICECCO48375.2019.9043235', '2019 15th International Conference on Electronics, Computer and Computation, ICECCO 2019',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/85083482571?origin=resultslist', '2-s2.0-85083482571', array['CNN', 'Handwritten Digit Recognition', 'MNIST Dataset', 'SVM']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85083482571');
+update public.publications set citations = 5, keywords = array['CNN', 'Handwritten Digit Recognition', 'MNIST Dataset', 'SVM']::text[] where scopus_eid = '2-s2.0-85083482571';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ruslan.jantayev') from public.publications where scopus_eid = '2-s2.0-85083482571' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Stemming algorithm for kazakh language using rule-based approach', 2019, 'Conference paper', 'https://doi.org/10.1109/ICECCO48375.2019.9043253', '2019 15th International Conference on Electronics, Computer and Computation, ICECCO 2019',
+  'Institute of Electrical and Electronics Engineers Inc.', 6, false, 'https://www.scopus.com/pages/publications/85083512518?origin=resultslist', '2-s2.0-85083512518', array['Kazakh language', 'Natural language processing', 'Stemming']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85083512518');
+update public.publications set citations = 6, keywords = array['Kazakh language', 'Natural language processing', 'Stemming']::text[] where scopus_eid = '2-s2.0-85083512518';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ruslan.jantayev') from public.publications where scopus_eid = '2-s2.0-85083512518' on conflict do nothing;
+
+-- Selcuk Cankurt
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('selcuk.cankurt', 'Selcuk', 'Cankurt', 'Selcuk Cankurt', 'Assistant Professor SDU', 'PhD', 'selcuk.cankurt@sdu.edu.kz',
+  null, null, '57190182763', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Selcuk+Cankurt',
+  3, 2, 37, 7,
+  array['deep learning', 'attention mechanism', 'cnn', 'dnn', 'lstm', 'nlp', 'turkish sentiment analysis', 'word2vec']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Comparative Analysis of Embedding Strategies for Turkish Sentiment Analysis', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488770', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038328769?origin=resultslist', '2-s2.0-105038328769', array['Deep Learning', 'LSTM', 'NLP', 'Turkish Sentiment Analysis', 'Word2Vec']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038328769');
+update public.publications set citations = 0, keywords = array['Deep Learning', 'LSTM', 'NLP', 'Turkish Sentiment Analysis', 'Word2Vec']::text[] where scopus_eid = '2-s2.0-105038328769';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'selcuk.cankurt') from public.publications where scopus_eid = '2-s2.0-105038328769' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Fake News Classification using BLSTM with Glove Embedding', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147150', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 6, false, 'https://www.scopus.com/pages/publications/85163769944?origin=resultslist', '2-s2.0-85163769944', array['Deep learning', 'Fake news detection', 'False news', 'True news']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163769944');
+update public.publications set citations = 6, keywords = array['Deep learning', 'Fake news detection', 'False news', 'True news']::text[] where scopus_eid = '2-s2.0-85163769944';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'selcuk.cankurt') from public.publications where scopus_eid = '2-s2.0-85163769944' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Evaluation of the Pronunciation of Tajweed Rules Based on DNN as a Step Towards Interactive Recitation Learning', 2025, 'Conference paper', 'https://doi.org/10.1109/CompSysTech65493.2025.11137272', 'Computer Systems and Technologies - 26th International Conference, CompSysTech 2025 - Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, true, 'https://www.scopus.com/pages/publications/105016457775?origin=resultslist', '2-s2.0-105016457775', array['Attention mechanism', 'CNN', 'DNN', 'Mel-spectrogram', 'Pronunciation evaluation', 'Squeeze-and-Excitation block', 'Tajweed rules', 'Transfer learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105016457775');
+update public.publications set citations = 2, keywords = array['Attention mechanism', 'CNN', 'DNN', 'Mel-spectrogram', 'Pronunciation evaluation', 'Squeeze-and-Excitation block', 'Tajweed rules', 'Transfer learning']::text[] where scopus_eid = '2-s2.0-105016457775';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'selcuk.cankurt') from public.publications where scopus_eid = '2-s2.0-105016457775' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Tourism demand forecasting using stacking ensemble model with adaptive fuzzy combiner', 2022, 'Article', 'https://doi.org/10.1007/s00500-021-06695-0', 'Soft Computing',
+  'Springer Science and Business Media Deutschland GmbH', 12, true, 'https://www.scopus.com/pages/publications/85122691394?origin=resultslist', '2-s2.0-85122691394', array['ANFIS', 'Artificial neural network (ANN)', 'Multivariate time series forecasting', 'Stacking ensemble', 'Tourism demand forecasting']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85122691394');
+update public.publications set citations = 12, keywords = array['ANFIS', 'Artificial neural network (ANN)', 'Multivariate time series forecasting', 'Stacking ensemble', 'Tourism demand forecasting']::text[] where scopus_eid = '2-s2.0-85122691394';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'selcuk.cankurt') from public.publications where scopus_eid = '2-s2.0-85122691394' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Interpretable Hybrid CNN-BiLSTM-Attention Model for ECG Arrhythmia Classification', 2026, 'Conference paper', 'https://doi.org/10.1109/SIST61674.2026.11596330', 'SIST 2026 - 2026 IEEE 6th International Conference on Smart Information Systems and Technologies, Conference Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105045663680?origin=resultslist', '2-s2.0-105045663680', array['arrhythmia classification', 'attention mechanism', 'BiLSTM', 'CNN', 'deep learning', 'Electrocardiogram', 'interpretability']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105045663680');
+update public.publications set citations = 0, keywords = array['arrhythmia classification', 'attention mechanism', 'BiLSTM', 'CNN', 'deep learning', 'Electrocardiogram', 'interpretability']::text[] where scopus_eid = '2-s2.0-105045663680';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'selcuk.cankurt') from public.publications where scopus_eid = '2-s2.0-105045663680' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Electromyography Signal Classification Using Deep Learning', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663803', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 14, true, 'https://www.scopus.com/pages/publications/85124966449?origin=resultslist', '2-s2.0-85124966449', array['ALS', 'deep learning', 'DNN', 'EMG', 'EMG signal classification', 'Myopathy']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124966449');
+update public.publications set citations = 14, keywords = array['ALS', 'deep learning', 'DNN', 'EMG', 'EMG signal classification', 'Myopathy']::text[] where scopus_eid = '2-s2.0-85124966449';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'selcuk.cankurt') from public.publications where scopus_eid = '2-s2.0-85124966449' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'MapReduce Solutions Classification by Their Implementation', 2023, 'Article', 'https://doi.org/10.3991/ijep.v13i5.38867', 'International Journal of Engineering Pedagogy',
+  null, 3, true, 'https://www.scopus.com/pages/publications/85166402233?origin=resultslist', '2-s2.0-85166402233', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85166402233');
+update public.publications set citations = 3, keywords = array[]::text[] where scopus_eid = '2-s2.0-85166402233';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'selcuk.cankurt') from public.publications where scopus_eid = '2-s2.0-85166402233' on conflict do nothing;
+
+-- Shakhnazar-Sultan Manbay
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('s.manbay', 'Shakhnazar-Sultan', 'Manbay', 'Shakhnazar-Sultan Manbay', 'Senior Lecturer', 'Master', 's.manbay@sdu.edu.kz',
+  null, 'https://orcid.org/0000-0002-7850-2057', '60623326900', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=S+Manbay',
+  0, 0, 0, 1,
+  array['cloudbased geospatial education', 'environmental data analysis', 'google earth engine', 'remote sensing', 'water resource analysis']::text[], '[{"topic_name":"Network Security and Intrusion Detection","subfield":"Computer Networks and Communications","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Algorithms and Data Compression","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Network Packet Processing and Optimization","subfield":"Hardware and Architecture","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Geography Education and Pedagogy","subfield":"Geography, Planning and Development","field":"Social Sciences","domain":"Social Sciences","works_count":1},{"topic_name":"Innovations in Educational Methods","subfield":"Education","field":"Social Sciences","domain":"Social Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Design and Evaluation of a Google Earth Engine-Based Training Framework for Water Resource Analysis in Educational Settings', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488826', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038358742?origin=resultslist', '2-s2.0-105038358742', array['CloudBased Geospatial Education', 'Environmental Data Analysis', 'Google Earth Engine', 'Remote Sensing', 'Water Resource Analysis']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038358742');
+update public.publications set citations = 0, keywords = array['CloudBased Geospatial Education', 'Environmental Data Analysis', 'Google Earth Engine', 'Remote Sensing', 'Water Resource Analysis']::text[] where scopus_eid = '2-s2.0-105038358742';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 's.manbay') from public.publications where scopus_eid = '2-s2.0-105038358742' on conflict do nothing;
+
+-- Shirali Kadyrov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('shirali.kadyrov', 'Shirali', 'Kadyrov', 'Shirali Kadyrov', 'Professor SDU', 'PhD', 'shirali.kadyrov@sdu.edu.kz',
+  null, null, '36844229300', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Shirali+Kadyrov',
+  8, 7, 237, 52,
+  array['deep learning', 'computer vision', 'reinforcement learning', 'text classification', 'epidemic modeling', 'parameter estimation', 'dynamical systems', 'stochastic gradient descent']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A novel recommender system for adapting single machine problems to distributed systems within MapReduce', 2025, 'Article', 'https://doi.org/10.11591/eei.v14i1.8370', 'Bulletin of Electrical Engineering and Informatics',
+  'Institute of Advanced Engineering and Science', 0, true, 'https://www.scopus.com/pages/publications/85210854573?origin=resultslist', '2-s2.0-85210854573', array['Distributed system', 'Knowledge-based approach', 'Machine learning model', 'MapReduce', 'Recommender system', 'Text-based approach']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85210854573');
+update public.publications set citations = 0, keywords = array['Distributed system', 'Knowledge-based approach', 'Machine learning model', 'MapReduce', 'Recommender system', 'Text-based approach']::text[] where scopus_eid = '2-s2.0-85210854573';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85210854573' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A simple analysis of flying capacitor converter', 2018, 'Article', 'https://doi.org/10.1108/COMPEL-07-2017-0282', 'COMPEL - The International Journal for Computation and Mathematics in Electrical and Electronic Engineering',
+  'Emerald Group Publishing Ltd.', 2, false, 'https://www.scopus.com/pages/publications/85048358827?origin=resultslist', '2-s2.0-85048358827', array['Flying capacitor converter', 'Linear ODE', 'Periodic solutions', 'Piecewise constant coefficients']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85048358827');
+update public.publications set citations = 2, keywords = array['Flying capacitor converter', 'Linear ODE', 'Periodic solutions', 'Piecewise constant coefficients']::text[] where scopus_eid = '2-s2.0-85048358827';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85048358827' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Complete Kazakh handwritten page recognition using start, follow and read method', 2021, 'Article', null, 'Journal of Theoretical and Applied Information Technology',
+  'Little Lion Scientific', 0, false, 'https://www.scopus.com/pages/publications/85110715853?origin=resultslist', '2-s2.0-85110715853', array['Bidirectional LSTM', 'CNN', 'Computer Vision', 'Document Processing', 'HTR', 'Kazakh Handwritten', 'Text line cutting', 'Text Line Follower']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85110715853');
+update public.publications set citations = 0, keywords = array['Bidirectional LSTM', 'CNN', 'Computer Vision', 'Document Processing', 'HTR', 'Kazakh Handwritten', 'Text line cutting', 'Text Line Follower']::text[] where scopus_eid = '2-s2.0-85110715853';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85110715853' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Pca and projection based hand gesture recognition', 2021, 'Article', null, 'Journal of Theoretical and Applied Information Technology',
+  'Little Lion Scientific', 0, false, 'https://www.scopus.com/pages/publications/85112491621?origin=resultslist', '2-s2.0-85112491621', array['Computer Vision', 'Hand Gesture Recognition', 'Human-Computer Interaction', 'kNN', 'PCA-TP', 'Sign Language', 'SRC', 'Stochastic Gradient Descent', 'Triplet Loss']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85112491621');
+update public.publications set citations = 0, keywords = array['Computer Vision', 'Hand Gesture Recognition', 'Human-Computer Interaction', 'kNN', 'PCA-TP', 'Sign Language', 'SRC', 'Stochastic Gradient Descent', 'Triplet Loss']::text[] where scopus_eid = '2-s2.0-85112491621';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85112491621' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Prediction of Student''s Dropout from a University Program', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663763', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 12, false, 'https://www.scopus.com/pages/publications/85124974347?origin=resultslist', '2-s2.0-85124974347', array['ANN', 'Binary classification', 'Logistic Regression', 'Naive Bayes', 'Program dropouts', 'SVM']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124974347');
+update public.publications set citations = 12, keywords = array['ANN', 'Binary classification', 'Logistic Regression', 'Naive Bayes', 'Program dropouts', 'SVM']::text[] where scopus_eid = '2-s2.0-85124974347';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85124974347' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Systematic Survey of Deep Fuzzy Computer Vision in Biomedical Research', 2024, 'Article', 'https://doi.org/10.26599/FIE.2024.9270043', 'Fuzzy Information and Engineering',
+  'Tsinghua University Press', 7, true, 'https://www.scopus.com/pages/publications/85210479085?origin=resultslist', '2-s2.0-85210479085', array['algorithm', 'artificial intellegence', 'biomedical research', 'deep learning', 'deep neural networks', 'fuzzy computer vision', 'image analysis']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85210479085');
+update public.publications set citations = 7, keywords = array['algorithm', 'artificial intellegence', 'biomedical research', 'deep learning', 'deep neural networks', 'fuzzy computer vision', 'image analysis']::text[] where scopus_eid = '2-s2.0-85210479085';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85210479085' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Evaluating Open-Source Large Language Models on Kazakhstan''s NIS Admission Examination', 2026, 'Conference paper', 'https://doi.org/10.1109/SIST61674.2026.11596266', 'SIST 2026 - 2026 IEEE 6th International Conference on Smart Information Systems and Technologies, Conference Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105045610676?origin=resultslist', '2-s2.0-105045610676', array['Admission Examinations', 'Educational Assessment', 'Error Analysis', 'Large Language Models', 'Open-Source AI', 'Statistical Evaluation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105045610676');
+update public.publications set citations = 0, keywords = array['Admission Examinations', 'Educational Assessment', 'Error Analysis', 'Large Language Models', 'Open-Source AI', 'Statistical Evaluation']::text[] where scopus_eid = '2-s2.0-105045610676';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105045610676' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Approximating Geodesic Distances via Heat Kernels for Geometric Deep Learning', 2026, 'Conference paper', 'https://doi.org/10.1109/SIST61674.2026.11596008', 'SIST 2026 - 2026 IEEE 6th International Conference on Smart Information Systems and Technologies, Conference Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105045628631?origin=resultslist', '2-s2.0-105045628631', array['Geodesic Approximation', 'Graph Attention Networks', 'Graph Neural Networks', 'Heat Kernel', 'Spectral Graph Theory']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105045628631');
+update public.publications set citations = 0, keywords = array['Geodesic Approximation', 'Graph Attention Networks', 'Graph Neural Networks', 'Heat Kernel', 'Spectral Graph Theory']::text[] where scopus_eid = '2-s2.0-105045628631';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105045628631' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Comprehensive Survey of Methods and Challenges of Vehicle Routing Problem with Uncertainties', 2025, 'Review', 'https://doi.org/10.3390/math13233782', 'Mathematics',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 13, true, 'https://www.scopus.com/pages/publications/105024580606?origin=resultslist', '2-s2.0-105024580606', array['demand variability', 'dynamic routing', 'reinforcement learning', 'transportation management', 'travel time variability', 'uncertainty', 'vehicle routing problem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105024580606');
+update public.publications set citations = 13, keywords = array['demand variability', 'dynamic routing', 'reinforcement learning', 'transportation management', 'travel time variability', 'uncertainty', 'vehicle routing problem']::text[] where scopus_eid = '2-s2.0-105024580606';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105024580606' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Application of ROC Curve Analysis for Predicting Students’ Passing Grade in a Course Based on Prerequisite Grades', 2022, 'Article', 'https://doi.org/10.3390/math10122084', 'Mathematics',
+  'MDPI', 3, true, 'https://www.scopus.com/pages/publications/85132788845?origin=resultslist', '2-s2.0-85132788845', array['binary classification', 'curriculum design', 'mathematics education', 'prerequisite', 'ROC curve analysis', 'undergraduate education', 'Youden index']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85132788845');
+update public.publications set citations = 3, keywords = array['binary classification', 'curriculum design', 'mathematics education', 'prerequisite', 'ROC curve analysis', 'undergraduate education', 'Youden index']::text[] where scopus_eid = '2-s2.0-85132788845';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85132788845' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Hardy-Regularized Deep Neural Networks for Stable Function Approximation', 2026, 'Conference paper', 'https://doi.org/10.1109/SIST61674.2026.11596525', 'SIST 2026 - 2026 IEEE 6th International Conference on Smart Information Systems and Technologies, Conference Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105045613058?origin=resultslist', '2-s2.0-105045613058', array['deep learning', 'Hardy inequality', 'Lipschitz continuity', 'neural network regularization', 'stability']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105045613058');
+update public.publications set citations = 0, keywords = array['deep learning', 'Hardy inequality', 'Lipschitz continuity', 'neural network regularization', 'stability']::text[] where scopus_eid = '2-s2.0-105045613058';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105045613058' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select '2D face recognition using PCA and triplet similarity embedding', 2023, 'Article', 'https://doi.org/10.11591/eei.v12i1.4162', 'Bulletin of Electrical Engineering and Informatics',
+  'Institute of Advanced Engineering and Science', 4, true, 'https://www.scopus.com/pages/publications/85141357567?origin=resultslist', '2-s2.0-85141357567', array['Face recognition', 'K-nearest neighbor', 'Principal component analysis TP', 'Stochastic gradient descent', 'Triplet loss']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85141357567');
+update public.publications set citations = 4, keywords = array['Face recognition', 'K-nearest neighbor', 'Principal component analysis TP', 'Stochastic gradient descent', 'Triplet loss']::text[] where scopus_eid = '2-s2.0-85141357567';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85141357567' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Multi-Task Learning with CORAL-Based Feature Alignment for Cross-Domain Plant Disease Detection', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488762', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038334375?origin=resultslist', '2-s2.0-105038334375', array['CORAL', 'cross-domain generalization', 'domain shift', 'multi-task learning', 'plant disease detection']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038334375');
+update public.publications set citations = 0, keywords = array['CORAL', 'cross-domain generalization', 'domain shift', 'multi-task learning', 'plant disease detection']::text[] where scopus_eid = '2-s2.0-105038334375';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105038334375' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Matrix Factorization-based Collaborative Filtering Framework for Course Recommendations in Higher Education', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147152', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/85163747394?origin=resultslist', '2-s2.0-85163747394', array['course selection', 'elective courses', 'machine learning', 'matrix factorization', 'recommender systems', 'stochastic gradient descent']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163747394');
+update public.publications set citations = 7, keywords = array['course selection', 'elective courses', 'machine learning', 'matrix factorization', 'recommender systems', 'stochastic gradient descent']::text[] where scopus_eid = '2-s2.0-85163747394';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85163747394' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Speaker Recognition from Spectrogram Images', 2021, 'Conference paper', 'https://doi.org/10.1109/SIST50301.2021.9465954', 'SIST 2021 - 2021 IEEE International Conference on Smart Information Systems and Technologies',
+  'Institute of Electrical and Electronics Engineers Inc.', 12, false, 'https://www.scopus.com/pages/publications/85113849807?origin=resultslist', '2-s2.0-85113849807', array['computer vision', 'convolutional neural networks', 'deep learning', 'long short-term memory', 'speaker recognition', 'spectrogram']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85113849807');
+update public.publications set citations = 12, keywords = array['computer vision', 'convolutional neural networks', 'deep learning', 'long short-term memory', 'speaker recognition', 'spectrogram']::text[] where scopus_eid = '2-s2.0-85113849807';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85113849807' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Evaluating LLMs on Kazakhstan''s mathematics exam for university admission', 2025, 'Article', 'https://doi.org/10.3389/frai.2025.1642570', 'Frontiers in Artificial Intelligence',
+  'Frontiers Media SA', 3, true, 'https://www.scopus.com/pages/publications/105017505828?origin=resultslist', '2-s2.0-105017505828', array['Kazakhstan education', 'large language models', 'mathematical reasoning', 'simulated multi-agent refinement', 'symbolic computation', 'SymPy', 'unified national testing', 'zero-shot learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105017505828');
+update public.publications set citations = 3, keywords = array['Kazakhstan education', 'large language models', 'mathematical reasoning', 'simulated multi-agent refinement', 'symbolic computation', 'SymPy', 'unified national testing', 'zero-shot learning']::text[] where scopus_eid = '2-s2.0-105017505828';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105017505828' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Automatic Classification of University Staff Enquiries in Russian and English', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663851', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85124984307?origin=resultslist', '2-s2.0-85124984307', array['Naive Bayes', 'SVM', 'Text classification', 'TF-IDF']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124984307');
+update public.publications set citations = 1, keywords = array['Naive Bayes', 'SVM', 'Text classification', 'TF-IDF']::text[] where scopus_eid = '2-s2.0-85124984307';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85124984307' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Text Classification for AI Generated Content with Machine Learning and Deep Learning Models', 2025, 'Conference paper', 'https://doi.org/10.1109/SIST61657.2025.11139296', 'SIST 2025 - 2025 IEEE 5th International Conference on Smart Information Systems and Technologies, Conference Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/105016841572?origin=resultslist', '2-s2.0-105016841572', array['AI-generated text', 'Bi-LSTM', 'deep learning', 'DistilBERT', 'machine learning', 'text classification']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105016841572');
+update public.publications set citations = 7, keywords = array['AI-generated text', 'Bi-LSTM', 'deep learning', 'DistilBERT', 'machine learning', 'text classification']::text[] where scopus_eid = '2-s2.0-105016841572';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105016841572' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Automatic Language Identification from Spectorgam Images', 2021, 'Conference paper', 'https://doi.org/10.1109/SIST50301.2021.9465996', 'SIST 2021 - 2021 IEEE International Conference on Smart Information Systems and Technologies',
+  'Institute of Electrical and Electronics Engineers Inc.', 4, false, 'https://www.scopus.com/pages/publications/85113851677?origin=resultslist', '2-s2.0-85113851677', array['CNN', 'computer vision', 'language identification', 'LSTM', 'spectrograms']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85113851677');
+update public.publications set citations = 4, keywords = array['CNN', 'computer vision', 'language identification', 'LSTM', 'spectrograms']::text[] where scopus_eid = '2-s2.0-85113851677';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85113851677' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Advancing Machine-generated Text Detection: A Comprehensive Evaluation of Transformer-based Models', 2026, 'Article', 'https://doi.org/10.12720/jait.17.7.1321-1330', 'Journal of Advances in Information Technology',
+  'Engineering and Technology Publishing', 0, true, 'https://www.scopus.com/pages/publications/105045792883?origin=resultslist', '2-s2.0-105045792883', array['AI-generated content', 'Artificial Intelligence (AI)', 'Artificial Intelligence (AI) detection', 'Bidirectional Long Short-Term Memory (BiLSTM)', 'Decoding-Enhanced Bert with Disentangled Attention (DeBERTa)', 'text classification', 'transformers']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105045792883');
+update public.publications set citations = 0, keywords = array['AI-generated content', 'Artificial Intelligence (AI)', 'Artificial Intelligence (AI) detection', 'Bidirectional Long Short-Term Memory (BiLSTM)', 'Decoding-Enhanced Bert with Disentangled Attention (DeBERTa)', 'text classification', 'transformers']::text[] where scopus_eid = '2-s2.0-105045792883';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105045792883' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Multi-Class Detection of Humanized AI Text Using Machine Learning and Transformer Models', 2025, 'Conference paper', 'https://doi.org/10.1109/ICCIKE67021.2025.11318272', '2025 International Conference on Computational Intelligence and Knowledge Economy, ICCIKE 2025',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/105032669978?origin=resultslist', '2-s2.0-105032669978', array['AI-generated text detection', 'DeBERTa', 'deep learning', 'humanized AI text', 'LSTM', 'machine learning', 'natural language processing', 'text classification']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105032669978');
+update public.publications set citations = 5, keywords = array['AI-generated text detection', 'DeBERTa', 'deep learning', 'humanized AI text', 'LSTM', 'machine learning', 'natural language processing', 'text classification']::text[] where scopus_eid = '2-s2.0-105032669978';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105032669978' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'MBTI personality classification using Apache Spark', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663858', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 4, false, 'https://www.scopus.com/pages/publications/85124992958?origin=resultslist', '2-s2.0-85124992958', array['Apache Spark', 'Logistic Regression', 'MBTI', 'Naive Bayes', 'SVM']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124992958');
+update public.publications set citations = 4, keywords = array['Apache Spark', 'Logistic Regression', 'MBTI', 'Naive Bayes', 'SVM']::text[] where scopus_eid = '2-s2.0-85124992958';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85124992958' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Automatic Language Identification from Audio Signals using LSTM-RNN', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10146603', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 8, false, 'https://www.scopus.com/pages/publications/85163774916?origin=resultslist', '2-s2.0-85163774916', array['Audio Signals', 'Language Identification', 'LSTM', 'RNN']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163774916');
+update public.publications set citations = 8, keywords = array['Audio Signals', 'Language Identification', 'LSTM', 'RNN']::text[] where scopus_eid = '2-s2.0-85163774916';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85163774916' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Multitask Transformer Models for Demographic and Industry Profiling on Long-Form Blog Texts', 2026, 'Article', null, 'Transactions on Machine Learning Research',
+  'Transactions on Machine Learning Research', 0, false, 'https://www.scopus.com/pages/publications/105042947856?origin=resultslist', '2-s2.0-105042947856', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105042947856');
+update public.publications set citations = 0, keywords = array[]::text[] where scopus_eid = '2-s2.0-105042947856';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105042947856' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Genetic Algorithm Approaches for Parameter Estimation and Global Stability in Fuzzy Epidemic Modeling', 2024, 'Article', 'https://doi.org/10.26599/FIE.2024.9270038', 'Fuzzy Information and Engineering',
+  'Tsinghua University Press', 4, true, 'https://www.scopus.com/pages/publications/85201087426?origin=resultslist', '2-s2.0-85201087426', array['continued fraction', 'epidemic modeling', 'fuzzy set theory', 'genetic algorithms', 'global stability analysis', 'Infected', 'Lyapunov functions', 'parameter estimation', 'Recovered (SIR) fuzzy model', 'Susceptible']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85201087426');
+update public.publications set citations = 4, keywords = array['continued fraction', 'epidemic modeling', 'fuzzy set theory', 'genetic algorithms', 'global stability analysis', 'Infected', 'Lyapunov functions', 'parameter estimation', 'Recovered (SIR) fuzzy model', 'Susceptible']::text[] where scopus_eid = '2-s2.0-85201087426';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85201087426' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'An Improved Face Recognition Algorithm Based on Sparse Representation', 2018, 'Conference paper', 'https://doi.org/10.1109/CoCoNet.2018.8476916', 'Proceedings of the 2nd International Conference on Computing and Network Communications, CoCoNet 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 4, false, 'https://www.scopus.com/pages/publications/85055986517?origin=resultslist', '2-s2.0-85055986517', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85055986517');
+update public.publications set citations = 4, keywords = array[]::text[] where scopus_eid = '2-s2.0-85055986517';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85055986517' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'MapReduce Solutions Classification by Their Implementation', 2023, 'Article', 'https://doi.org/10.3991/ijep.v13i5.38867', 'International Journal of Engineering Pedagogy',
+  null, 3, true, 'https://www.scopus.com/pages/publications/85166402233?origin=resultslist', '2-s2.0-85166402233', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85166402233');
+update public.publications set citations = 3, keywords = array[]::text[] where scopus_eid = '2-s2.0-85166402233';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85166402233' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Analysis of dynamic pull-in voltage of a graphene MEMS model', 2019, 'Article', 'https://doi.org/10.1016/j.nonrwa.2018.07.025', 'Nonlinear Analysis: Real World Applications',
+  'Elsevier Ltd', 49, true, 'https://www.scopus.com/pages/publications/85050933040?origin=resultslist', '2-s2.0-85050933040', array['Bifurcation', 'Graphene', 'MEMS', 'Nonlinear oscillator', 'Periodic solution', 'Pull-in']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85050933040');
+update public.publications set citations = 49, keywords = array['Bifurcation', 'Graphene', 'MEMS', 'Nonlinear oscillator', 'Periodic solution', 'Pull-in']::text[] where scopus_eid = '2-s2.0-85050933040';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85050933040' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Factors Affecting Mathematics Achievement in Central Asian Specialized Universities', 2020, 'Article', 'https://doi.org/10.3991/ijet.v15i19.15629', 'International Journal of Emerging Technologies in Learning',
+  null, 15, true, 'https://www.scopus.com/pages/publications/85097577176?origin=resultslist', '2-s2.0-85097577176', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85097577176');
+update public.publications set citations = 15, keywords = array[]::text[] where scopus_eid = '2-s2.0-85097577176';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85097577176' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Periodic solutions and the avoidance of pull-in instability in nonautonomous microelectromechanical systems', 2021, 'Article', 'https://doi.org/10.1002/mma.7725', 'Mathematical Methods in the Applied Sciences',
+  'John Wiley and Sons Ltd', 5, true, 'https://www.scopus.com/pages/publications/85112786008?origin=resultslist', '2-s2.0-85112786008', array['dynamical systems', 'forced graphene oscillator', 'MEMS', 'pull-in']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85112786008');
+update public.publications set citations = 5, keywords = array['dynamical systems', 'forced graphene oscillator', 'MEMS', 'pull-in']::text[] where scopus_eid = '2-s2.0-85112786008';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85112786008' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Automated Reading Detection in an Online Exam', 2022, 'Article', 'https://doi.org/10.3991/ijet.v17i22.33277', 'International Journal of Emerging Technologies in Learning',
+  null, 3, true, 'https://www.scopus.com/pages/publications/85143826176?origin=resultslist', '2-s2.0-85143826176', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85143826176');
+update public.publications set citations = 3, keywords = array[]::text[] where scopus_eid = '2-s2.0-85143826176';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85143826176' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Kazakh and Russian Translation of FSMAS-SF Instrument', 2021, 'Conference paper', 'https://doi.org/10.1088/1742-6596/1988/1/012046', 'Journal of Physics: Conference Series',
+  'IOP Publishing Ltd', 4, true, 'https://www.scopus.com/pages/publications/85114203223?origin=resultslist', '2-s2.0-85114203223', array['Attitude Test', 'Factor analysis', 'Higher Education', 'Mathematics Education', 'Translation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85114203223');
+update public.publications set citations = 4, keywords = array['Attitude Test', 'Factor analysis', 'Higher Education', 'Mathematics Education', 'Translation']::text[] where scopus_eid = '2-s2.0-85114203223';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85114203223' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Purely Data-driven Exploration of COVID-19 Pandemic After Three Months of the Outbreak', 2021, 'Article', 'https://doi.org/10.5614/j.math.fund.sci.2021.53.3.2', 'Journal of Mathematical and Fundamental Sciences',
+  'Institute for Research and Community Services, Institut Teknologi Bandung', 0, true, 'https://www.scopus.com/pages/publications/85123283208?origin=resultslist', '2-s2.0-85123283208', array['Basic reproduction', 'Clustering', 'COVID-19', 'Doubling period', 'Dynamical systems', 'Parameter estimation', 'SIR model']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85123283208');
+update public.publications set citations = 0, keywords = array['Basic reproduction', 'Clustering', 'COVID-19', 'Doubling period', 'Dynamical systems', 'Parameter estimation', 'SIR model']::text[] where scopus_eid = '2-s2.0-85123283208';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85123283208' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Semi-Regular Continued Fractions with Fast-Growing Partial Quotients', 2024, 'Article', 'https://doi.org/10.3390/fractalfract8080436', 'Fractal and Fractional',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 2, true, 'https://www.scopus.com/pages/publications/85202598302?origin=resultslist', '2-s2.0-85202598302', array['box dimension', 'convergents', 'dimension theory', 'Hausdorff dimension', 'number theory', 'partial quotients', 'semi-regular continued fractions']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85202598302');
+update public.publications set citations = 2, keywords = array['box dimension', 'convergents', 'dimension theory', 'Hausdorff dimension', 'number theory', 'partial quotients', 'semi-regular continued fractions']::text[] where scopus_eid = '2-s2.0-85202598302';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85202598302' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'On the solutions of second order difference equations with variable coefficients', 2025, 'Article', 'https://doi.org/10.47974/JIM-2093', 'Journal of Interdisciplinary Mathematics',
+  'Taru Publications', 1, true, 'https://www.scopus.com/pages/publications/105008561090?origin=resultslist', '2-s2.0-105008561090', array['Apéry-like series', 'Closed form solutions', 'Continued fractions', 'Difference equations', 'Non-homogeneous equations', 'π']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105008561090');
+update public.publications set citations = 1, keywords = array['Apéry-like series', 'Closed form solutions', 'Continued fractions', 'Difference equations', 'Non-homogeneous equations', 'π']::text[] where scopus_eid = '2-s2.0-105008561090';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105008561090' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A compartmental epidemic model with age stratification for insurance premium calculation', 2025, 'Article', 'https://doi.org/10.3934/mbe.2025114', 'Mathematical Biosciences and Engineering',
+  'American Institute of Mathematical Sciences', 1, true, 'https://www.scopus.com/pages/publications/105020675008?origin=resultslist', '2-s2.0-105020675008', array['actuarial principles', 'age stratification', 'disease dynamics', 'epidemic modeling', 'genetic algorithm', 'health insurance', 'hospitalization costs', 'parameter estimation', 'premium calculation', 'sensitivity analysis', 'SIRD model']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105020675008');
+update public.publications set citations = 1, keywords = array['actuarial principles', 'age stratification', 'disease dynamics', 'epidemic modeling', 'genetic algorithm', 'health insurance', 'hospitalization costs', 'parameter estimation', 'premium calculation', 'sensitivity analysis', 'SIRD model']::text[] where scopus_eid = '2-s2.0-105020675008';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105020675008' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Unified computational approach to nilpotent algebra classification problems', 2021, 'Article', 'https://doi.org/10.2478/cm-2021-0019', 'Communications in Mathematics',
+  'Sciendo', 8, true, 'https://www.scopus.com/pages/publications/85111343804?origin=resultslist', '2-s2.0-85111343804', array['Algebra', 'algorithm', 'finite dimensional nilpotent algebra', 'Skjelbred-Sund classification', 'symbolic solver', 'Wolfram Mathematica']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85111343804');
+update public.publications set citations = 8, keywords = array['Algebra', 'algorithm', 'finite dimensional nilpotent algebra', 'Skjelbred-Sund classification', 'symbolic solver', 'Wolfram Mathematica']::text[] where scopus_eid = '2-s2.0-85111343804';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85111343804' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Global Stability Analysis of a Novel Epidemic Model with Separate Compartments for Symptomatic and Asymptomatic Cases', 2025, 'Article', 'https://doi.org/10.1134/S199508022560027X', 'Lobachevskii Journal of Mathematics',
+  'Pleiades Publishing', 1, false, 'https://www.scopus.com/pages/publications/105008251321?origin=resultslist', '2-s2.0-105008251321', array['asymptomatic cases', 'dynamical systems', 'epidemic modeling', 'genetic algorithm', 'global stability', 'parameter estimation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105008251321');
+update public.publications set citations = 1, keywords = array['asymptomatic cases', 'dynamical systems', 'epidemic modeling', 'genetic algorithm', 'global stability', 'parameter estimation']::text[] where scopus_eid = '2-s2.0-105008251321';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105008251321' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A note on semi-regular continued fractions with bounded partial quotients', 2026, 'Article', 'https://doi.org/10.1007/s40065-025-00611-2', 'Arabian Journal of Mathematics',
+  'Springer Science and Business Media Deutschland GmbH', 0, false, 'https://www.scopus.com/pages/publications/105028726417?origin=resultslist', '2-s2.0-105028726417', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105028726417');
+update public.publications set citations = 0, keywords = array[]::text[] where scopus_eid = '2-s2.0-105028726417';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105028726417' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Endemic coexistence and competition of virus variants under partial cross-immunity', 2025, 'Article', 'https://doi.org/10.3934/era.2025050', 'Electronic Research Archive',
+  'American Mathematical Society', 1, true, 'https://www.scopus.com/pages/publications/105000309083?origin=resultslist', '2-s2.0-105000309083', array['bifurcation analysis', 'cross-immunity', 'endemic prevalence', 'epidemic modeling', 'multi-variant dynamics', 'public health strategy', 'SIR model', 'stability analysis', 'virus competition']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105000309083');
+update public.publications set citations = 1, keywords = array['bifurcation analysis', 'cross-immunity', 'endemic prevalence', 'epidemic modeling', 'multi-variant dynamics', 'public health strategy', 'SIR model', 'stability analysis', 'virus competition']::text[] where scopus_eid = '2-s2.0-105000309083';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105000309083' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Raising operators and a parametric polynomial continued fraction for π2', 2026, 'Article', 'https://doi.org/10.3934/era.2026175', 'Electronic Research Archive',
+  'American Mathematical Society', 0, true, 'https://www.scopus.com/pages/publications/105041542318?origin=resultslist', '2-s2.0-105041542318', array['central binomial coefficients', 'continued fractions', 'J-fractions', 'parameter-raising operators', 'polynomial continued fractions', 'telescoping', 'π<sup>2</sup>']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105041542318');
+update public.publications set citations = 0, keywords = array['central binomial coefficients', 'continued fractions', 'J-fractions', 'parameter-raising operators', 'polynomial continued fractions', 'telescoping', 'π<sup>2</sup>']::text[] where scopus_eid = '2-s2.0-105041542318';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105041542318' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Deterministic solvency thresholds and RL-based premium calibration for life insurance under age-structured epidemics', 2026, 'Article', 'https://doi.org/10.3934/era.2026199', 'Electronic Research Archive',
+  'American Mathematical Society', 0, true, 'https://www.scopus.com/pages/publications/105041813865?origin=resultslist', '2-s2.0-105041813865', array['age-structured SEIRD model', 'epidemic risk modelling', 'insurance mathematics', 'life insurance solvency', 'numerical stress testing', 'premium calibration', 'reinforcement learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105041813865');
+update public.publications set citations = 0, keywords = array['age-structured SEIRD model', 'epidemic risk modelling', 'insurance mathematics', 'life insurance solvency', 'numerical stress testing', 'premium calibration', 'reinforcement learning']::text[] where scopus_eid = '2-s2.0-105041813865';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105041813865' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Adaptive tracking control with Lyapunov regularization for data-calibrated Takagi–Sugeno fuzzy Markov jump biological systems', 2026, 'Article', 'https://doi.org/10.3934/math.2026860', 'AIMS Mathematics',
+  'American Institute of Mathematical Sciences', 0, true, 'https://www.scopus.com/pages/publications/105045183685?origin=resultslist', '2-s2.0-105045183685', array['adaptive tracking control', 'data-driven control', 'fitted Q iteration', 'Lyapunov regularization', 'Markovian jump systems', 'reinforcement learning', 'Takagi–Sugeno fuzzy systems', 'tumour–immune dynamics']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105045183685');
+update public.publications set citations = 0, keywords = array['adaptive tracking control', 'data-driven control', 'fitted Q iteration', 'Lyapunov regularization', 'Markovian jump systems', 'reinforcement learning', 'Takagi–Sugeno fuzzy systems', 'tumour–immune dynamics']::text[] where scopus_eid = '2-s2.0-105045183685';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105045183685' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Data-driven homotopic reinforcement learning for adaptive tracking control of completely unknown Takagi–Sugeno fuzzy Markovian jump systems', 2026, 'Article', 'https://doi.org/10.1016/j.cnsns.2026.110869', 'Communications in Nonlinear Science and Numerical Simulation',
+  'Elsevier B.V.', 0, false, 'https://www.scopus.com/pages/publications/105052403387?origin=resultslist', '2-s2.0-105052403387', array['Adaptive tracking control', 'Data-driven control', 'Homotopy continuation', 'Markov jump systems', 'Reinforcement learning', 'Takagi–Sugeno fuzzy systems']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105052403387');
+update public.publications set citations = 0, keywords = array['Adaptive tracking control', 'Data-driven control', 'Homotopy continuation', 'Markov jump systems', 'Reinforcement learning', 'Takagi–Sugeno fuzzy systems']::text[] where scopus_eid = '2-s2.0-105052403387';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105052403387' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Weakly divergent partial quotients', 2020, 'Article', 'https://doi.org/10.1142/S1793557120501582', 'Asian-European Journal of Mathematics',
+  'World Scientific Publishing Co. Pte Ltd', 2, false, 'https://www.scopus.com/pages/publications/85075483538?origin=resultslist', '2-s2.0-85075483538', array['Continued fractions', 'Hausdorff dimension', 'partial quotients']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85075483538');
+update public.publications set citations = 2, keywords = array['Continued fractions', 'Hausdorff dimension', 'partial quotients']::text[] where scopus_eid = '2-s2.0-85075483538';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85075483538' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Polynomial estimates over exponential curves in C2                     ', 2018, 'Conference paper', 'https://doi.org/10.1007/978-3-030-01144-4_8', 'Springer Proceedings in Mathematics and Statistics',
+  'Springer New York LLC', 0, false, 'https://www.scopus.com/pages/publications/85055574820?origin=resultslist', '2-s2.0-85055574820', array['Bernstein-Walsh inequality', 'Exponential curves', 'Several complex variables']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85055574820');
+update public.publications set citations = 0, keywords = array['Bernstein-Walsh inequality', 'Exponential curves', 'Several complex variables']::text[] where scopus_eid = '2-s2.0-85055574820';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85055574820' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'From midterm to final: Using Rasch analysis to measure growth and fairness in university calculus assessments', 2026, 'Article', 'https://doi.org/10.29333/ejmste/18065', 'Eurasia Journal of Mathematics, Science and Technology Education',
+  'Modestum LTD', 0, true, 'https://www.scopus.com/pages/publications/105032468206?origin=resultslist', '2-s2.0-105032468206', array['assessment validity', 'educational assessment', 'fairness', 'Rasch analysis', 'student performance measurement']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105032468206');
+update public.publications set citations = 0, keywords = array['assessment validity', 'educational assessment', 'fairness', 'Rasch analysis', 'student performance measurement']::text[] where scopus_eid = '2-s2.0-105032468206';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105032468206' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Novel representations of log2 with polynomial continued fractions', 2026, 'Article', 'https://doi.org/10.1007/s40065-025-00543-x', 'Arabian Journal of Mathematics',
+  'Springer Science and Business Media Deutschland GmbH', 1, false, 'https://www.scopus.com/pages/publications/105011077242?origin=resultslist', '2-s2.0-105011077242', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105011077242');
+update public.publications set citations = 1, keywords = array[]::text[] where scopus_eid = '2-s2.0-105011077242';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105011077242' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Deep reinforcement learning for dynamic vehicle routing with demand and traffic uncertainty', 2025, 'Article', 'https://doi.org/10.1016/j.orp.2025.100351', 'Operations Research Perspectives',
+  'Elsevier Ltd', 26, true, 'https://www.scopus.com/pages/publications/105012601830?origin=resultslist', '2-s2.0-105012601830', array['Combinatorial optimization', 'Deep reinforcement learning', 'Demand uncertainty', 'Graph neural networks', 'Markov Decision Process', 'Proximal policy optimization', 'Traffic uncertainty', 'Vehicle Routing Problem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105012601830');
+update public.publications set citations = 26, keywords = array['Combinatorial optimization', 'Deep reinforcement learning', 'Demand uncertainty', 'Graph neural networks', 'Markov Decision Process', 'Proximal policy optimization', 'Traffic uncertainty', 'Vehicle Routing Problem']::text[] where scopus_eid = '2-s2.0-105012601830';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-105012601830' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'An SIRS Pulse Vaccination Model with Nonlinear Incidence Rate and Time Delay', 2023, 'Article', null, 'Letters in Biomathematics',
+  'Intercollegiate Biomathematics Alliance', 2, false, 'https://www.scopus.com/pages/publications/85177729074?origin=resultslist', '2-s2.0-85177729074', array['epidemic models', 'global attractiveness', 'pulse vaccination system (PVS)', 'spectral radius', 'the Poincaré map']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85177729074');
+update public.publications set citations = 2, keywords = array['epidemic models', 'global attractiveness', 'pulse vaccination system (PVS)', 'spectral radius', 'the Poincaré map']::text[] where scopus_eid = '2-s2.0-85177729074';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85177729074' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Generalized continued fraction expansions for π and e', 2021, 'Article', 'https://doi.org/10.1080/09720529.2021.1936897', 'Journal of Discrete Mathematical Sciences and Cryptography',
+  'Taylor and Francis Ltd.', 3, false, 'https://www.scopus.com/pages/publications/85111827982?origin=resultslist', '2-s2.0-85111827982', array['11Y65', '30B70', 'Euler number e', 'Generalized continued fraction', 'Ramanujan machine', 'π']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85111827982');
+update public.publications set citations = 3, keywords = array['11Y65', '30B70', 'Euler number e', 'Generalized continued fraction', 'Ramanujan machine', 'π']::text[] where scopus_eid = '2-s2.0-85111827982';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85111827982' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Mathematical modeling of infectious diseases and the impact of vaccination strategies', 2024, 'Article', 'https://doi.org/10.3934/mbe.2024314', 'Mathematical Biosciences and Engineering',
+  'American Institute of Mathematical Sciences', 10, true, 'https://www.scopus.com/pages/publications/85204566405?origin=resultslist', '2-s2.0-85204566405', array['disease transmission', 'dynamical systems', 'epidemic control', 'epidemiology', 'immunity', 'infectious diseases', 'mathematical modeling', 'public health', 'vaccination strategies', 'vaccine effectiveness']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85204566405');
+update public.publications set citations = 10, keywords = array['disease transmission', 'dynamical systems', 'epidemic control', 'epidemiology', 'immunity', 'infectious diseases', 'mathematical modeling', 'public health', 'vaccination strategies', 'vaccine effectiveness']::text[] where scopus_eid = '2-s2.0-85204566405';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shirali.kadyrov') from public.publications where scopus_eid = '2-s2.0-85204566405' on conflict do nothing;
+
+-- Shyngys Adilkhan
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('shyngys.adilkhan', 'Shyngys', 'Adilkhan', 'Shyngys Adilkhan', 'Senior Lecturer', 'Master', 'shyngys.adilkhan@sdu.edu.kz',
+  null, null, '57293085300', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Shyngys+Adilkhan',
+  2, 1, 21, 6,
+  array['gamification', 'artificial intelligence', 'social interaction', 'virtual reality', 'leap motion', 'computer science', 'distance learning', 'game design']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Application of game design elements on higher education in Computer Science', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663756', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85124952330?origin=resultslist', '2-s2.0-85124952330', array['computer science', 'distance learning', 'game design', 'gamification', 'higher education']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124952330');
+update public.publications set citations = 0, keywords = array['computer science', 'distance learning', 'game design', 'gamification', 'higher education']::text[] where scopus_eid = '2-s2.0-85124952330';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shyngys.adilkhan') from public.publications where scopus_eid = '2-s2.0-85124952330' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Advances in artificial intelligence-driven 3D model generation: a review of GAN and VAE methodologies', 2025, 'Article', 'https://doi.org/10.11591/eei.v14i6.10755', 'Bulletin of Electrical Engineering and Informatics',
+  'Institute of Advanced Engineering and Science', 0, true, 'https://www.scopus.com/pages/publications/105024093702?origin=resultslist', '2-s2.0-105024093702', array['3D model generation', '3D reconstruction', 'Artificial intelligence', 'Generative adversarial networks', 'Latent space', 'Polygon mesh', 'Variational autoencoder']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105024093702');
+update public.publications set citations = 0, keywords = array['3D model generation', '3D reconstruction', 'Artificial intelligence', 'Generative adversarial networks', 'Latent space', 'Polygon mesh', 'Variational autoencoder']::text[] where scopus_eid = '2-s2.0-105024093702';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shyngys.adilkhan') from public.publications where scopus_eid = '2-s2.0-105024093702' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Developing an Immersive Virtual Reality Training System to Enrich Social Interaction and Communication Skills for Children With Autism Spectrum Disorder', 2022, 'Conference paper', 'https://doi.org/10.1109/SIST54437.2022.9945733', 'SIST 2022 - 2022 International Conference on Smart Information Systems and Technologies, Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 14, false, 'https://www.scopus.com/pages/publications/85143428570?origin=resultslist', '2-s2.0-85143428570', array['Artificial Intelligence', 'Autism spectrum disorders', 'Communicational skills', 'Immersive Virtual reality', 'Social interaction']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85143428570');
+update public.publications set citations = 14, keywords = array['Artificial Intelligence', 'Autism spectrum disorders', 'Communicational skills', 'Immersive Virtual reality', 'Social interaction']::text[] where scopus_eid = '2-s2.0-85143428570';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shyngys.adilkhan') from public.publications where scopus_eid = '2-s2.0-85143428570' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Understanding experiences and interactions of children with Asperger’s syndrome in Virtual Reality-based learning systems', 2025, 'Article', 'https://doi.org/10.1080/10494820.2024.2364250', 'Interactive Learning Environments',
+  'Routledge', 6, true, 'https://www.scopus.com/pages/publications/105001273050?origin=resultslist', '2-s2.0-105001273050', array['Asperger’s syndrome', 'Autism Spectrum Disorder', 'learning technologies', 'social interaction', 'virtual reality']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105001273050');
+update public.publications set citations = 6, keywords = array['Asperger’s syndrome', 'Autism Spectrum Disorder', 'learning technologies', 'social interaction', 'virtual reality']::text[] where scopus_eid = '2-s2.0-105001273050';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shyngys.adilkhan') from public.publications where scopus_eid = '2-s2.0-105001273050' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Design of a hand rehabilitation gaming platform using IoT technologies', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663754', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85124997162?origin=resultslist', '2-s2.0-85124997162', array['3D printing', 'Arduino', 'Gamification', 'Leap Motion', 'Robotic Arm', 'Virtual reality (VR)']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124997162');
+update public.publications set citations = 0, keywords = array['3D printing', 'Arduino', 'Gamification', 'Leap Motion', 'Robotic Arm', 'Virtual reality (VR)']::text[] where scopus_eid = '2-s2.0-85124997162';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shyngys.adilkhan') from public.publications where scopus_eid = '2-s2.0-85124997162' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Application of Gamification Tool in Hand Rehabilitation Process', 2021, 'Conference paper', 'https://doi.org/10.1109/SIST50301.2021.9465956', 'SIST 2021 - 2021 IEEE International Conference on Smart Information Systems and Technologies',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85113879582?origin=resultslist', '2-s2.0-85113879582', array['FPV', 'gamification', 'Leap Motion', 'TPV', 'Unity 3D', 'virtual reality']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85113879582');
+update public.publications set citations = 1, keywords = array['FPV', 'gamification', 'Leap Motion', 'TPV', 'Unity 3D', 'virtual reality']::text[] where scopus_eid = '2-s2.0-85113879582';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'shyngys.adilkhan') from public.publications where scopus_eid = '2-s2.0-85113879582' on conflict do nothing;
+
+-- Stanislav Kharin
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('stanislav.kharin', 'Stanislav', 'Kharin', 'Stanislav Kharin', 'Professor', 'Doctor of Science', 'stanislav.kharin@sdu.edu.kz',
+  null, null, '6701353063', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Stanislav+Kharin',
+  4, 2, 49, 6,
+  array['symmetric and asymmetric contacts', 'thomson effect', 'constriction resistance', 'electromagnetic field', 'maxwell equations', 'ring-shaped contact', 'skin-effect', 'degenerate domain']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The Model of Melting and Welding of Closed Electrical Contacts with Softening Contact Zone', 2018, 'Conference paper', 'https://doi.org/10.1109/HOLM.2018.8611754', 'Electrical Contacts, Proceedings of the Annual Holm Conference on Electrical Contacts',
+  null, 5, false, 'https://www.scopus.com/pages/publications/85061833658?origin=resultslist', '2-s2.0-85061833658', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85061833658');
+update public.publications set citations = 5, keywords = array[]::text[] where scopus_eid = '2-s2.0-85061833658';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'stanislav.kharin') from public.publications where scopus_eid = '2-s2.0-85061833658' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Influence of contact materials on phenomena in a short electrical arc', 2012, 'Conference paper', 'https://doi.org/10.4028/www.scientific.net/KEM.510-511.321', 'Key Engineering Materials',
+  null, 24, false, 'https://www.scopus.com/pages/publications/84861439272?origin=resultslist', '2-s2.0-84861439272', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-84861439272');
+update public.publications set citations = 24, keywords = array[]::text[] where scopus_eid = '2-s2.0-84861439272';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'stanislav.kharin') from public.publications where scopus_eid = '2-s2.0-84861439272' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'The mathematical models of electromagnetic field dynamics and heat transfer in closed electrical contacts including Thomson effect', 2016, 'Conference paper', 'https://doi.org/10.1063/1.4959686', 'AIP Conference Proceedings',
+  'American Institute of Physics Inc.', 0, false, 'https://www.scopus.com/pages/publications/85000399688?origin=resultslist', '2-s2.0-85000399688', array['Symmetric and Asymmetric contacts', 'Thomson effect']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85000399688');
+update public.publications set citations = 0, keywords = array['Symmetric and Asymmetric contacts', 'Thomson effect']::text[] where scopus_eid = '2-s2.0-85000399688';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'stanislav.kharin') from public.publications where scopus_eid = '2-s2.0-85000399688' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Electromagnetic Field and Constriction Resistance of the Ring-Shaped Contact', 2017, 'Conference paper', 'https://doi.org/10.1007/978-3-319-67053-9_35', 'Springer Proceedings in Mathematics and Statistics',
+  'Springer New York LLC', 0, false, 'https://www.scopus.com/pages/publications/85041326928?origin=resultslist', '2-s2.0-85041326928', array['Constriction resistance', 'Electromagnetic field', 'Maxwell equations', 'Ring-shaped contact', 'Skin-effect']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85041326928');
+update public.publications set citations = 0, keywords = array['Constriction resistance', 'Electromagnetic field', 'Maxwell equations', 'Ring-shaped contact', 'Skin-effect']::text[] where scopus_eid = '2-s2.0-85041326928';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'stanislav.kharin') from public.publications where scopus_eid = '2-s2.0-85041326928' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Method of the integral error functions for the solution of the one- and two-phase stefan problems and its application', 2017, 'Article', 'https://doi.org/10.2298/FIL1704017S', 'Filomat',
+  'University of Nis', 16, true, 'https://www.scopus.com/pages/publications/85014429617?origin=resultslist', '2-s2.0-85014429617', array['Degenerate domain', 'Free boundary', 'Two phase stefan problem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85014429617');
+update public.publications set citations = 16, keywords = array['Degenerate domain', 'Free boundary', 'Two phase stefan problem']::text[] where scopus_eid = '2-s2.0-85014429617';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'stanislav.kharin') from public.publications where scopus_eid = '2-s2.0-85014429617' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Mathematical model of heat transfer in opening electrical contacts with tunnel effect', 2018, 'Article', 'https://doi.org/10.2298/FIL1803003S', 'Filomat',
+  'University of Nis', 4, true, 'https://www.scopus.com/pages/publications/85047970746?origin=resultslist', '2-s2.0-85047970746', array['Electrical contacts', 'Heat transfer', 'Tunnel effect']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85047970746');
+update public.publications set citations = 4, keywords = array['Electrical contacts', 'Heat transfer', 'Tunnel effect']::text[] where scopus_eid = '2-s2.0-85047970746';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'stanislav.kharin') from public.publications where scopus_eid = '2-s2.0-85047970746' on conflict do nothing;
+
+-- Symbat Duisen
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('symbat.duisen', 'Symbat', 'Duisen', 'Symbat Duisen', 'Lecturer', 'Master', 'symbat.duisen@sdu.edu.kz',
+  null, null, '60354923400', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Symbat+Duisen',
+  0, 0, 0, 2,
+  array['ai-generated text', 'cross-lingual detection', 'mbert', 'mdeberta', 'transformers', 'xlm-roberta']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Cross-Lingual Detection of Machine-Generated Text Using Multilingual Transformers and Balanced Data', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488773', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038354879?origin=resultslist', '2-s2.0-105038354879', array['AI-generated text', 'cross-lingual detection', 'mBERT', 'mDeBERTa', 'transformers', 'XLM-RoBERTa']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038354879');
+update public.publications set citations = 0, keywords = array['AI-generated text', 'cross-lingual detection', 'mBERT', 'mDeBERTa', 'transformers', 'XLM-RoBERTa']::text[] where scopus_eid = '2-s2.0-105038354879';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'symbat.duisen') from public.publications where scopus_eid = '2-s2.0-105038354879' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A note on semi-regular continued fractions with bounded partial quotients', 2026, 'Article', 'https://doi.org/10.1007/s40065-025-00611-2', 'Arabian Journal of Mathematics',
+  'Springer Science and Business Media Deutschland GmbH', 0, false, 'https://www.scopus.com/pages/publications/105028726417?origin=resultslist', '2-s2.0-105028726417', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105028726417');
+update public.publications set citations = 0, keywords = array[]::text[] where scopus_eid = '2-s2.0-105028726417';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'symbat.duisen') from public.publications where scopus_eid = '2-s2.0-105028726417' on conflict do nothing;
+
+-- Ualikhan Sadyk
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('ualikhan.sadyk', 'Ualikhan', 'Sadyk', 'Ualikhan Sadyk', 'Vice Dean for Scientific Affairs', 'Master', 'ualikhan.sadyk@sdu.edu.kz',
+  null, null, '57460291500', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Ualikhan+Sadyk',
+  6, 3, 76, 13,
+  array['deep learning', 'machine learning', 'attention mechanism', 'banknote recognition', 'cnn', 'computer vision', 'education', 'face recognition algorithms']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Effective Ways to Pass Exams in Programming Disciplines and Optimize the Process of Analyzing Results. Case Study: Suleyman Demirel University', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663777', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85124964442?origin=resultslist', '2-s2.0-85124964442', array['computer vision', 'education', 'face recognition algorithms', 'machine learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124964442');
+update public.publications set citations = 1, keywords = array['computer vision', 'education', 'face recognition algorithms', 'machine learning']::text[] where scopus_eid = '2-s2.0-85124964442';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ualikhan.sadyk') from public.publications where scopus_eid = '2-s2.0-85124964442' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of Multimodal Neural Network for Suicidal Ideation Detection Using Kazakh-Russian BERT and Attention Mechanism', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488771', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038367927?origin=resultslist', '2-s2.0-105038367927', array['Attention Mechanism', 'BERT', 'Multimodal Deep Learning', 'Natural Language Processing', 'Social Media Analytics', 'Suicidal Ideation Detection']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038367927');
+update public.publications set citations = 0, keywords = array['Attention Mechanism', 'BERT', 'Multimodal Deep Learning', 'Natural Language Processing', 'Social Media Analytics', 'Suicidal Ideation Detection']::text[] where scopus_eid = '2-s2.0-105038367927';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ualikhan.sadyk') from public.publications where scopus_eid = '2-s2.0-105038367927' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Comprehensive Survey of Methods and Challenges of Vehicle Routing Problem with Uncertainties', 2025, 'Review', 'https://doi.org/10.3390/math13233782', 'Mathematics',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 13, true, 'https://www.scopus.com/pages/publications/105024580606?origin=resultslist', '2-s2.0-105024580606', array['demand variability', 'dynamic routing', 'reinforcement learning', 'transportation management', 'travel time variability', 'uncertainty', 'vehicle routing problem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105024580606');
+update public.publications set citations = 13, keywords = array['demand variability', 'dynamic routing', 'reinforcement learning', 'transportation management', 'travel time variability', 'uncertainty', 'vehicle routing problem']::text[] where scopus_eid = '2-s2.0-105024580606';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ualikhan.sadyk') from public.publications where scopus_eid = '2-s2.0-105024580606' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Comparative Study of the Impact of Electronic Devices on University Students'' Academic Performance', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147158', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85163716125?origin=resultslist', '2-s2.0-85163716125', array['academic performance', 'data interpretation', 'electronic devices', 'hypothesis testing', 'statistical analysis']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163716125');
+update public.publications set citations = 1, keywords = array['academic performance', 'data interpretation', 'electronic devices', 'hypothesis testing', 'statistical analysis']::text[] where scopus_eid = '2-s2.0-85163716125';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ualikhan.sadyk') from public.publications where scopus_eid = '2-s2.0-85163716125' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'State-of-the-Art Review of Deep Learning Methods in Fake Banknote Recognition Problem', 2024, 'Article', 'https://doi.org/10.14569/IJACSA.2024.0150185', 'International Journal of Advanced Computer Science and Applications',
+  'Science and Information Organization', 14, true, 'https://www.scopus.com/pages/publications/85185005495?origin=resultslist', '2-s2.0-85185005495', array['classification', 'detection', 'Fake banknote', 'recognition', 'review']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85185005495');
+update public.publications set citations = 14, keywords = array['classification', 'detection', 'Fake banknote', 'recognition', 'review']::text[] where scopus_eid = '2-s2.0-85185005495';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ualikhan.sadyk') from public.publications where scopus_eid = '2-s2.0-85185005495' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Design and Evaluation of a Personalized Job Recommendation System for Computer Science Students Using Hybrid Approach', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147147', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/85163774662?origin=resultslist', '2-s2.0-85163774662', array['collaborative base filtering', 'content-based filtering', 'fuzzy logic', 'personalized system', 'recommendation system']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163774662');
+update public.publications set citations = 7, keywords = array['collaborative base filtering', 'content-based filtering', 'fuzzy logic', 'personalized system', 'recommendation system']::text[] where scopus_eid = '2-s2.0-85163774662';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ualikhan.sadyk') from public.publications where scopus_eid = '2-s2.0-85163774662' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'MBTI-based recommendation system for extracurricular activities for high school students', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147138', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/85163728686?origin=resultslist', '2-s2.0-85163728686', array['extracurricular activities', 'MBTI', 'personality types', 'personalized approach', 'recommendation systems']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163728686');
+update public.publications set citations = 5, keywords = array['extracurricular activities', 'MBTI', 'personality types', 'personalized approach', 'recommendation systems']::text[] where scopus_eid = '2-s2.0-85163728686';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ualikhan.sadyk') from public.publications where scopus_eid = '2-s2.0-85163728686' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Overview of Deep Learning Models for Banknote Recognition', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147142', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/85163791570?origin=resultslist', '2-s2.0-85163791570', array['banknote recognition', 'convolutional neural networks (CNNs)', 'deep belief networks (DBNs)', 'deep learning models', 'recurrent neural networks (RNNs)']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163791570');
+update public.publications set citations = 7, keywords = array['banknote recognition', 'convolutional neural networks (CNNs)', 'deep belief networks (DBNs)', 'deep learning models', 'recurrent neural networks (RNNs)']::text[] where scopus_eid = '2-s2.0-85163791570';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ualikhan.sadyk') from public.publications where scopus_eid = '2-s2.0-85163791570' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Interpretable Hybrid CNN-BiLSTM-Attention Model for ECG Arrhythmia Classification', 2026, 'Conference paper', 'https://doi.org/10.1109/SIST61674.2026.11596330', 'SIST 2026 - 2026 IEEE 6th International Conference on Smart Information Systems and Technologies, Conference Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105045663680?origin=resultslist', '2-s2.0-105045663680', array['arrhythmia classification', 'attention mechanism', 'BiLSTM', 'CNN', 'deep learning', 'Electrocardiogram', 'interpretability']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105045663680');
+update public.publications set citations = 0, keywords = array['arrhythmia classification', 'attention mechanism', 'BiLSTM', 'CNN', 'deep learning', 'Electrocardiogram', 'interpretability']::text[] where scopus_eid = '2-s2.0-105045663680';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ualikhan.sadyk') from public.publications where scopus_eid = '2-s2.0-105045663680' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'An Adaptive Steganographic Method for Reversible Information Embedding in X-Ray Images', 2025, 'Article', 'https://doi.org/10.3390/computers14090386', 'Computers',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 5, true, 'https://www.scopus.com/pages/publications/105017424978?origin=resultslist', '2-s2.0-105017424978', array['data protection', 'data transmission', 'digital images', 'interpolation', 'steganography', 'stegonalysis']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105017424978');
+update public.publications set citations = 5, keywords = array['data protection', 'data transmission', 'digital images', 'interpolation', 'steganography', 'stegonalysis']::text[] where scopus_eid = '2-s2.0-105017424978';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ualikhan.sadyk') from public.publications where scopus_eid = '2-s2.0-105017424978' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Benchmarking Deep Transfer Learning for Banknote Recognition: Vision Transformers Vs. CNNs on the KZ-BD Dataset', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488799', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038349373?origin=resultslist', '2-s2.0-105038349373', array['Banknote Recognition', 'CNN', 'Deep Learning', 'Hyperparameter Optimization', 'Transfer Learning', 'Vision Transformer']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038349373');
+update public.publications set citations = 0, keywords = array['Banknote Recognition', 'CNN', 'Deep Learning', 'Hyperparameter Optimization', 'Transfer Learning', 'Vision Transformer']::text[] where scopus_eid = '2-s2.0-105038349373';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ualikhan.sadyk') from public.publications where scopus_eid = '2-s2.0-105038349373' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Enhanced U-Net Architecture for Lung Segmentation on Computed Tomography and X-Ray Images', 2024, 'Article', 'https://doi.org/10.14569/IJACSA.2024.0150594', 'International Journal of Advanced Computer Science and Applications',
+  'Science and Information Organization', 15, true, 'https://www.scopus.com/pages/publications/85197912093?origin=resultslist', '2-s2.0-85197912093', array['computed tomography', 'deep learning', 'diagnosis', 'Lung disease', 'segmentation', 'U-Net']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85197912093');
+update public.publications set citations = 15, keywords = array['computed tomography', 'deep learning', 'diagnosis', 'Lung disease', 'segmentation', 'U-Net']::text[] where scopus_eid = '2-s2.0-85197912093';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ualikhan.sadyk') from public.publications where scopus_eid = '2-s2.0-85197912093' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Comparative analysis of machine learning approaches in Kazakh banknote classification', 2024, 'Article', 'https://doi.org/10.11591/eei.v13i5.8004', 'Bulletin of Electrical Engineering and Informatics',
+  'Institute of Advanced Engineering and Science', 8, true, 'https://www.scopus.com/pages/publications/85200974099?origin=resultslist', '2-s2.0-85200974099', array['Banknote classification', 'Hybrid approach', 'Kazakh banknotes', 'Machine learning', 'Model stacking', 'Traditional approach', 'Visual impairments']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85200974099');
+update public.publications set citations = 8, keywords = array['Banknote classification', 'Hybrid approach', 'Kazakh banknotes', 'Machine learning', 'Model stacking', 'Traditional approach', 'Visual impairments']::text[] where scopus_eid = '2-s2.0-85200974099';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'ualikhan.sadyk') from public.publications where scopus_eid = '2-s2.0-85200974099' on conflict do nothing;
+
+-- Yelnur Mutaliyev
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('yelnur.mutaliyev', 'Yelnur', 'Mutaliyev', 'Yelnur Mutaliyev', 'Senior Lecturer', 'Master', 'yelnur.mutaliyev@sdu.edu.kz',
+  null, null, '60169744400', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Yelnur+Mutaliyev',
+  1, 0, 2, 2,
+  array['affective computing', 'cpu-optimized architecture', 'facial emotion recognition', 'facial expression recognition 2013 dataset', 'lightweight convolutional neural networks', 'pattern recognition', 'residual neural networks', 'attention mechanismss']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of Lightweight Residual Convolutional Neural Network for Efficient Facial Emotion Recognition', 2026, 'Article', 'https://doi.org/10.14569/IJACSA.2026.0170277', 'International Journal of Advanced Computer Science and Applications',
+  'Science and Information Organization', 0, true, 'https://www.scopus.com/pages/publications/105038343575?origin=resultslist', '2-s2.0-105038343575', array['affective computing', 'CPU-optimized architecture', 'Facial Emotion Recognition', 'facial expression recognition 2013 dataset', 'lightweight convolutional neural networks', 'pattern recognition', 'residual neural networks']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038343575');
+update public.publications set citations = 0, keywords = array['affective computing', 'CPU-optimized architecture', 'Facial Emotion Recognition', 'facial expression recognition 2013 dataset', 'lightweight convolutional neural networks', 'pattern recognition', 'residual neural networks']::text[] where scopus_eid = '2-s2.0-105038343575';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'yelnur.mutaliyev') from public.publications where scopus_eid = '2-s2.0-105038343575' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Accurate Crowd Counting Using an Enhanced LCDANet with Multi-Scale Attention Modules', 2025, 'Article', 'https://doi.org/10.12928/biste.v7i3.14391', 'Buletin Ilmiah Sarjana Teknik Elektro',
+  'Universitas Ahmad Dahlan', 2, false, 'https://www.scopus.com/pages/publications/105021012249?origin=resultslist', '2-s2.0-105021012249', array['Attention Mechanismss', 'Crowd Counting', 'Density Estimation', 'Inference of Crowd', 'MicroASPP']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105021012249');
+update public.publications set citations = 2, keywords = array['Attention Mechanismss', 'Crowd Counting', 'Density Estimation', 'Inference of Crowd', 'MicroASPP']::text[] where scopus_eid = '2-s2.0-105021012249';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'yelnur.mutaliyev') from public.publications where scopus_eid = '2-s2.0-105021012249' on conflict do nothing;
+
+-- Yerimbet Aitzhanov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('yerimbet.aitzhanov', 'Yerimbet', 'Aitzhanov', 'Yerimbet Aitzhanov', 'Senior Lecturer', 'Master', 'yerimbet.aitzhanov@sdu.edu.kz',
+  null, null, '59257593900', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Yerimbet+Aitzhanov',
+  1, 0, 5, 2,
+  array['epidemic modeling', 'parameter estimation', 'continued fraction', 'fuzzy set theory', 'genetic algorithms', 'global stability analysis', 'infected', 'lyapunov functions']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Genetic Algorithm Approaches for Parameter Estimation and Global Stability in Fuzzy Epidemic Modeling', 2024, 'Article', 'https://doi.org/10.26599/FIE.2024.9270038', 'Fuzzy Information and Engineering',
+  'Tsinghua University Press', 4, true, 'https://www.scopus.com/pages/publications/85201087426?origin=resultslist', '2-s2.0-85201087426', array['continued fraction', 'epidemic modeling', 'fuzzy set theory', 'genetic algorithms', 'global stability analysis', 'Infected', 'Lyapunov functions', 'parameter estimation', 'Recovered (SIR) fuzzy model', 'Susceptible']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85201087426');
+update public.publications set citations = 4, keywords = array['continued fraction', 'epidemic modeling', 'fuzzy set theory', 'genetic algorithms', 'global stability analysis', 'Infected', 'Lyapunov functions', 'parameter estimation', 'Recovered (SIR) fuzzy model', 'Susceptible']::text[] where scopus_eid = '2-s2.0-85201087426';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'yerimbet.aitzhanov') from public.publications where scopus_eid = '2-s2.0-85201087426' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Global Stability Analysis of a Novel Epidemic Model with Separate Compartments for Symptomatic and Asymptomatic Cases', 2025, 'Article', 'https://doi.org/10.1134/S199508022560027X', 'Lobachevskii Journal of Mathematics',
+  'Pleiades Publishing', 1, false, 'https://www.scopus.com/pages/publications/105008251321?origin=resultslist', '2-s2.0-105008251321', array['asymptomatic cases', 'dynamical systems', 'epidemic modeling', 'genetic algorithm', 'global stability', 'parameter estimation']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105008251321');
+update public.publications set citations = 1, keywords = array['asymptomatic cases', 'dynamical systems', 'epidemic modeling', 'genetic algorithm', 'global stability', 'parameter estimation']::text[] where scopus_eid = '2-s2.0-105008251321';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'yerimbet.aitzhanov') from public.publications where scopus_eid = '2-s2.0-105008251321' on conflict do nothing;
+
+-- Yerkin Shaimerdenov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('yerkin.shaimerdenov', 'Yerkin', 'Shaimerdenov', 'Yerkin Shaimerdenov', 'Senior Lecturer', 'Master', 'yerkin.shaimerdenov@sdu.edu.kz',
+  null, null, '58958992800', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Yerkin+Shaimerdenov',
+  1, 0, 2, 3,
+  array['critical sobolev type inequality', 'stratified lie group', 'critical caffarelli-kohn-nirenberg inequality', 'heisenberg group', 'homogeneous lie group', '22e30', '43a80', 'cylindrical sobolev type inequality']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Cylindrical extensions of critical Sobolev type inequalities and identities', 2026, 'Article', 'https://doi.org/10.1016/j.jmaa.2025.129899', 'Journal of Mathematical Analysis and Applications',
+  'Academic Press Inc.', 0, true, 'https://www.scopus.com/pages/publications/105011266466?origin=resultslist', '2-s2.0-105011266466', array['Critical Caffarelli-Kohn-Nirenberg inequality', 'Critical Sobolev type inequality', 'Heisenberg group', 'Homogeneous Lie group', 'Stratified Lie group']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105011266466');
+update public.publications set citations = 0, keywords = array['Critical Caffarelli-Kohn-Nirenberg inequality', 'Critical Sobolev type inequality', 'Heisenberg group', 'Homogeneous Lie group', 'Stratified Lie group']::text[] where scopus_eid = '2-s2.0-105011266466';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'yerkin.shaimerdenov') from public.publications where scopus_eid = '2-s2.0-105011266466' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Critical Sobolev-Type Identities and Inequalities on Stratified Lie Groups', 2024, 'Book chapter', 'https://doi.org/10.1007/978-3-031-42539-4_16', 'Trends in Mathematics',
+  'Springer Science and Business Media Deutschland GmbH', 1, false, 'https://www.scopus.com/pages/publications/85188805999?origin=resultslist', '2-s2.0-85188805999', array[]::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85188805999');
+update public.publications set citations = 1, keywords = array[]::text[] where scopus_eid = '2-s2.0-85188805999';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'yerkin.shaimerdenov') from public.publications where scopus_eid = '2-s2.0-85188805999' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Cylindrical and Horizontal Extensions of Critical Sobolev Type Inequalities and Identities', 2024, 'Book chapter', 'https://doi.org/10.1007/978-3-031-56732-2_16', 'Trends in Mathematics',
+  'Springer Science and Business Media Deutschland GmbH', 1, false, 'https://www.scopus.com/pages/publications/85200474135?origin=resultslist', '2-s2.0-85200474135', array['22E30', '43A80', 'Critical Sobolev type inequality', 'Cylindrical Sobolev type inequality', 'Extended Hardy inequality', 'Stratified Lie group']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85200474135');
+update public.publications set citations = 1, keywords = array['22E30', '43A80', 'Critical Sobolev type inequality', 'Cylindrical Sobolev type inequality', 'Extended Hardy inequality', 'Stratified Lie group']::text[] where scopus_eid = '2-s2.0-85200474135';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'yerkin.shaimerdenov') from public.publications where scopus_eid = '2-s2.0-85200474135' on conflict do nothing;
+
+-- Yernar Akhmetbek
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('yernar.akhmetbek', 'Yernar', 'Akhmetbek', 'Yernar Akhmetbek', 'Senior Lecturer', 'Master', 'yernar.akhmetbek@sdu.edu.kz',
+  null, null, '58411155500', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Yernar+Akhmetbek',
+  2, 1, 24, 4,
+  array['deep reinforcement learning', 'stochastic customer requests', 'vehicle routing problems', 'delivery optimization', 'dynamic routing', 'robust optimization', 'time uncertainty', 'vehicle routing problem']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Deep Reinforcement Learning for Stochastic Dynamic Vehicle Routing Problem', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147154', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/85163726980?origin=resultslist', '2-s2.0-85163726980', array['deep reinforcement learning', 'stochastic customer requests', 'vehicle routing problems']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163726980');
+update public.publications set citations = 7, keywords = array['deep reinforcement learning', 'stochastic customer requests', 'vehicle routing problems']::text[] where scopus_eid = '2-s2.0-85163726980';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'yernar.akhmetbek') from public.publications where scopus_eid = '2-s2.0-85163726980' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Recent developments in vehicle routing problem under time uncertainty: a comprehensive review', 2025, 'Article', 'https://doi.org/10.11591/eei.v14i2.8636', 'Bulletin of Electrical Engineering and Informatics',
+  'Institute of Advanced Engineering and Science', 17, true, 'https://www.scopus.com/pages/publications/85216509751?origin=resultslist', '2-s2.0-85216509751', array['Delivery optimization', 'Dynamic routing', 'Robust optimization', 'Time uncertainty', 'Vehicle routing problem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85216509751');
+update public.publications set citations = 17, keywords = array['Delivery optimization', 'Dynamic routing', 'Robust optimization', 'Time uncertainty', 'Vehicle routing problem']::text[] where scopus_eid = '2-s2.0-85216509751';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'yernar.akhmetbek') from public.publications where scopus_eid = '2-s2.0-85216509751' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Autonomous Mobile Robot Navigation in Multi-Room Environments Using Twin Delayed Deep Deterministic Policy Gradient (TD3)', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488749', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038347898?origin=resultslist', '2-s2.0-105038347898', array['Autnomous mobile robot navigation', 'Deep reinforcement learning', 'Multi-room navigation', 'Robot operating system']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038347898');
+update public.publications set citations = 0, keywords = array['Autnomous mobile robot navigation', 'Deep reinforcement learning', 'Multi-room navigation', 'Robot operating system']::text[] where scopus_eid = '2-s2.0-105038347898';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'yernar.akhmetbek') from public.publications where scopus_eid = '2-s2.0-105038347898' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Hierarchical VLM-to-TD3 Framework with Novel Object Coordinate Estimation and Persistent Spatial Memory for Semantically Guided Indoor Navigation', 2026, 'Article', 'https://doi.org/10.3390/s26154661', 'Sensors',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 0, true, 'https://www.scopus.com/pages/publications/105047164059?origin=resultslist', '2-s2.0-105047164059', array['autonomous mobile robot navigation', 'deep reinforcement learning', 'vision-based navigation', 'vision–language models']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105047164059');
+update public.publications set citations = 0, keywords = array['autonomous mobile robot navigation', 'deep reinforcement learning', 'vision-based navigation', 'vision–language models']::text[] where scopus_eid = '2-s2.0-105047164059';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'yernar.akhmetbek') from public.publications where scopus_eid = '2-s2.0-105047164059' on conflict do nothing;
+
+-- Zhadyra Zhalgassova
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('zhadyra.zhalgassova', 'Zhadyra', 'Zhalgassova', 'Zhadyra Zhalgassova', 'Senior Lecturer', 'Master', 'zhadyra.zhalgassova@sdu.edu.kz',
+  null, null, '58414209400', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Zhadyra+Zhalgassova',
+  2, 0, 12, 3,
+  array['computer science in education', 'correlation in education', 'edtech', 'online programming competition', 'self-efficacy', 'self-esteem', 'collaborative base filtering', 'content-based filtering']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Analysis of Self-esteem on Students'' Performance in Online Programming Competition', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147137', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/85163778650?origin=resultslist', '2-s2.0-85163778650', array['computer science in education', 'correlation in education', 'edtech', 'online programming competition', 'self-efficacy', 'self-esteem']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163778650');
+update public.publications set citations = 0, keywords = array['computer science in education', 'correlation in education', 'edtech', 'online programming competition', 'self-efficacy', 'self-esteem']::text[] where scopus_eid = '2-s2.0-85163778650';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'zhadyra.zhalgassova') from public.publications where scopus_eid = '2-s2.0-85163778650' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Design and Evaluation of a Personalized Job Recommendation System for Computer Science Students Using Hybrid Approach', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147147', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 7, false, 'https://www.scopus.com/pages/publications/85163774662?origin=resultslist', '2-s2.0-85163774662', array['collaborative base filtering', 'content-based filtering', 'fuzzy logic', 'personalized system', 'recommendation system']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163774662');
+update public.publications set citations = 7, keywords = array['collaborative base filtering', 'content-based filtering', 'fuzzy logic', 'personalized system', 'recommendation system']::text[] where scopus_eid = '2-s2.0-85163774662';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'zhadyra.zhalgassova') from public.publications where scopus_eid = '2-s2.0-85163774662' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'MBTI-based recommendation system for extracurricular activities for high school students', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10147138', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 5, false, 'https://www.scopus.com/pages/publications/85163728686?origin=resultslist', '2-s2.0-85163728686', array['extracurricular activities', 'MBTI', 'personality types', 'personalized approach', 'recommendation systems']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163728686');
+update public.publications set citations = 5, keywords = array['extracurricular activities', 'MBTI', 'personality types', 'personalized approach', 'recommendation systems']::text[] where scopus_eid = '2-s2.0-85163728686';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'zhadyra.zhalgassova') from public.publications where scopus_eid = '2-s2.0-85163728686' on conflict do nothing;
+
+-- Zhasdauren Duisebekov
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('z.duisebekov', 'Zhasdauren', 'Duisebekov', 'Zhasdauren Duisebekov', 'Senior Lecturer', 'Master', 'z.duisebekov@sdu.edu.kz',
+  null, null, '57207774289', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Z+Duisebekov',
+  2, 1, 16, 4,
+  array['computer vision', 'knn', 'education', 'face recognition algorithms', 'machine learning', 'hand gesture recognition', 'human-computer interaction', 'pca-tp']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Effective Ways to Pass Exams in Programming Disciplines and Optimize the Process of Analyzing Results. Case Study: Suleyman Demirel University', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663777', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 1, false, 'https://www.scopus.com/pages/publications/85124964442?origin=resultslist', '2-s2.0-85124964442', array['computer vision', 'education', 'face recognition algorithms', 'machine learning']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124964442');
+update public.publications set citations = 1, keywords = array['computer vision', 'education', 'face recognition algorithms', 'machine learning']::text[] where scopus_eid = '2-s2.0-85124964442';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'z.duisebekov') from public.publications where scopus_eid = '2-s2.0-85124964442' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Pca and projection based hand gesture recognition', 2021, 'Article', null, 'Journal of Theoretical and Applied Information Technology',
+  'Little Lion Scientific', 0, false, 'https://www.scopus.com/pages/publications/85112491621?origin=resultslist', '2-s2.0-85112491621', array['Computer Vision', 'Hand Gesture Recognition', 'Human-Computer Interaction', 'kNN', 'PCA-TP', 'Sign Language', 'SRC', 'Stochastic Gradient Descent', 'Triplet Loss']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85112491621');
+update public.publications set citations = 0, keywords = array['Computer Vision', 'Hand Gesture Recognition', 'Human-Computer Interaction', 'kNN', 'PCA-TP', 'Sign Language', 'SRC', 'Stochastic Gradient Descent', 'Triplet Loss']::text[] where scopus_eid = '2-s2.0-85112491621';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'z.duisebekov') from public.publications where scopus_eid = '2-s2.0-85112491621' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Epileptic Seizure Prediction in EEG Signals using EMD and DWT', 2019, 'Conference paper', 'https://doi.org/10.1109/ICECCO48375.2019.9043270', '2019 15th International Conference on Electronics, Computer and Computation, ICECCO 2019',
+  'Institute of Electrical and Electronics Engineers Inc.', 13, false, 'https://www.scopus.com/pages/publications/85083520254?origin=resultslist', '2-s2.0-85083520254', array['Decision Tree', 'DWT', 'EEG', 'EMD', 'KNN', 'Seizure Detection', 'SVM']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85083520254');
+update public.publications set citations = 13, keywords = array['Decision Tree', 'DWT', 'EEG', 'EMD', 'KNN', 'Seizure Detection', 'SVM']::text[] where scopus_eid = '2-s2.0-85083520254';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'z.duisebekov') from public.publications where scopus_eid = '2-s2.0-85083520254' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Gesture recognition based on sparse reconstruction', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634687', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 2, false, 'https://www.scopus.com/pages/publications/85062856258?origin=resultslist', '2-s2.0-85062856258', array['Gesture recognition', 'Recognition rate', 'Sparse representation classifier']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062856258');
+update public.publications set citations = 2, keywords = array['Gesture recognition', 'Recognition rate', 'Sparse representation classifier']::text[] where scopus_eid = '2-s2.0-85062856258';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'z.duisebekov') from public.publications where scopus_eid = '2-s2.0-85062856258' on conflict do nothing;
+
+-- Zhibek Myrzaliyeva
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('zhibek.myrzaliyeva', 'Zhibek', 'Myrzaliyeva', 'Zhibek Myrzaliyeva', 'Lecturer', 'Master', 'zhibek.myrzaliyeva@sdu.edu.kz',
+  null, null, '60623556100', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Zhibek+Myrzaliyeva',
+  0, 0, 0, 1,
+  array['deep learning', 'lstm', 'nlp', 'turkish sentiment analysis', 'word2vec']::text[], '[{"topic_name":"Sentiment Analysis and Opinion Mining","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":1},{"topic_name":"Emotion and Mood Recognition","subfield":"Experimental and Cognitive Psychology","field":"Psychology","domain":"Social Sciences","works_count":1},{"topic_name":"Hate Speech and Cyberbullying Detection","subfield":"Artificial Intelligence","field":"Computer Science","domain":"Physical Sciences","works_count":1}]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Comparative Analysis of Embedding Strategies for Turkish Sentiment Analysis', 2026, 'Conference paper', 'https://doi.org/10.1109/ICECCO67619.2026.11488770', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105038328769?origin=resultslist', '2-s2.0-105038328769', array['Deep Learning', 'LSTM', 'NLP', 'Turkish Sentiment Analysis', 'Word2Vec']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105038328769');
+update public.publications set citations = 0, keywords = array['Deep Learning', 'LSTM', 'NLP', 'Turkish Sentiment Analysis', 'Word2Vec']::text[] where scopus_eid = '2-s2.0-105038328769';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'zhibek.myrzaliyeva') from public.publications where scopus_eid = '2-s2.0-105038328769' on conflict do nothing;
+
+-- Zhumaniyaz Mamatnabiyev
+insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
+  h_index, i10_index, total_citations, total_works, keywords, topics)
+values ('z.mamatnabiyev', 'Zhumaniyaz', 'Mamatnabiyev', 'Zhumaniyaz Mamatnabiyev', 'Educational Program (EP) Director', 'Master', 'z.mamatnabiyev@sdu.edu.kz',
+  null, null, '57207760346', 'https://scholar.google.com/citations?view_op=search_authors&mauthors=Z+Mamatnabiyev',
+  5, 1, 53, 8,
+  array['internet of things', 'educational robots', 'iot in education', 'hands-on learning', 'internet of things (iot)', 'gps sensor', 'iot in agriculture', 'lorawan']::text[], '[]'::jsonb)
+on conflict (username) do update set first_name = excluded.first_name, last_name = excluded.last_name, full_name = excluded.full_name,
+  job_title = excluded.job_title, degree = excluded.degree, email = excluded.email, photo_url = coalesce(excluded.photo_url, public.professors.photo_url),
+  orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
+  i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
+  keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Animal Tracking System Based on GPS Sensor and LPWAN', 2022, 'Conference paper', 'https://doi.org/10.1109/SIST54437.2022.9945724', 'SIST 2022 - 2022 International Conference on Smart Information Systems and Technologies, Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 6, false, 'https://www.scopus.com/pages/publications/85143440768?origin=resultslist', '2-s2.0-85143440768', array['Gps sensor', 'Internet of Things', 'IoT in agriculture', 'LoRaWan', 'LPWAN']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85143440768');
+update public.publications set citations = 6, keywords = array['Gps sensor', 'Internet of Things', 'IoT in agriculture', 'LoRaWan', 'LPWAN']::text[] where scopus_eid = '2-s2.0-85143440768';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'z.mamatnabiyev') from public.publications where scopus_eid = '2-s2.0-85143440768' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'A Holistic Approach to Use Educational Robots for Supporting Computer Science Courses', 2024, 'Article', 'https://doi.org/10.3390/computers13040102', 'Computers',
+  'Multidisciplinary Digital Publishing Institute (MDPI)', 25, true, 'https://www.scopus.com/pages/publications/85191292133?origin=resultslist', '2-s2.0-85191292133', array['computer science', 'computer science curriculum', 'educational robots', 'FOSSBot']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85191292133');
+update public.publications set citations = 25, keywords = array['computer science', 'computer science curriculum', 'educational robots', 'FOSSBot']::text[] where scopus_eid = '2-s2.0-85191292133';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'z.mamatnabiyev') from public.publications where scopus_eid = '2-s2.0-85191292133' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of an Educational Robot for Exploring the Internet of Things', 2024, 'Article', 'https://doi.org/10.14569/IJACSA.2024.01504120', 'International Journal of Advanced Computer Science and Applications',
+  'Science and Information Organization', 5, true, 'https://www.scopus.com/pages/publications/85192054891?origin=resultslist', '2-s2.0-85192054891', array['Arduino for Education', 'Educational robots', 'Internet of Things', 'IoT Education', 'IoT Educational Kit']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85192054891');
+update public.publications set citations = 5, keywords = array['Arduino for Education', 'Educational robots', 'Internet of Things', 'IoT Education', 'IoT Educational Kit']::text[] where scopus_eid = '2-s2.0-85192054891';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'z.mamatnabiyev') from public.publications where scopus_eid = '2-s2.0-85192054891' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Enhancing IoT Education with an Educational Robot: A Case Study on Hands-On Learning', 2025, 'Conference paper', 'https://doi.org/10.1109/SIST61657.2025.11139247', 'SIST 2025 - 2025 IEEE 5th International Conference on Smart Information Systems and Technologies, Conference Proceedings',
+  'Institute of Electrical and Electronics Engineers Inc.', 0, false, 'https://www.scopus.com/pages/publications/105016841702?origin=resultslist', '2-s2.0-105016841702', array['educational robots', 'hands-on learning', 'internet of things', 'IoT in education', 'robotics in education']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-105016841702');
+update public.publications set citations = 0, keywords = array['educational robots', 'hands-on learning', 'internet of things', 'IoT in education', 'robotics in education']::text[] where scopus_eid = '2-s2.0-105016841702';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'z.mamatnabiyev') from public.publications where scopus_eid = '2-s2.0-105016841702' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'AIoT in the Education Sector', 2024, 'Book chapter', 'https://doi.org/10.1002/9781119905202.ch20', 'Reshaping Intelligent Business and Industry: Convergence of AI and IoT at the Cutting Edge',
+  'wiley', 1, false, 'https://www.scopus.com/pages/publications/85207913146?origin=resultslist', '2-s2.0-85207913146', array['AIoT', 'Artificial intelligence', 'internet of things', 'IoT in education sector', 'IoT roadmap', 'smart campus']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85207913146');
+update public.publications set citations = 1, keywords = array['AIoT', 'Artificial intelligence', 'internet of things', 'IoT in education sector', 'IoT roadmap', 'smart campus']::text[] where scopus_eid = '2-s2.0-85207913146';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'z.mamatnabiyev') from public.publications where scopus_eid = '2-s2.0-85207913146' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Design and Implementation of an Open-Source Educational Robot for Hands-On Learning Experiences in IoT', 2023, 'Conference paper', 'https://doi.org/10.1109/ICECCO58239.2023.10146599', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023',
+  'Institute of Electrical and Electronics Engineers Inc.', 6, false, 'https://www.scopus.com/pages/publications/85163789022?origin=resultslist', '2-s2.0-85163789022', array['Arduino microcontroller', 'Educational Robot', 'Hands-on learning', 'Internet of Things (IoT)', 'IoT in education', 'STEM education']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85163789022');
+update public.publications set citations = 6, keywords = array['Arduino microcontroller', 'Educational Robot', 'Hands-on learning', 'Internet of Things (IoT)', 'IoT in education', 'STEM education']::text[] where scopus_eid = '2-s2.0-85163789022';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'z.mamatnabiyev') from public.publications where scopus_eid = '2-s2.0-85163789022' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of house automation system controlled using IoT technologies', 2018, 'Conference paper', 'https://doi.org/10.1109/ICECCO.2018.8634734', '14th International Conference on Electronics Computer and Computation, ICECCO 2018',
+  'Institute of Electrical and Electronics Engineers Inc.', 4, false, 'https://www.scopus.com/pages/publications/85062819142?origin=resultslist', '2-s2.0-85062819142', array['Automation systems', 'Iot', 'Smart Home']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85062819142');
+update public.publications set citations = 4, keywords = array['Automation systems', 'Iot', 'Smart Home']::text[] where scopus_eid = '2-s2.0-85062819142';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'z.mamatnabiyev') from public.publications where scopus_eid = '2-s2.0-85062819142' on conflict do nothing;
+insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
+select 'Development of Attendance Monitoring System using IoT Technologies', 2021, 'Conference paper', 'https://doi.org/10.1109/ICECCO53203.2021.9663827', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021',
+  'Institute of Electrical and Electronics Engineers Inc.', 6, false, 'https://www.scopus.com/pages/publications/85124953906?origin=resultslist', '2-s2.0-85124953906', array['Attendance Monitoring System (AMS)', 'automation system', 'Internet of Things (IoT)', 'IoT in education', 'RFID', 'student attendance']::text[]
+where not exists (select 1 from public.publications where scopus_eid = '2-s2.0-85124953906');
+update public.publications set citations = 6, keywords = array['Attendance Monitoring System (AMS)', 'automation system', 'Internet of Things (IoT)', 'IoT in education', 'RFID', 'student attendance']::text[] where scopus_eid = '2-s2.0-85124953906';
+insert into public.publication_authors (publication_id, professor_id)
+select id, (select id from public.professors where username = 'z.mamatnabiyev') from public.publications where scopus_eid = '2-s2.0-85124953906' on conflict do nothing;
+
+insert into sitam_meta.applied_migrations (version, name) values ('20261024100100', 'sitam_v10_data') on conflict do nothing;
+
+-- ════════ 20261024100200_sitam_v10_competitions_seed ════════
+-- SITAM SPACE v10 — results the labs reported in the lab form (awards), as external events with outcomes.
+-- Re-runnable: rows are matched by title. Dates the form did not give stay empty (only the year is shown).
+
+insert into public.event_series (title, kind, organizer, website) values
+  ('RoboCup', 'competition', 'RoboCup Federation', 'https://www.robocup.org'),
+  ('Republican Student Olympiad in Mathematics', 'olympiad', 'Ministry of Science and Higher Education of Kazakhstan', null),
+  ('SDU Winter GameJam', 'hackathon', 'SDU Multimedia Lab', null),
+  ('Global Game Jam', 'hackathon', 'Global Game Jam', 'https://globalgamejam.org')
+on conflict ((lower(title))) do nothing;
+
+with ev(title, kind, organizer, location, starts_on, ends_on, year, series) as (values
+  ('RoboCup Central Asia', 'competition', 'RoboCup', null, null::date, null::date, null::int, 'RoboCup'),
+  ('RoboCon Republic', 'competition', null, 'Kazakhstan', null, null, null, null),
+  ('Freedom Hackathon 2025', 'hackathon', 'Freedom Holding Corp.', null, null, null, 2025, null),
+  ('Freedom Ecosystem Challenge 2026', 'hackathon', 'SDU University × Freedom Holding Corp.', 'SDU University', '2026-05-17', '2026-05-17', 2026, null),
+  ('Republican Student Subject Olympiad in Mathematics 2026', 'olympiad', 'Nazarbayev University', 'Astana', '2026-04-11', '2026-04-12', 2026, 'Republican Student Olympiad in Mathematics'),
+  ('PunkVerse GameJam 2025', 'hackathon', 'PunkVerse', null, null, null, 2025, null),
+  ('KBTU Global GameJam 2024', 'hackathon', 'KBTU', 'Almaty', null, null, 2024, 'Global Game Jam'),
+  ('SDU Winter GameJam 2026', 'hackathon', 'SDU Multimedia Lab', 'SDU University', null, null, 2026, 'SDU Winter GameJam')
+)
+insert into public.external_events (title, kind, organizer, location, starts_on, ends_on, year, series_id, created_by)
+select e.title, e.kind, e.organizer, e.location, e.starts_on, e.ends_on, e.year,
+       (select s.id from public.event_series s where lower(s.title) = lower(e.series)), null
+  from ev e
+ where not exists (select 1 from public.external_events x where lower(x.title) = lower(e.title));
+
+with r(event_title, lab_slug, result, notes) as (values
+  ('RoboCup Central Asia', 'robotics-lab', '2nd place', null),
+  ('RoboCon Republic', 'robotics-lab', '1st place', null),
+  ('Freedom Hackathon 2025', 'ai-lab', '2nd place', null),
+  ('Freedom Ecosystem Challenge 2026', 'data-analytics-lab', '1st place in all three tracks',
+     'Tracks: Freedom Holding Corp., Freedom Insurance, Freedom Finance. Prizes: 500,000 ₸, 250,000 ₸, 100,000 ₸.'),
+  ('Republican Student Subject Olympiad in Mathematics 2026', 'mcm-lab', '3rd prize (team competition)', 'SDU University team trained in the lab.'),
+  ('PunkVerse GameJam 2025', 'multimedia-lab', 'Best Narrative · Best Game Design', null),
+  ('KBTU Global GameJam 2024', 'multimedia-lab', 'Best Game', null),
+  ('SDU Winter GameJam 2026', 'multimedia-lab', '1st place · 2nd place', null)
+)
+insert into public.external_event_labs (event_id, lab_id, result, notes, updated_by)
+select e.id, l.id, r.result, r.notes, null
+  from r
+  join public.external_events e on lower(e.title) = lower(r.event_title)
+  join public.labs l on l.slug = r.lab_slug
+on conflict (event_id, lab_id) do nothing;
+
+-- mentor of the olympiad team (from the MCM Lab form)
+insert into public.external_event_people (entry_id, member_id, full_name, role)
+select el.id, (select m.id from public.lab_members m where m.lab_id = el.lab_id and public.name_key(m.full_name) = public.name_key('Nurbek Kakharman') limit 1),
+       'Nurbek Kakharman', 'mentor'
+  from public.external_event_labs el
+  join public.external_events e on e.id = el.event_id
+  join public.labs l on l.id = el.lab_id
+ where lower(e.title) = lower('Republican Student Subject Olympiad in Mathematics 2026') and l.slug = 'mcm-lab'
+   and not exists (select 1 from public.external_event_people p where p.entry_id = el.id);
+
+insert into sitam_meta.applied_migrations (version, name) values ('20261024100200', 'sitam_v10_competitions_seed') on conflict do nothing;

@@ -1,0 +1,123 @@
+import { useState, type FormEvent } from 'react';
+import { createFileRoute, Link } from '@tanstack/react-router';
+import { Crown, Pencil, Plus, ShieldCheck, Trash2, X } from 'lucide-react';
+import { toast } from 'sonner';
+import { Button } from '@/components/ui/button';
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter,
+  AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { PeoplePicker } from '@/components/people-picker';
+import { SearchBar } from '@/components/search-bar';
+import { HEAD_ROLES, humanError, useAdminLabActions, useLabs, type Lab } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
+import { pageHead } from '@/lib/hub-data';
+import { LAB_FOCUS } from '@/lib/sitam-data';
+
+export const Route = createFileRoute('/admin')({
+  head: () => pageHead('Admin', 'SITAM coordinator: labs and lab heads.'),
+  component: Admin,
+});
+
+/** Coordinator only: all labs, create / edit / delete, assign or remove lab heads. The database checks every action. */
+function Admin() {
+  const { caps, loading } = useAuth();
+  const labs = useLabs();
+  const actions = useAdminLabActions();
+  const [q, setQ] = useState('');
+  const [name, setName] = useState('');
+  const [focus, setFocus] = useState<string>(LAB_FOCUS[0]);
+  const [toDelete, setToDelete] = useState<Lab | null>(null);
+
+  if (loading) return <main className="container content-page"><p className="small-note">Loading…</p></main>;
+  if (!caps.isCoordinator) {
+    return (
+      <main className="container content-page auth-page">
+        <h1>Admin</h1>
+        <p className="page-intro">This page is for the SITAM coordinator.</p>
+      </main>
+    );
+  }
+
+  const shown = (labs.data ?? []).filter((l) => l.name.toLowerCase().includes(q.trim().toLowerCase()));
+
+  function create(e: FormEvent) {
+    e.preventDefault();
+    actions.createLab.mutate(
+      { name, focus: [focus] },
+      { onSuccess: () => { toast.success('Lab created', { description: name }); setName(''); }, onError: (err) => toast.error(humanError(err)) },
+    );
+  }
+
+  return (
+    <main className="container content-page">
+      <h1><ShieldCheck className="inline" size={34} /> Admin</h1>
+
+      <section className="panel mt-6">
+        <h3 className="panel-title"><Plus size={15} />New lab</h3>
+        <form className="inline-form" onSubmit={create}>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Lab name" maxLength={120} aria-label="Lab name" style={{ flex: '1 1 260px' }} />
+          <select value={focus} onChange={(e) => setFocus(e.target.value)} aria-label="Category">
+            {LAB_FOCUS.map((f) => <option key={f} value={f}>{f}</option>)}
+          </select>
+          <Button type="submit" disabled={actions.createLab.isPending || name.trim().length < 2}><Plus />Create</Button>
+        </form>
+      </section>
+
+      <section className="panel mt-4">
+        <h3 className="panel-title"><Crown size={15} />Labs and heads · {(labs.data ?? []).length}</h3>
+        <SearchBar value={q} onChange={setQ} placeholder="Search labs" />
+        {labs.isLoading && <p className="small-note">Loading labs…</p>}
+        {shown.map((l) => {
+          const heads = l.lab_members.filter((m) => HEAD_ROLES.includes(m.role) && m.user_id);
+          const unlinked = l.lab_members.filter((m) => HEAD_ROLES.includes(m.role) && !m.user_id);
+          return (
+            <div key={l.id} className="admin-lab">
+              <div className="admin-lab-head">
+                <strong><Link to="/labs" search={{ lab: l.slug }}>{l.name}</Link> <small className="small-note">{l.focus.join(' · ')}</small></strong>
+                <Button asChild size="sm" variant="outline"><Link to="/labs/$slug" params={{ slug: l.slug }} search={{ edit: true }}><Pencil />Edit</Link></Button>
+                <Button size="sm" variant="ghost" onClick={() => setToDelete(l)} aria-label={`Delete ${l.name}`}><Trash2 /></Button>
+              </div>
+              <div className="inline-form">
+                {heads.length === 0 && <span className="small-note">No head assigned.</span>}
+                {heads.map((h) => (
+                  <span key={h.id} className="head-chip">
+                    <Crown size={12} />{h.full_name}
+                    <button
+                      type="button"
+                      aria-label={`Remove ${h.full_name} as head`}
+                      title="Remove as head (stays a member)"
+                      onClick={() => actions.removeHead.mutate({ labId: l.id, userId: h.user_id! }, { onSuccess: () => toast.success(`${h.full_name} is no longer head`), onError: (err) => toast.error(humanError(err)) })}
+                    ><X size={13} /></button>
+                  </span>
+                ))}
+                {unlinked.map((h) => <span key={h.id} className="small-note">{h.full_name} (head in the lab form, no account yet)</span>)}
+              </div>
+              <PeoplePicker
+                placeholder="Assign a head: search users by name or e-mail"
+                exclude={heads.map((h) => h.user_id!)}
+                onPick={(p) => actions.assignHead.mutate({ labId: l.id, userId: p.id }, {
+                  onSuccess: () => toast.success(`${p.first_name} ${p.last_name} is now head of ${l.name}`),
+                  onError: (err) => toast.error(humanError(err)),
+                })}
+              />
+            </div>
+          );
+        })}
+      </section>
+
+      <AlertDialog open={!!toDelete} onOpenChange={(o) => !o && setToDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {toDelete?.name}?</AlertDialogTitle>
+            <AlertDialogDescription>The lab, its team list, projects and events hosted only by it are removed. This cannot be undone.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => { const l = toDelete; if (l) actions.deleteLab.mutate(l.id, { onSuccess: () => toast.success('Lab deleted'), onError: (err) => toast.error(humanError(err)) }); }}>Delete</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </main>
+  );
+}

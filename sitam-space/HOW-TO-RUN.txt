@@ -1,0 +1,21 @@
+SITAM SPACE — how to run
+========================
+
+Requirements: Node.js 20 or newer (LTS) — https://nodejs.org
+
+Windows
+  1. Unzip this archive anywhere.
+  2. Double-click run-sitam.bat.
+     The first start installs packages (a few minutes, needs internet).
+  3. Open http://localhost:8080 in your browser
+     (if 8080 is busy, use the address printed in the window, e.g. 8081).
+
+macOS / Linux
+  cd shatyr-hub
+  npm install
+  npm run dev
+
+The site connects to the Supabase database configured in shatyr-hub/.env
+(your Lovable project). Database structure and setup steps are in
+shatyr-hub/BACKEND.md; SQL migrations are in shatyr-hub/supabase/migrations.
+Optional: put your own background video at shatyr-hub/public/hero.mp4.

@@ -1,0 +1,243 @@
+import { useMemo, useState } from 'react';
+import { Link } from '@tanstack/react-router';
+import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { ArrowUpRight, BookOpen, ExternalLink, GraduationCap, Quote, Search, Unlock, UserRound } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { SearchBar } from '@/components/search-bar';
+import { VIZ, axisProps as axis, tooltipProps } from '@/lib/chart-style';
+import { mineFirst, personKey, useMyLabs } from '@/lib/my-labs';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { humanError, useProfessors, useProjects, usePublications, type Professor, type Publication } from '@/lib/api';
+import { ProjectCard } from '@/components/projects-showcase';
+
+
+const kindOf = (t: string | null) => (/article/i.test(t ?? '') ? 'article' : /conference/i.test(t ?? '') ? 'conference' : 'other');
+
+export function PublicationRow({ p, showAuthors = true, onKeyword, terms = [] }: { p: Publication; showAuthors?: boolean; onKeyword?: (k: string) => void; terms?: string[] }) {
+  const authors = p.publication_authors.map((a) => a.professors).filter((x): x is NonNullable<typeof x> => !!x);
+  return (
+    <li className="pub-row">
+      <div className="pub-year">{p.year ?? '—'}</div>
+      <div className="pub-body">
+        <strong>{p.title}</strong>
+        <small>{[p.type, p.venue].filter(Boolean).join(' · ')}</small>
+        {showAuthors && authors.length > 0 && (
+          <small className="pub-authors">
+            {authors.map((a, i) => (
+              <span key={a.username}>{i > 0 && ', '}<Link to="/research/$username" params={{ username: a.username }}>{a.full_name}</Link></span>
+            ))}
+          </small>
+        )}
+        {p.keywords.length > 0 && (
+          <div className="stack-list">
+            {p.keywords.slice(0, 8).map((k) => {
+              const hit = terms.some((t) => k.toLowerCase().includes(t));
+              return onKeyword
+                ? <button key={k} type="button" className={hit ? 'kw-chip hit' : 'kw-chip'} onClick={() => onKeyword(k)} title={`Search papers about “${k}”`}>{k}</button>
+                : <span key={k} className={hit ? 'hit' : undefined}>{k}</span>;
+            })}
+          </div>
+        )}
+      </div>
+      <div className="pub-side">
+        <span className="pub-cites" title="Citations"><Quote size={12} />{p.citations}</span>
+        {p.is_open_access && <span className="pill pill-live"><Unlock size={11} />Open</span>}
+        {(p.doi || p.url) && <a className="pub-link" href={p.doi ?? p.url ?? '#'} target="_blank" rel="noopener noreferrer" aria-label="Open publication"><ExternalLink size={14} /></a>}
+      </div>
+    </li>
+  );
+}
+
+export function ProfessorCard({ p }: { p: Professor }) {
+  return (
+    <Link to="/research/$username" params={{ username: p.username }} className="prof-card">
+      <span className="avatar">{p.photo_url ? <img src={p.photo_url} alt="" /> : `${p.first_name[0] ?? ''}${p.last_name[0] ?? ''}`}</span>
+      <div className="prof-main">
+        <strong>{p.full_name}</strong>
+        <small>{[p.job_title, p.degree].filter(Boolean).join(' · ')}</small>
+        <div className="stack-list">{p.keywords.slice(0, 4).map((k) => <span key={k}>{k}</span>)}</div>
+      </div>
+      <div className="prof-metrics">
+        <span><b>{p.total_works}</b>works</span>
+        <span><b>{p.total_citations}</b>citations</span>
+        <span><b>{p.h_index}</b>h-index</span>
+      </div>
+      <ArrowUpRight className="card-arrow" size={16} />
+    </Link>
+  );
+}
+
+export function ResearchPublications({ initialQuery = '' }: { initialQuery?: string }) {
+  const profs = useProfessors();
+  const pubs = usePublications();
+  const projects = useProjects();
+  const my = useMyLabs();
+  // Community research + (for a lab head) the research of their own labs, which goes first.
+  const community = mineFirst(
+    (projects.data ?? []).filter((p) => p.kind === 'research' && (!p.lab_id || my.isMineLab(p.lab_id))),
+    (p) => my.isMineLab(p.lab_id),
+  );
+  const [query, setQuery] = useState(initialQuery);
+  const [year, setYear] = useState('all');
+  const [kind, setKind] = useState<'all' | 'article' | 'conference' | 'other'>('all');
+  const [topic, setTopic] = useState('');
+  const [tab, setTab] = useState(initialQuery ? 'search' : 'overview');
+
+  const all = pubs.data ?? [];
+  // researchers who are members of the head's labs first, and their papers first
+  const isMyPerson = (fullName: string | undefined) => !!fullName && my.people.has(personKey(fullName));
+  const people = useMemo(() => mineFirst(profs.data ?? [], (p) => isMyPerson(p.full_name)), [profs.data, my]);
+  const years = useMemo(() => Array.from(new Set(all.map((p) => p.year).filter((y): y is number => !!y))).sort((a, b) => b - a), [all]);
+
+  const byYear = useMemo(() => {
+    const m = new Map<number, { year: string; article: number; conference: number; other: number; total: number; citations: number }>();
+    for (const p of all) {
+      if (!p.year) continue;
+      const r = m.get(p.year) ?? { year: String(p.year), article: 0, conference: 0, other: 0, total: 0, citations: 0 };
+      r[kindOf(p.type)] += 1;
+      r.total += 1;
+      r.citations += p.citations;
+      m.set(p.year, r);
+    }
+    return [...m.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+  }, [all]);
+
+  const venues = useMemo(() => {
+    const m = new Map<string, { venue: string; count: number; citations: number }>();
+    for (const p of all) {
+      if (!p.venue) continue;
+      const r = m.get(p.venue) ?? { venue: p.venue, count: 0, citations: 0 };
+      r.count += 1;
+      r.citations += p.citations;
+      m.set(p.venue, r);
+    }
+    return [...m.values()].sort((a, b) => b.count - a.count || b.citations - a.citations).slice(0, 10);
+  }, [all]);
+
+  const terms = useMemo(() => query.toLowerCase().split(/[,;]+|\s+/).map((t) => t.trim()).filter((t) => t.length > 1), [query]);
+  const found = useMemo(() => {
+    const list = all
+      .map((p) => {
+        const kw = p.keywords.join(' ').toLowerCase();
+        const hay = `${p.title} ${p.venue ?? ''} ${kw} ${p.publication_authors.map((a) => a.professors?.full_name ?? '').join(' ')}`.toLowerCase();
+        const ok = terms.every((t) => hay.includes(t));
+        // papers whose keywords (not just the title) match rank first
+        const score = terms.filter((t) => kw.includes(t)).length * 2 + terms.filter((t) => p.title.toLowerCase().includes(t)).length;
+        return { p, ok, score };
+      })
+      .filter(({ p, ok }) => ok && (year === 'all' || String(p.year) === year) && (kind === 'all' || kindOf(p.type) === kind))
+      .sort((a, b) => b.score - a.score || (b.p.year ?? 0) - (a.p.year ?? 0))
+      .map((x) => x.p);
+    return mineFirst(list, (p) => p.publication_authors.some((a) => isMyPerson(a.professors?.full_name)));
+  }, [all, terms, year, kind, my]);
+  const searchFor = (k: string) => { setQuery(k); setTab('search'); };
+
+  const supervisors = useMemo(() => {
+    const terms = topic.toLowerCase().split(/[\s,]+/).filter((t) => t.length > 1);
+    return people
+      .map((p) => {
+        const hay = `${p.keywords.join(' ')} ${p.topics.map((t) => `${t.topic_name} ${t.field ?? ''}`).join(' ')}`.toLowerCase();
+        return { p, score: terms.filter((t) => hay.includes(t)).length };
+      })
+      .filter((x) => !terms.length || x.score > 0)
+      .sort((a, b) => b.score - a.score || b.p.h_index - a.p.h_index)
+      .map((x) => x.p);
+  }, [people, topic]);
+  // keep "mine first" after the topic ranking too
+  const supervisorsOrdered = useMemo(() => mineFirst(supervisors, (p) => isMyPerson(p.full_name)), [supervisors, my]);
+
+  const totals = {
+    pubs: all.length,
+    cites: all.reduce((s, p) => s + p.citations, 0),
+    oa: all.filter((p) => p.is_open_access).length,
+    profs: people.length,
+  };
+
+  const error = pubs.error ?? profs.error;
+  if (error) return <p className="form-alert">{humanError(error)}</p>;
+
+  return (
+    <>
+    <SearchBar value={query} onChange={(v) => { setQuery(v); if (v.trim()) setTab('search'); }} placeholder="Search papers by keywords" onSubmit={() => setTab('search')} />
+    <Tabs value={tab} onValueChange={setTab}>
+      <TabsList className="manage-tabs">
+        <TabsTrigger value="overview">Overview</TabsTrigger>
+        <TabsTrigger value="people">Researchers · {people.length}</TabsTrigger>
+        <TabsTrigger value="search">Publications · {all.length}</TabsTrigger>
+        <TabsTrigger value="supervisor">Find a supervisor</TabsTrigger>
+        <TabsTrigger value="community">{my.any ? 'Lab & student research' : 'Student research'} · {community.length}</TabsTrigger>
+      </TabsList>
+
+      <TabsContent value="overview">
+        <div className="kpi-grid">
+          <div className="kpi"><BookOpen size={16} /><strong>{totals.pubs}</strong><span>Publications</span></div>
+          <div className="kpi"><Quote size={16} /><strong>{totals.cites}</strong><span>Citations</span></div>
+          <div className="kpi"><UserRound size={16} /><strong>{totals.profs}</strong><span>Researchers</span></div>
+          <div className="kpi"><Unlock size={16} /><strong>{totals.pubs ? Math.round((totals.oa / totals.pubs) * 100) : 0}%</strong><span>Open access</span></div>
+        </div>
+        <div className="chart-grid two">
+          <section className="panel">
+            <h3 className="panel-title">Publications per year</h3>
+            <div className="chart-box" role="img" aria-label="Publications per year">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={byYear} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
+                  <CartesianGrid stroke={VIZ.grid} vertical={false} />
+                  <XAxis dataKey="year" {...axis} />
+                  <YAxis allowDecimals={false} {...axis} />
+                  <Tooltip {...tooltipProps} />
+                  <Bar dataKey="total" name="Publications" fill={VIZ.bar} radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </section>
+          <section className="panel">
+            <h3 className="panel-title">Citations of papers by publication year</h3>
+            <div className="chart-box" role="img" aria-label="Citations by publication year">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={byYear} margin={{ top: 8, right: 8, left: -12, bottom: 0 }}>
+                  <CartesianGrid stroke={VIZ.grid} vertical={false} />
+                  <XAxis dataKey="year" {...axis} />
+                  <YAxis allowDecimals={false} {...axis} />
+                  <Tooltip {...tooltipProps} cursor={{ stroke: VIZ.grid }} />
+                  <Line type="monotone" dataKey="citations" name="Citations" stroke={VIZ.line} strokeWidth={2.5} dot={{ r: 3.5, fill: VIZ.line, strokeWidth: 0 }} activeDot={{ r: 5 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </section>
+        </div>
+      </TabsContent>
+
+      <TabsContent value="people">
+        <div className="prof-grid">{people.map((p) => <ProfessorCard key={p.id} p={p} />)}</div>
+        {!profs.isLoading && people.length === 0 && <p className="small-note">No researchers imported yet.</p>}
+      </TabsContent>
+
+      <TabsContent value="search">
+        <div className="lab-controls">
+          <div className="filter-list">
+            <select className="filter-select" value={year} onChange={(e) => setYear(e.target.value)} aria-label="Year">
+              <option value="all">All years</option>
+              {years.map((y) => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </div>
+        </div>
+        <ul className="pub-list">{found.map((p) => <PublicationRow key={p.id} p={p} terms={terms} onKeyword={searchFor} />)}</ul>
+        {terms.length > 0 && found.length === 0 && <p className="small-note">No papers found.</p>}
+      </TabsContent>
+
+      <TabsContent value="community">
+        <div className="project-grid">{community.map((p) => <ProjectCard key={p.id} p={p} />)}</div>
+        {!projects.isLoading && community.length === 0 && <p className="small-note">Nothing yet — use “Submit your research” above.</p>}
+      </TabsContent>
+
+      <TabsContent value="supervisor">
+        <div className="finder-head">
+          <SearchBar value={topic} onChange={setTopic} placeholder="Search researchers by topic" />
+        </div>
+        <div className="prof-grid">{supervisorsOrdered.map((p) => <ProfessorCard key={p.id} p={p} />)}</div>
+        {supervisors.length === 0 && <p className="small-note">Nobody found.</p>}
+      </TabsContent>
+    </Tabs>
+    </>
+  );
+}
