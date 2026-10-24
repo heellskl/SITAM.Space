@@ -24,7 +24,7 @@ export function applyTheme(t: Theme) {
   } catch {
     /* private mode: the choice lasts for this page only */
   }
-  window.setTimeout(() => root.classList.remove('theme-switching'), 350);
+  window.setTimeout(() => root.classList.remove('theme-switching'), 950); // colours ease while the hero videos cross-fade
 }
 
 export function ThemeToggle() {

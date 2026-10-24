@@ -1712,3 +1712,16 @@ html.dark .xev-result { color: oklch(0.88 0.12 85); background: oklch(0.82 0.13 
 .xev-trophy { color: oklch(0.72 0.14 78); }
 html:not(.dark) .on-hero .top-bar { background: transparent; }
 .pre-line { white-space: pre-line; }
+
+/* v10.2 — night ↔ day: the hero videos cross-fade, the rest of the page eases its colours */
+.hero8-video { opacity: 0; }
+.hero8-video.is-ready.is-active { opacity: 1; transform: scale(1); }
+.hero8-video.is-ready:not(.is-active) { opacity: 0; transform: scale(1); }
+.hero8-video { transition: opacity .9s ease, transform 2.6s cubic-bezier(.2, .7, .2, 1); }
+html.theme-switching .hero8-video { transition: opacity .9s ease !important; }
+html.theme-switching, html.theme-switching *, html.theme-switching *::before, html.theme-switching *::after {
+  transition: background-color .6s ease, color .6s ease, border-color .6s ease, fill .6s ease !important;
+}
+html.theme-switching .hero8-video { transition: opacity .9s ease !important; }
+.hero8-veil { z-index: 2; transition: background .6s ease; }
+@media (prefers-reduced-motion: reduce) { .hero8-video { transition: none !important; } }

@@ -4,20 +4,18 @@ import { Building2, GraduationCap, Presentation } from 'lucide-react';
 import { useLabs, useProjects, usePublications } from '@/lib/api';
 import { pageHead } from '@/lib/hub-data';
 import { BRAND } from '@/lib/sitam-data';
-import { gmailCompose } from '@/lib/utils';
-import { useTheme } from '@/components/theme-toggle';
+import { useTheme, type Theme } from '@/components/theme-toggle';
 
 export const Route = createFileRoute('/')({
   head: () => pageHead('Science, Industry & Innovation at SDU', 'SITAM SPACE — laboratories, projects, events and research of the School of Information Technologies and Applied Mathematics, SDU University.'),
   component: Index,
 });
 
-// Hero background follows the theme: night sky in dark mode, a sunrise over a field in light mode.
-const HERO_VIDEO = {
-  dark: 'https://d8j0ntlcm91z4.cloudfront.net/user_38xzZboKViGWJOttwIXH07lWA1P/hf_20260314_131748_f2ca2a28-fed7-44c8-b9a9-bd9acdd5ec31.mp4',
-  light: '/hero-day.mp4', // public/hero-day.mp4 — replace the file to change the day video
-} as const;
-const HERO_POSTER = { dark: undefined, light: '/hero-day.jpg' } as const;
+// Hero background follows the theme: a starry night in dark mode, a sunny morning in light mode (files in public/).
+// Both videos sit on top of each other; switching the theme cross-fades from one to the other.
+const HERO_VIDEO = { dark: '/hero-night.mp4', light: '/hero-day.mp4' } as const;
+const HERO_POSTER = { dark: '/hero-night.jpg', light: '/hero-day.jpg' } as const;
+const THEMES: Theme[] = ['dark', 'light'];
 
 /** Letters rise one after another (staggered), so the title is animated, not only the video behind it. */
 function split(word: string, offset: number) {
@@ -26,38 +24,47 @@ function split(word: string, offset: number) {
   ));
 }
 
-/** Fullscreen looping video that fades in once it can play; switches source when the theme changes. */
+/** Fullscreen looping videos (night + day) that cross-fade when the theme changes. */
 function HeroBackdrop() {
-  const ref = useRef<HTMLVideoElement>(null);
   const theme = useTheme();
-  const [ready, setReady] = useState(false);
+  const refs = useRef<Record<Theme, HTMLVideoElement | null>>({ dark: null, light: null });
   const [mounted, setMounted] = useState(false);
+  const [ready, setReady] = useState<Record<Theme, boolean>>({ dark: false, light: false });
+  // the other theme's video is loaded only after the first switch (saves traffic on the first visit)
+  const [used, setUsed] = useState<Record<Theme, boolean>>({ dark: false, light: false });
   useEffect(() => setMounted(true), []);
   useEffect(() => {
-    setReady(false);
-    const v = ref.current;
-    if (!v) return;
-    v.muted = true;
-    v.load();
-    v.play().catch(() => { /* autoplay refused: the poster / plain background stays */ });
+    if (!mounted) return;
+    setUsed((u) => (u[theme] ? u : { ...u, [theme]: true }));
   }, [mounted, theme]);
+  useEffect(() => {
+    if (!mounted) return;
+    const on = refs.current[theme];
+    if (on) {
+      on.muted = true;
+      on.play().catch(() => { /* autoplay refused: the poster stays */ });
+    }
+    const other = refs.current[theme === 'dark' ? 'light' : 'dark'];
+    const t = window.setTimeout(() => other?.pause(), 1000); // after the fade
+    return () => window.clearTimeout(t);
+  }, [mounted, theme, used]);
   return (
     <div className={`hero8-media hero8-media-${theme}`} aria-hidden>
-      {mounted && (
+      {mounted && THEMES.filter((x) => used[x]).map((x) => (
         <video
-          key={theme}
-          ref={ref}
-          className={ready ? 'hero8-video is-ready' : 'hero8-video'}
-          src={HERO_VIDEO[theme]}
-          poster={HERO_POSTER[theme]}
-          autoPlay
+          key={x}
+          ref={(el) => { refs.current[x] = el; }}
+          className={`hero8-video${ready[x] ? ' is-ready' : ''}${x === theme || !ready[theme] ? ' is-active' : ''}`} // the old video stays until the new one can play
+          src={HERO_VIDEO[x]}
+          poster={HERO_POSTER[x]}
+          autoPlay={x === theme}
           loop
           muted
           playsInline
           preload="auto"
-          onCanPlay={() => setReady(true)}
+          onCanPlay={() => setReady((r) => (r[x] ? r : { ...r, [x]: true }))}
         />
-      )}
+      ))}
       <span className="hero8-veil" />
     </div>
   );
@@ -138,7 +145,6 @@ function Index() {
             <div><dt><CountUp value={involved} /></dt><dd>Students involved</dd></div>
             <div><dt><CountUp value={pubs.data?.length} /></dt><dd>Scopus publications</dd></div>
           </dl>
-          <p className="about2-contact">{BRAND.contactLabel}: <a href={gmailCompose(BRAND.contactEmail)} target="_blank" rel="noopener noreferrer">{BRAND.contactEmail}</a></p>
         </div>
       </section>
     </main>

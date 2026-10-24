@@ -6476,3 +6476,73 @@ select el.id, (select m.id from public.lab_members m where m.lab_id = el.lab_id 
    and not exists (select 1 from public.external_event_people p where p.entry_id = el.id);
 
 insert into sitam_meta.applied_migrations (version, name) values ('20261024100200', 'sitam_v10_competitions_seed') on conflict do nothing;
+
+-- ════════ access for the website roles ════════
+-- SITAM SPACE — fix "You do not have permission to do this" on a new Supabase project.
+-- New Supabase projects can be created WITHOUT the usual default access for the website roles (anon, authenticated).
+-- Then the site cannot read labs, research, events… and shows "You do not have permission to do this".
+-- This file gives the standard Supabase access back and then re-applies every restriction of the SITAM migrations,
+-- so the site's rules (who may write what) stay exactly as designed. Row-level security keeps protecting the rows.
+-- Run: Supabase → SQL Editor → New query → paste → Run. Safe to run more than once.
+
+grant usage on schema public to anon, authenticated, service_role;
+grant all on all tables in schema public to anon, authenticated, service_role;
+grant all on all sequences in schema public to anon, authenticated, service_role;
+grant execute on all functions in schema public to anon, authenticated, service_role;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+alter default privileges in schema public grant execute on functions to anon, authenticated, service_role;
+
+-- the SITAM restrictions, in migration order
+revoke insert, update, delete on public.profiles from anon, authenticated;
+grant update (first_name, last_name, course, major, department, position, bio, links, cv_filename) on public.profiles to authenticated;
+revoke update on public.companies from authenticated;
+grant update (name, website, description, logo_url) on public.companies to authenticated;
+revoke insert on public.opportunities from anon, authenticated;
+revoke insert, update, delete on public.opportunity_hosts from anon, authenticated;
+revoke insert, update, delete on public.applications from anon, authenticated;
+revoke insert on public.events from anon, authenticated;
+revoke insert, update, delete on public.event_hosts from anon, authenticated;
+revoke insert, update, delete on public.event_registrations from anon, authenticated;
+revoke select on public.professors from anon, authenticated;
+grant select (id, username, first_name, last_name, full_name, job_title, degree, photo_url, orcid_url, scopus_id, scholar_url,               h_index, i10_index, total_citations, total_works, keywords, topics, profile_id, updated_at)   on public.professors to anon, authenticated;
+grant select on public.event_stats, public.research_yearly to anon, authenticated;
+grant update (phone) on public.profiles to authenticated;
+revoke update on public.projects from authenticated;
+grant update (kind, status, title, summary, tags, authors, year, github_url, demo_url, paper_url, sort_order, lab_id) on public.projects to authenticated;
+revoke insert on public.projects from anon, authenticated;
+grant insert (lab_id, kind, status, title, summary, tags, authors, year, github_url, demo_url, paper_url, sort_order) on public.projects to authenticated;
+revoke execute on function public.refresh_professor_metrics(uuid) from anon, authenticated, public;
+revoke insert, update on public.lab_members from anon, authenticated;
+grant insert (lab_id, full_name, title, role, term, sort_order) on public.lab_members to authenticated;
+grant update (full_name, title, role, term, sort_order) on public.lab_members to authenticated;
+grant delete on public.lab_members to authenticated;
+revoke execute on function public.add_lab_member(uuid, text, text, text, text) from anon, public;
+grant execute on function public.add_lab_member(uuid, text, text, text, text) to authenticated;
+revoke execute on function public.my_context() from anon, public;
+grant execute on function public.my_context() to authenticated;
+grant execute on function public.is_lab_head(uuid) to authenticated;
+revoke insert, update, delete on public.lab_head_requests from anon, authenticated;
+grant select on public.lab_head_requests to authenticated;
+revoke all on public.public_people from anon, public;
+grant select on public.public_people to authenticated;
+grant select (email) on public.professors to authenticated;
+revoke all on public.coordinator_emails from anon, authenticated;
+grant update (faculty, group_name, avatar_url) on public.profiles to authenticated;
+revoke all on public.public_people from anon, public;
+grant select on public.public_people to authenticated;
+revoke execute on function public.my_context() from anon, public;
+grant execute on function public.my_context() to authenticated;
+revoke execute on function public.submit_project(text, text, text, text[], text[], int, text, text, text, text, text) from anon, public;
+grant execute on function public.submit_project(text, text, text, text[], text[], int, text, text, text, text, text) to authenticated;
+grant select on public.event_series, public.external_events, public.external_event_labs, public.external_event_people to anon, authenticated;
+revoke insert, update, delete on public.event_series, public.external_events, public.external_event_labs, public.external_event_people from anon, authenticated;
+revoke execute on function public.save_external_event(uuid, text, text, text, text, text, date, date, text, boolean, uuid) from anon, public;
+revoke execute on function public.delete_external_event(uuid) from anon, public;
+revoke execute on function public.save_event_participation(uuid, uuid, jsonb, text, text, text, uuid, text) from anon, public;
+revoke execute on function public.remove_event_participation(uuid, uuid) from anon, public;
+grant execute on function public.save_external_event(uuid, text, text, text, text, text, date, date, text, boolean, uuid) to authenticated;
+grant execute on function public.delete_external_event(uuid) to authenticated;
+grant execute on function public.save_event_participation(uuid, uuid, jsonb, text, text, text, uuid, text) to authenticated;
+grant execute on function public.remove_event_participation(uuid, uuid) to authenticated;
+grant execute on function public.name_key(text) to anon, authenticated;
