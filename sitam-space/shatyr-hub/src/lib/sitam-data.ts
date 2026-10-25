@@ -4,7 +4,7 @@
 export const BRAND = {
   name: 'SITAM.SPACE',
   short: 'SITAM SPACE',
-  tagline: 'Industry & Research Ecosystem',
+  tagline: 'Innovation Ecosystem',
   school: 'School of Information Technologies and Applied Mathematics',
   // Official address for feedback and support (SDU Technopark).
   contactEmail: 'technopark@sdu.edu.kz',
@@ -16,11 +16,14 @@ export const DEPARTMENTS = ['SITAM', 'SE', 'SBL', 'Pedagogy', 'Humanities', 'Law
 
 
 export const EVENT_META = {
-  industrial: { label: 'Industrial Days', short: 'Industrial', weekdayName: 'Thursday', time: '17:00' },
-  research: { label: 'Research Days', short: 'Research', weekdayName: 'Tuesday', time: '17:00' },
+  industrial: { label: 'Industry', short: 'Industry', weekdayName: 'Thursday', time: '17:00' },
+  research: { label: 'Research', short: 'Research', weekdayName: 'Tuesday', time: '17:00' },
 } as const;
 
-export const LAB_FOCUS = ['Research', 'Courses', 'Industry & Commercial Projects'] as const;
+// v11: three focus categories, in this order
+export const LAB_FOCUS = ['Industry & Commercial Projects', 'Research', 'Education'] as const;
+/** v11: second lab filter (labs.direction) */
+export const LAB_DIRECTIONS = ['AI & Data Science', 'Cloud & Cybersecurity', 'Robotics & IoT', 'Multimedia & Digital', 'Mathematics & Fundamental Sciences'] as const;
 
 export type FaqAudience = 'all' | 'leader' | 'teacher' | 'student';
 export const FAQ_AUDIENCE_LABEL: Record<FaqAudience, string> = { all: 'Everyone', leader: 'Lab leaders', teacher: 'Teachers', student: 'Students' };
@@ -41,7 +44,7 @@ export const faqs = [
   { q: 'Can I use a different CV for one application?', a: 'Yes. When you apply, keep the CV from your profile or upload another PDF for that application only. Your profile CV stays unchanged.' },
   { q: 'I head a lab and I am also a student. Can I apply to company vacancies?', a: 'Yes. Roles are additive: lab-head rights let you manage your lab, and your student account can still apply anywhere except to your own lab’s listings.' },
   { q: 'How do lab heads update their lab page and projects?', a: 'On the Labs page open your lab: Edit, Add member, New project and New event appear only for its heads.' },
-  { q: 'When and where are the events?', a: 'Research Days run on Tuesdays at 17:00 and Industrial Days on Thursdays at 17:00, in Room C1.2. An event can be hosted by several labs, companies or projects together. Register in one click to get a QR ticket.' },
+  { q: 'When and where are the events?', a: 'Research events run on Tuesdays at 17:00 and Industry events on Thursdays at 17:00, in Room C1.2. An event can be hosted by several labs, companies or projects together. Register in one click to get a QR ticket.' },
   { q: 'Where do the publication numbers come from?', a: 'From the Scopus export: publications, citations, h-index and research topics per professor. Click a researcher to see all of their papers.' },
   { q: 'Who sees my data?', a: 'Your applications and CV are visible only to you and to the people reviewing that specific opportunity. Attendee lists are visible only to event organizers. Your name, role and e-mail are visible to signed-in members so they can write to you; your phone is not shown.' },
 ] as const;

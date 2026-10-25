@@ -5,11 +5,13 @@ import { ArrowLeft, ImagePlus, Lock, Plus, Save, Trash2, Upload } from 'lucide-r
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import {
-  HEAD_ROLES, LAB_POSITION_LABEL, LAB_ROLE_ORDER, humanError, labSetupSteps, saveLab, uploadLabImage, useLabContacts, useLabInternal, useProjects,
+  HEAD_ROLES, LAB_POSITION_LABEL, LAB_ROLE_ORDER, humanError, labSetupSteps, saveLab, uploadLabImage, useLabContacts, useLabInternal, useLabs, useProjects,
   type Lab, type LabInternal, type LabRole, type MemberDraft, type ProjectDraft, type SocialLink,
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { LAB_FOCUS } from '@/lib/sitam-data';
+import { LAB_DIRECTIONS, LAB_FOCUS } from '@/lib/sitam-data';
+import { TagInput } from '@/components/tag-input';
+import { splitItems } from '@/components/lab-page';
 
 const lines = (s: string) => s.split('\n').map((l) => l.trim()).filter(Boolean);
 const nullable = (s: string) => (s.trim() ? s.trim() : null);
@@ -33,7 +35,8 @@ const SECTIONS = [
   { id: 'media', label: 'Logo & links' },
   { id: 'team', label: 'Team' },
   { id: 'projects', label: 'Projects' },
-  { id: 'activities', label: 'Activities & partners' },
+  { id: 'activities', label: 'Activities' },
+  { id: 'partners', label: 'Partners' },
 ] as const;
 type SectionId = (typeof SECTIONS)[number]['id'];
 
@@ -118,6 +121,7 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
     visitor_walkthrough: lab.visitor_walkthrough ?? '',
     live_demo: lab.live_demo ?? '',
     demo_stand: lab.demo_stand ?? '',
+    upcoming_activities: join(lab.upcoming_activities),
     presenters: join(internal?.presenters),
     goals: join(internal?.goals),
     required_support: join(internal?.required_support),
@@ -125,14 +129,25 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
     action_plan_link: internal?.action_plan_link ?? '',
   }));
   const [focus, setFocus] = useState<string[]>(lab.focus);
+  const [direction, setDirection] = useState<string>(lab.direction ?? '');
+  const [tagList, setTagList] = useState<string[]>(lab.tags);
+  const [skillList, setSkillList] = useState<string[]>(lab.skills ?? []);
+  const [equipList, setEquipList] = useState<string[]>(splitItems(lab.equipment));
+  // suggestions: what the other labs already use
+  const allLabs = useLabs();
+  const known = (pick: (l: Lab) => string[]) => [...new Set((allLabs.data ?? []).flatMap(pick))].sort((a, b) => a.localeCompare(b));
+  const tagSuggest = known((l) => l.tags);
+  const skillSuggest = known((l) => l.skills ?? []);
+  const equipSuggest = known((l) => splitItems(l.equipment));
   const [socials, setSocials] = useState<SocialLink[]>(lab.social_links.length ? lab.social_links : [{ platform: 'LinkedIn', url: '' }]);
   const [logo, setLogo] = useState(lab.logo_url);
   const [photos, setPhotos] = useState<string[]>(lab.photo_urls);
   const [members, setMembers] = useState<MemberDraft[]>(() =>
     lab.lab_members
       .slice()
-      .sort((a, b) => ROLES.indexOf(a.role) - ROLES.indexOf(b.role) || a.sort_order - b.sort_order)
-      .map((m) => ({ id: m.id, full_name: m.full_name, title: m.title ?? '', role: m.role, term: m.term ?? '', email: contactOf(m.id)?.email ?? '', contact: contactOf(m.id)?.contact ?? '' })),
+      .sort((a, b) => Number(!!a.is_past) - Number(!!b.is_past) || ROLES.indexOf(a.role) - ROLES.indexOf(b.role) || a.sort_order - b.sort_order)
+      .map((m) => ({ id: m.id, full_name: m.full_name, title: m.title ?? '', role: m.role, term: m.term ?? '', email: contactOf(m.id)?.email ?? '', contact: contactOf(m.id)?.contact ?? '',
+        is_past: !!m.is_past, graduation_year: m.graduation_year ? String(m.graduation_year) : '' })),
   );
   const [projs, setProjs] = useState<ProjectDraft[]>(() =>
     projects.map((p) => ({
@@ -185,6 +200,7 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
     ];
     for (const [u, at] of links) if (u.trim() && !/^https?:\/\//i.test(u.trim())) return problem(`Links must start with https:// — check “${u}”.`, at);
     if (members.some((m) => m.full_name.trim().length < 2)) return problem('Every team row needs a full name (or remove the empty row).', 'team');
+    if (members.some((m) => m.is_past && m.graduation_year && !/^(19|20)\d\d$/.test(m.graduation_year.trim()))) return problem('Graduation year must be a year like 2025.', 'team');
     if (f.contact_email.trim() && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(f.contact_email.trim())) return problem('Check the lab contact e-mail.', 'about');
     const csv = (v: string) => v.split(',').map((x) => x.trim()).filter(Boolean).slice(0, 20);
     if (projs.some((p) => p.title.trim().length < 2)) return problem('Every project needs a title (or remove the empty row).', 'projects');
@@ -196,9 +212,10 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
         {
           name: f.name.trim(), year_founded: year, founders: f.founders.split(',').map((s) => s.trim()).filter(Boolean),
           description: f.description.trim(), focus, logo_url: logo, website: nullable(f.website),
-          tags: csv(f.tags), skills: csv(f.skills), contact_email: nullable(f.contact_email.toLowerCase()),
+          tags: tagList.slice(0, 20), skills: skillList.slice(0, 20), contact_email: nullable(f.contact_email.toLowerCase()),
+          direction: direction || null, upcoming_activities: lines(f.upcoming_activities),
           social_links: socials.filter((s) => s.url.trim()).map((s) => ({ platform: s.platform.trim() || 'Link', url: s.url.trim() })),
-          location: f.location.trim(), equipment: nullable(f.equipment),
+          location: f.location.trim(), equipment: equipList.length ? equipList.join(', ') : null,
           seminars: lines(f.seminars), courses: lines(f.courses), organized_events: lines(f.organized_events), external_events: lines(f.external_events),
           awards: lines(f.awards), grants: lines(f.grants), notable_alumni: lines(f.notable_alumni), alumni_contributors: lines(f.alumni_contributors),
           current_partners: lines(f.current_partners), prospective_partners: lines(f.prospective_partners),
@@ -206,7 +223,7 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
           photo_urls: photos, photo_archive_link: nullable(f.photo_archive_link),
           visitor_walkthrough: nullable(f.visitor_walkthrough), live_demo: nullable(f.live_demo), demo_stand: nullable(f.demo_stand),
           ...(!lab.setup_completed_at &&
-          labSetupSteps({ ...lab, description: f.description.trim(), focus, tags: csv(f.tags), skills: csv(f.skills), location: f.location.trim(),
+          labSetupSteps({ ...lab, description: f.description.trim(), focus, tags: tagList, skills: skillList, location: f.location.trim(),
             contact_email: nullable(f.contact_email), website: nullable(f.website), social_links: socials.filter((x) => x.url.trim()),
             lab_members: members.map((m, i) => ({ id: m.id ?? `new-${i}`, lab_id: lab.id, user_id: null, full_name: m.full_name, title: m.title, role: m.role, term: m.term, can_edit: false, sort_order: i })),
           }).every((x) => x.done)
@@ -255,8 +272,19 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
           </div>
           <F label="Founder(s)" hint="Comma-separated"><input value={f.founders} onChange={set('founders')} /></F>
           <F label="Description & focus areas" required>{text('description', 6)}</F>
-          <F label="Research areas" hint="Comma-separated, e.g. NLP, Computer vision, Learning analytics"><input value={f.tags} onChange={set('tags')} /></F>
-          <F label="Skills" hint="What members learn and use, comma-separated: Python, PyTorch, Arduino…"><input value={f.skills} onChange={set('skills')} /></F>
+          <div className="editor-field"><span>Research areas</span>
+            <TagInput label="Research areas" value={tagList} onChange={setTagList} suggestions={tagSuggest} placeholder="Type and press Enter: NLP, Computer vision…" />
+            <small className="field-hint">One chip per area. Pick a suggestion when it fits, so labs can be filtered by it.</small></div>
+          <div className="editor-field"><span>Skills</span>
+            <TagInput label="Skills" value={skillList} onChange={setSkillList} suggestions={skillSuggest} placeholder="Python, PyTorch, Arduino…" /></div>
+          <div className="editor-field"><span>Equipment</span>
+            <TagInput label="Equipment" value={equipList} onChange={setEquipList} suggestions={equipSuggest} placeholder="GPU server, 3D printer, sensors…" /></div>
+          <F label="Direction" hint="The second filter on the Labs page">
+            <select value={direction} onChange={(e) => setDirection(e.target.value)}>
+              <option value="">— choose —</option>
+              {LAB_DIRECTIONS.map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </F>
           <F label="Lab contact e-mail" hint="Public — for students and partners"><input type="email" value={f.contact_email} onChange={set('contact_email')} placeholder="lab@sdu.edu.kz" /></F>
           <fieldset className="editor-field">
             <span>Lab focus <b aria-hidden>*</b></span>
@@ -270,7 +298,6 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
             </div>
           </fieldset>
           <F label="Website"><input value={f.website} onChange={set('website')} placeholder="https://" /></F>
-          <F label="Equipment" hint="Servers, PCs, 3D printers, sensors…">{text('equipment', 2)}</F>
         </Block>}
 
         {tab === 'media' && <Block title="Logo, social media, photos" wide>
@@ -311,7 +338,8 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
             {members.map((m, i) => {
               const locked = !canEditHeads && !!m.id && isHeadRole(lab.lab_members.find((x) => x.id === m.id)?.role ?? m.role);
               return (
-              <div key={m.id ?? `new-${i}`} className="team-row">
+              <div key={m.id ?? `new-${i}`} className={`team-row${isHeadRole(m.role) ? ' is-head' : ''}${m.is_past ? ' is-past' : ''}`}>
+                <span className="team-num" aria-label={`Row ${i + 1}`}>{i + 1}</span>
                 <input aria-label="Full name" placeholder="Full name" value={m.full_name} disabled={locked} onChange={(e) => patchMember(i, { full_name: e.target.value })} />
                 <input aria-label="Title" placeholder="Title / year & major" value={m.title} disabled={locked} onChange={(e) => patchMember(i, { title: e.target.value })} />
                 <select aria-label="Position" value={m.role} disabled={locked} onChange={(e) => patchMember(i, { role: e.target.value as LabRole })}>
@@ -323,12 +351,19 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
                   <input aria-label="SDU e-mail" placeholder="SDU e-mail (private)" value={m.email} onChange={(e) => patchMember(i, { email: e.target.value })} />
                 )}
                 <input aria-label="Contact" placeholder="Phone / Telegram (private)" value={m.contact} onChange={(e) => patchMember(i, { contact: e.target.value })} />
+                {!isHeadRole(m.role) && m.role !== 'former_lead' && (
+                  <span className="team-past">
+                    <label className="check"><input type="checkbox" checked={!!m.is_past} onChange={(e) => patchMember(i, { is_past: e.target.checked })} />Past member</label>
+                    {m.is_past && <input aria-label="Graduation year" placeholder="Graduated (year)" inputMode="numeric" maxLength={4} value={m.graduation_year ?? ''} onChange={(e) => patchMember(i, { graduation_year: e.target.value })} />}
+                  </span>
+                )}
                 <Button type="button" variant="ghost" size="icon" aria-label="Remove" disabled={locked} onClick={() => setMembers((l) => l.filter((_, j) => j !== i))}><Trash2 /></Button>
               </div>
               );
             })}
           </div>
-          <Button type="button" variant="outline" size="sm" onClick={() => setMembers((l) => [...l, { full_name: '', title: '', role: 'member', term: '', email: '', contact: '' }])}><Plus />Add person</Button>
+          <Button type="button" variant="outline" size="sm" onClick={() => setMembers((l) => [...l, { full_name: '', title: '', role: 'member', term: '', email: '', contact: '', is_past: false, graduation_year: '' }])}><Plus />Add person</Button>
+          <p className="small-note">Heads are at the top. Mark people who left as “Past member” and add the year they graduated — they move to “Past team” on the lab page.</p>
         </Block>}
 
         {tab === 'projects' && <Block title="Projects" wide note="Lab projects appear on the Projects page and the Overview. A demo link is optional — share it only if you want to.">
@@ -352,19 +387,27 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
         </Block>}
 
         {tab === 'activities' && <>
+        <Block title="Upcoming activities" note="What the lab plans next — shown on the lab page next to its upcoming events. One per line.">
+          <F label="Upcoming activities">{text('upcoming_activities', 4, 'Spring hackathon — March\nOpen lab day — April')}</F>
+        </Block>
+
         <Block title="Teaching & events">
           <F label="Seminars / workshops (topic — audience)">{text('seminars', 4)}</F>
           <F label="Courses (title — audience — duration)">{text('courses', 3)}</F>
           <F label="Organized events">{text('organized_events', 3)}</F>
-          <F label="Competitions you take part in (one per line)">{text('external_events', 3)}</F>
         </Block>
 
-        <Block title="Achievements, alumni, partners">
+        <Block title="External activities you took part in" note="Archive of competitions, hackathons and conferences outside SDU. Results with teams are added on Events → Competitions.">
+          <F label="External activities (one per line)">{text('external_events', 4)}</F>
+          <F label="Conferences & events in Kazakhstan">{text('events_kz', 2)}</F>
+          <F label="International conferences & events">{text('events_global', 2)}</F>
+        </Block>
+
+        <Block title="Achievements & alumni">
           <F label="Awards & competition wins">{text('awards', 3)}</F>
           <F label="Grants">{text('grants', 2)}</F>
           <F label="Notable alumni">{text('notable_alumni', 2)}</F>
           <F label="SDU alumni who could contribute">{text('alumni_contributors', 2)}</F>
-          <F label="Current partners">{text('current_partners', 2)}</F>
         </Block>
 
         <Block title="Internal · heads & SITAM staff only" wide note="Not shown on the public page.">
@@ -375,7 +418,19 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
             <F label="Support needed from SDU / SITAM">{text('required_support', 3)}</F>
             <F label="Equipment & resource gaps">{text('resource_gaps', 3)}</F>
           </div>
-          <F label="Semester action plan (link)"><input value={f.action_plan_link} onChange={set('action_plan_link')} placeholder="https://drive.google.com/…" /></F>
+          <F label="Academic Year Plan (link)"><input value={f.action_plan_link} onChange={set('action_plan_link')} placeholder="https://drive.google.com/…" /></F>
+        </Block>
+        </>}
+
+        {tab === 'partners' && <>
+        <Block title="Partners" wide note="One partner per line — each one is shown as its own card on the lab page.">
+          <F label="Current partners">{text('current_partners', 5, 'Alash Electronics\nUSTEM Foundation')}</F>
+        </Block>
+        <Block title="Organizations" wide note="Organizations the lab follows or works with.">
+          <div className="editor-grid inner">
+            <F label="In Kazakhstan">{text('orgs_kz', 4)}</F>
+            <F label="International">{text('orgs_global', 4)}</F>
+          </div>
         </Block>
         </>}
       </div>

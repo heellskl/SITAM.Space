@@ -109,13 +109,14 @@ export function LabTeamManager({ lab, onEdit }: { lab: Lab; onEdit: () => void }
           <div className="dash-empty"><strong>No members yet</strong>Add the first person above.</div>
         ) : (
           <table className="team-table">
-            <thead><tr><th>Person</th><th>Position</th><th>Title</th><th aria-label="Actions" /></tr></thead>
+            <thead><tr><th aria-label="Number">#</th><th>Person</th><th>Position</th><th>Title</th><th aria-label="Actions" /></tr></thead>
             <tbody>
-              {team.map((m) => {
+              {team.map((m, i) => {
                 const locked = !canEditHeads && isHead(m.role);
                 const self = !!user && m.user_id === user.id;
                 return (
-                  <tr key={m.id}>
+                  <tr key={m.id} className={isHead(m.role) ? 'is-head' : m.is_past || m.role === 'former_lead' ? 'is-past' : undefined}>
+                    <td className="team-num-cell">{i + 1}</td>
                     <td>
                       <div className="team-person">
                         <span className="avatar avatar-sm" aria-hidden>{initials(m.full_name)}</span>

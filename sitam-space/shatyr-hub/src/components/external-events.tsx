@@ -5,13 +5,13 @@
 
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link } from '@tanstack/react-router';
-import { CalendarPlus, ExternalLink, MapPin, Pencil, Plus, Repeat, Trash2, Trophy, Users, X } from 'lucide-react';
+import { CalendarPlus, ExternalLink, ImagePlus, MapPin, Pencil, Plus, Repeat, Trash2, Trophy, Users, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import {
   EXTERNAL_KIND_LABEL, externalDates, hasStartedExternal, humanError, isUpcomingExternal, useDeleteExternalEvent, useEventSeries,
-  useExternalEvents, useLabs, useProjects, useRemoveParticipation, useSaveExternalEvent, useSaveParticipation,
+  uploadLabImage, useExternalEvents, useLabs, useProjects, useRemoveParticipation, useSaveExternalEvent, useSaveParticipation, useSetPoster,
   type ExternalEntry, type ExternalEvent, type ExternalEventDraft, type ExternalKind, type ParticipantRole, type ParticipationDraft,
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
@@ -20,7 +20,7 @@ const KINDS = Object.keys(EXTERNAL_KIND_LABEL) as ExternalKind[];
 const RESULT_PRESETS = ['1st place', '2nd place', '3rd place', 'Runner-up', 'Finalist', 'Special prize', 'Participated'];
 
 /** Who may add events / manage a lab's entry — mirrors the database, for buttons only. */
-function useExternalRights() {
+export function useExternalRights() {
   const { user, caps } = useAuth();
   const myLabs = caps.isAdmin ? null : caps.managedLabs; // null = coordinator (any lab)
   return {
@@ -49,7 +49,7 @@ function EntryRow({ event, entry, onEdit }: { event: ExternalEvent; entry: Exter
   return (
     <li className="xev-entry">
       <div className="xev-entry-head">
-        {entry.labs ? <Link to="/labs" search={{ lab: entry.labs.slug }} className="pill pill-live">{entry.labs.name}</Link> : <span className="pill">Lab</span>}
+        {entry.labs ? <Link to="/labs/$slug" params={{ slug: entry.labs.slug }} className="pill pill-live">{entry.labs.name}</Link> : <span className="pill">Lab</span>}
         {entry.result ? <span className="xev-result"><Trophy size={13} />{entry.result}</span> : <span className="xev-status">{upcoming ? 'Participating' : 'Took part'}</span>}
         {onEdit && <button type="button" className="link-button xev-edit" onClick={onEdit}><Pencil size={12} />{upcoming ? 'Edit team' : entry.result ? 'Edit result' : 'Add result'}</button>}
       </div>
@@ -64,7 +64,7 @@ function EntryRow({ event, entry, onEdit }: { event: ExternalEvent; entry: Exter
   );
 }
 
-function ExternalCard({ event, editions, onEditEvent, onParticipate }: {
+export function ExternalCard({ event, editions, onEditEvent, onParticipate }: {
   event: ExternalEvent; editions: ExternalEvent[]; onEditEvent?: (() => void) | undefined; onParticipate: (labId?: string) => void;
 }) {
   const rights = useExternalRights();
@@ -152,11 +152,71 @@ export function ExternalEventsBoard({ query = '' }: { query?: string }) {
   );
 }
 
+/* ───────────── posters ───────────── */
+/** Picks a poster image (PNG/JPG/WebP ≤ 10 MB) and shows a preview; the parent uploads it on save. */
+export function PosterPicker({ current, file, onFile, onClear }: { current: string | null | undefined; file: File | null; onFile: (f: File | null) => void; onClear?: (() => void) | undefined }) {
+  const preview = useMemo(() => (file ? URL.createObjectURL(file) : current ?? null), [file, current]);
+  useEffect(() => () => { if (file && preview) URL.revokeObjectURL(preview); }, [file, preview]);
+  return (
+    <div className="poster-pick">
+      <span className="poster-pick-thumb">{preview ? <img src={preview} alt="Poster preview" /> : <ImagePlus size={20} />}</span>
+      <div>
+        <span className="file-pick file-picked">
+          <ImagePlus size={16} /><span>{preview ? 'Replace poster' : 'Add a poster (PNG/JPG/WebP, ≤ 10 MB)'}</span>
+          <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(e) => {
+            const f = e.target.files?.[0] ?? null;
+            if (f && f.size > 10 * 1024 * 1024) { toast.error('The poster is larger than 10 MB'); return; }
+            onFile(f);
+          }} />
+        </span>
+        {(preview && onClear) && <button type="button" className="link-button" onClick={() => { onFile(null); onClear(); }}>Remove poster</button>}
+        <p className="small-note">Portrait 4:5 looks best. Without a poster the card gets a designed cover with the date.</p>
+      </div>
+    </div>
+  );
+}
+
+/** Upload into the storage folder the person may write to (their lab, or their own folder for the coordinator). */
+export async function uploadPoster(file: File, folder: string) {
+  return uploadLabImage(folder, file, 'posters');
+}
+
+/** An external event opened from the Events feed: details, labs taking part, results, and the head's actions. */
+export function ExternalEventSheet({ event, all, onClose }: { event: ExternalEvent; all: ExternalEvent[]; onClose: () => void }) {
+  const rights = useExternalRights();
+  const [editing, setEditing] = useState(false);
+  const [joining, setJoining] = useState<{ labId?: string | undefined } | null>(null);
+  const fresh = all.find((x) => x.id === event.id) ?? event; // follows saves while open
+  return (
+    <>
+      <Dialog open={!editing && !joining} onOpenChange={(o) => !o && onClose()}>
+        <DialogContent className="hub-dialog wide xev-sheet">
+          <DialogTitle className="sr-only">{fresh.title}</DialogTitle>
+          <DialogDescription className="sr-only">External event details</DialogDescription>
+          {fresh.poster_url && <img className="xev-sheet-poster" src={fresh.poster_url} alt="" />}
+          <ExternalCard
+            event={fresh}
+            editions={fresh.series_id ? all.filter((x) => x.series_id === fresh.series_id && x.id !== fresh.id) : []}
+            onEditEvent={rights.canEditEvent(fresh) ? () => setEditing(true) : undefined}
+            onParticipate={(labId) => setJoining({ labId })}
+          />
+        </DialogContent>
+      </Dialog>
+      {editing && <ExternalEventDialog event={fresh} onClose={() => setEditing(false)} />}
+      {joining && <ParticipationDialog event={fresh} labId={joining.labId} onClose={() => setJoining(null)} />}
+    </>
+  );
+}
+
 /* ───────────── add / edit an external event ───────────── */
 export function ExternalEventDialog({ event, onClose }: { event: ExternalEvent | null; onClose: () => void }) {
   const save = useSaveExternalEvent();
   const del = useDeleteExternalEvent();
   const series = useEventSeries();
+  const setPoster = useSetPoster();
+  const { user, caps } = useAuth();
+  const [poster, setPosterFile] = useState<File | null>(null);
+  const [clearPoster, setClearPoster] = useState(false);
   const [d, setD] = useState<ExternalEventDraft>(() => ({
     id: event?.id ?? null, kind: event?.kind ?? 'hackathon', title: event?.title ?? '', organizer: event?.organizer ?? '',
     location: event?.location ?? '', url: event?.url ?? '', starts_on: event?.starts_on ?? '', ends_on: event?.ends_on ?? '',
@@ -171,7 +231,14 @@ export function ExternalEventDialog({ event, onClose }: { event: ExternalEvent |
     if (!d.starts_on) return setError('Choose the start date.');
     if (d.url.trim() && !/^https?:\/\//i.test(d.url.trim())) return setError('The link must start with https://');
     try {
-      await save.mutateAsync(d);
+      const id = await save.mutateAsync(d);
+      if (poster) {
+        const folder = caps.managedLabs[0]?.id ?? user?.id ?? '';
+        const url = await uploadPoster(poster, folder);
+        await setPoster.mutateAsync({ kind: 'external', id, url });
+      } else if (clearPoster && event?.poster_url) {
+        await setPoster.mutateAsync({ kind: 'external', id, url: null });
+      }
       toast.success(event ? 'Event updated' : 'Event added', { description: d.title });
       onClose();
     } catch (err) {
@@ -200,6 +267,9 @@ export function ExternalEventDialog({ event, onClose }: { event: ExternalEvent |
           </div>
           <label>Website<input value={d.url} onChange={(e) => set('url', e.target.value)} placeholder="https://" /></label>
           <label>Description<textarea rows={2} maxLength={2000} value={d.description} onChange={(e) => set('description', e.target.value)} /></label>
+          <fieldset><legend>Poster</legend>
+            <PosterPicker current={clearPoster ? null : event?.poster_url} file={poster} onFile={setPosterFile} onClear={() => setClearPoster(true)} />
+          </fieldset>
           <label className="check">
             <input type="checkbox" checked={d.annual} onChange={(e) => set('annual', e.target.checked)} />
             Annual event — this is one edition of a yearly series
@@ -214,7 +284,7 @@ export function ExternalEventDialog({ event, onClose }: { event: ExternalEvent |
           )}
           {error && <p className="form-alert" role="alert">{error}</p>}
           <div className="dialog-actions wrap">
-            <Button type="submit" disabled={save.isPending}>{save.isPending ? 'Saving…' : event ? 'Save' : 'Add event'}</Button>
+            <Button type="submit" disabled={save.isPending || setPoster.isPending}>{save.isPending || setPoster.isPending ? 'Saving…' : event ? 'Save' : 'Add event'}</Button>
             {event && (
               <Button type="button" variant="ghost" disabled={del.isPending} onClick={() => {
                 if (!window.confirm(`Delete “${event.title}” with all participations?`)) return;

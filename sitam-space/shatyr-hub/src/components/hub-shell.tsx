@@ -10,16 +10,17 @@ import { BRAND } from '@/lib/sitam-data';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
 // Sidebar order requested for the leader-first platform.
 export const navigation = [
-  { to: '/', label: 'Home', icon: House },
-  { to: '/labs', label: 'Labs', icon: FlaskConical },
-  { to: '/events', label: 'Events', icon: CalendarDays },
-  { to: '/projects', label: 'Projects', icon: Rocket },
-  { to: '/opportunities', label: 'Opportunities', icon: Briefcase },
-  { to: '/research', label: 'Research', icon: BookOpen },
-  { to: '/faq', label: 'FAQ', icon: CircleHelp },
+  { to: '/', label: 'Home', icon: House, hint: 'About SITAM SPACE and the school in numbers' },
+  { to: '/labs', label: 'Labs', icon: FlaskConical, hint: 'All SITAM laboratories, their teams and projects' },
+  { to: '/events', label: 'Events', icon: CalendarDays, hint: 'Industry and research events, competitions and hackathons' },
+  { to: '/projects', label: 'Projects', icon: Rocket, hint: 'What the labs build and research' },
+  { to: '/opportunities', label: 'Opportunities', icon: Briefcase, hint: 'Vacancies, internships and lab cases to apply for' },
+  { to: '/research', label: 'Research', icon: BookOpen, hint: 'Publications and researchers of SITAM (Scopus)' },
+  { to: '/faq', label: 'FAQ', icon: CircleHelp, hint: 'Answers to common questions' },
 ] as const;
 
 const COLLAPSE_KEY = 'sitam-sidebar-collapsed';
@@ -30,7 +31,7 @@ function Logo({ compact }: { compact?: boolean }) {
       <img className="brand-emblem" src="/sitam-emblem.png" alt="" width={28} height={34} />
       {!compact && (
         <span className="brand-name">
-          SITAM<span className="brand-dot">.</span>SPACE
+          SITAM SPACE
           <small>{BRAND.tagline}</small>
         </span>
       )}
@@ -38,15 +39,23 @@ function Logo({ compact }: { compact?: boolean }) {
   );
 }
 
-function SideLink({ to, label, icon: Icon, onNavigate, badge, exact }: {
-  to: string; label: string; icon: typeof House; onNavigate?: (() => void) | undefined; badge?: number | undefined; exact?: boolean | undefined;
+function SideLink({ to, label, icon: Icon, onNavigate, badge, exact, hint }: {
+  to: string; label: string; icon: typeof House; onNavigate?: (() => void) | undefined; badge?: number | undefined; exact?: boolean | undefined; hint?: string | undefined;
 }) {
-  return (
-    <Link to={to} onClick={onNavigate} activeOptions={{ exact: !!exact }} activeProps={{ className: 'side-active' }} className="side-link" title={label}>
+  const link = (
+    <Link to={to} onClick={onNavigate} activeOptions={{ exact: !!exact }} activeProps={{ className: 'side-active' }} className="side-link" aria-label={hint ? `${label} — ${hint}` : label}>
       <Icon size={18} aria-hidden />
       <span className="side-label">{label}</span>
       {!!badge && <span className="side-count" aria-label={`${badge} waiting`}>{badge}</span>}
     </Link>
+  );
+  if (!hint) return link;
+  // hover / keyboard focus: a short description of the section, to the right of the menu
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{link}</TooltipTrigger>
+      <TooltipContent side="right" sideOffset={10} className="side-tip"><strong>{label}</strong>{hint}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -60,19 +69,19 @@ function SidebarBody({ collapsed, onNavigate }: { collapsed: boolean; onNavigate
   const waiting = caps.pendingModeration + caps.pendingLabHeads;
 
   return (
-    <>
+    <TooltipProvider delayDuration={250} skipDelayDuration={100}>
       <nav className="side-nav" aria-label="Main navigation">
         {navigation.map((n) => (
-          <SideLink key={n.to} to={n.to} label={n.label} icon={n.icon} exact={n.to === '/'} onNavigate={onNavigate} />
+          <SideLink key={n.to} to={n.to} label={n.label} icon={n.icon} hint={n.hint} exact={n.to === '/'} onNavigate={onNavigate} />
         ))}
       </nav>
 
       <div className="side-account" aria-label="Account">
         {loading ? null : user && profile ? (
           <>
-            {caps.isCoordinator && <SideLink to="/admin" label="Admin" icon={ShieldCheck} onNavigate={onNavigate} />}
-            {canManage && <SideLink to="/manage" label="Manage" icon={LayoutDashboard} badge={waiting} onNavigate={onNavigate} />}
-            <SideLink to="/profile" label="Profile & settings" icon={UserRound} onNavigate={onNavigate} />
+            {caps.isCoordinator && <SideLink to="/admin" label="Admin" icon={ShieldCheck} hint="Labs and their heads (coordinator only)" onNavigate={onNavigate} />}
+            {canManage && <SideLink to="/manage" label="Manage" icon={LayoutDashboard} badge={waiting} hint="Applications, submissions and your listings" onNavigate={onNavigate} />}
+            <SideLink to="/profile" label="Profile & settings" icon={UserRound} hint="Your details, CV, tickets and applications" onNavigate={onNavigate} />
             <button type="button" className="side-link" onClick={() => { onNavigate?.(); void signOut(); }} title="Log out">
               <LogOut size={18} aria-hidden /><span className="side-label">Log out</span>
             </button>
@@ -90,7 +99,7 @@ function SidebarBody({ collapsed, onNavigate }: { collapsed: boolean; onNavigate
           </>
         )}
       </div>
-    </>
+    </TooltipProvider>
   );
 }
 
@@ -160,7 +169,7 @@ export function HubFooter() {
   return (
     <footer className="site-footer">
       <div className="container footer-inner">
-        <Link to="/" className="footer-brand"><img className="brand-emblem" src="/sitam-emblem.png" alt="" width={24} height={30} /><span className="footer-word">SITAM<span className="brand-dot">.</span>SPACE</span></Link>
+        <Link to="/" className="footer-brand"><img className="brand-emblem" src="/sitam-emblem.png" alt="" width={24} height={30} /><span className="footer-word">SITAM SPACE</span></Link>
         <p>{BRAND.contactLabel}: <a href={gmailCompose(BRAND.contactEmail)} target="_blank" rel="noopener noreferrer"><Mail size={12} className="inline" /> {BRAND.contactEmail}</a></p>
         <span>© 2026 SITAM SPACE · SDU University</span>
       </div>

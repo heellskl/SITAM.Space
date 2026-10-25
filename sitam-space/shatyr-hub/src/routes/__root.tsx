@@ -84,10 +84,10 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "SITAM SPACE — Industry & Research Ecosystem" },
+      { title: "SITAM SPACE — Innovation Ecosystem" },
       { name: "description", content: "SITAM SPACE — labs, projects, opportunities, events and research publications of the School of Information Technologies and Applied Mathematics, SDU University." },
       
-      { property: "og:title", content: "SITAM SPACE — Industry & Research Ecosystem" },
+      { property: "og:title", content: "SITAM SPACE — Innovation Ecosystem" },
       { property: "og:description", content: "Science, Industry & Innovation ecosystem at SDU: 20+ labs, projects, opportunities and weekly events." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },

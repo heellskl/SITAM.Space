@@ -9,7 +9,7 @@ import { useAuth } from '@/lib/auth';
 import { pageHead } from '@/lib/hub-data';
 
 export const Route = createFileRoute('/events/')({
-  head: () => pageHead('Events', 'Research Days and Industrial Days at SDU.'),
+  head: () => pageHead('Events', 'Industry and research events, competitions and hackathons at SDU.'),
   component: Events,
 });
 

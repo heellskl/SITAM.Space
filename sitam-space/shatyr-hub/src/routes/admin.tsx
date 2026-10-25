@@ -74,7 +74,7 @@ function Admin() {
           return (
             <div key={l.id} className="admin-lab">
               <div className="admin-lab-head">
-                <strong><Link to="/labs" search={{ lab: l.slug }}>{l.name}</Link> <small className="small-note">{l.focus.join(' · ')}</small></strong>
+                <strong><Link to="/labs/$slug" params={{ slug: l.slug }}>{l.name}</Link> <small className="small-note">{l.focus.join(' · ')}</small></strong>
                 <Button asChild size="sm" variant="outline"><Link to="/labs/$slug" params={{ slug: l.slug }} search={{ edit: true }}><Pencil />Edit</Link></Button>
                 <Button size="sm" variant="ghost" onClick={() => setToDelete(l)} aria-label={`Delete ${l.name}`}><Trash2 /></Button>
               </div>

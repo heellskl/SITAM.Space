@@ -50,3 +50,12 @@
 - Lab form (`lab-editor.tsx`): 5 tabs — About · Logo & links · Team · Projects · Activities & partners (incl. Internal).
 - Events → "Competitions & Hackathons" tab: `components/external-events.tsx` (ExternalEventsBoard, ExternalEventDialog, ParticipationDialog, LabCompetitions on the lab detail).
 - Labs data: edit `data/labs.json` (21 labs, explicit `heads`) and `data/professors.json` (Scopus), then regenerate with `scripts/build-seed.mjs`.
+
+## SITAM SPACE v11 — current rules (override older notes above)
+- Logo text "SITAM SPACE" (no dot), tagline "Innovation Ecosystem"; font via `--font-logo` in styles.css (options were shown to the user: Space Grotesk / Sora / Unbounded / Syne).
+- Sidebar items have tooltips (`hint` in `navigation`, hub-shell.tsx).
+- Events (`event-board.tsx`): one feed of SDU events + external events. Filters Type (All · Industry · Research · Competitions) and Where (All · Internal = SDU events · External = external_events). List (poster cards) or Calendar. Past events in a "Past Events" section at the bottom. Posters: `events.poster_url` / `external_events.poster_url` via `set_event_poster` / `set_external_event_poster`; upload to lab-assets/{labId or user id}/posters. No "Days" wording anywhere.
+- Labs: a card opens `/labs/$slug` (no inline detail; `/labs?lab=` redirects). Filters Focus (Industry & Commercial Projects · Research · Education) and Direction (`labs.direction`, LAB_DIRECTIONS).
+- Lab page: research areas / equipment / skills as chips; answers as separate cards; heads highlighted; "Past team" = former heads + `lab_members.is_past` with `graduation_year`; "Upcoming activities" (`labs.upcoming_activities` + upcoming events); "External activities you took part in". Removed: Looking to work with, Visit the lab, tour, live demos.
+- Lab form: 6 tabs — About · Logo & links · Team · Projects · Activities · Partners; chips input with suggestions from other labs (`tag-input.tsx`); numbered team rows; "Academic Year Plan".
+- Database: existing → `supabase/update-to-v11.sql`; empty → `supabase/setup-new-database.sql`. Both end with the access fix (`fix-permissions.sql`).

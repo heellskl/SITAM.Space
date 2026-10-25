@@ -2,7 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { gmailCompose } from '@/lib/utils';
 import { Link } from '@tanstack/react-router';
 import {
-  ArrowLeft, ArrowUpRight, Award, Bookmark, BookmarkCheck, BriefcaseBusiness, CalendarDays, ExternalLink, FlaskConical,
+  ArrowLeft, ArrowUpRight, Award, Bookmark, BookmarkCheck, BriefcaseBusiness, CalendarDays, Crown, ExternalLink, FlaskConical, History,
   CalendarPlus, GraduationCap, Inbox, Landmark, Lock, Mail, MapPin, Pencil, Plus, Rocket, Trophy, UserCog, Users,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -10,10 +10,11 @@ import { LabLogo, useSavedLabs } from '@/components/lab-browser';
 import { ProjectCard } from '@/components/projects-showcase';
 import { EventDialog, ListingDialog } from '@/components/manage-panels';
 import {
-  CATEGORY_LABEL, LAB_POSITION_LABEL, LAB_ROLE_LABEL, LAB_ROLE_ORDER, eventDate, opportunityLabel, useEvents, useInbox, useLabInternal, useOpportunities, usePeople, useProjects,
+  CATEGORY_LABEL, HEAD_ROLES, LAB_POSITION_LABEL, useExternalEvents, LAB_ROLE_LABEL, LAB_ROLE_ORDER, eventDate, opportunityLabel, useEvents, useInbox, useLabInternal, useOpportunities, usePeople, useProjects,
   type Lab, type LabRole,
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { LabCompetitions } from '@/components/external-events';
 
 const TEAM_ORDER: LabRole[] = LAB_ROLE_ORDER.filter((r) => r !== 'former_lead');
 
@@ -51,17 +52,20 @@ export function Chips({ items, title }: { items: string[]; title?: string }) {
   );
 }
 
-/** What a visitor sees in the lab: the tour, live demos and how ready the demo stand is. */
-export function VisitInfo({ lab }: { lab: Pick<Lab, 'visitor_walkthrough' | 'live_demo' | 'demo_stand'> }) {
-  const same = lab.live_demo && lab.live_demo === lab.visitor_walkthrough;
+/** Free-text answers as separate cards (one card per item). */
+export function Cards({ items, title }: { items: string[]; title?: string | undefined }) {
+  if (!items.length) return null;
   return (
     <>
-      {lab.visitor_walkthrough && <><h4 className="sub-title">Tour for visitors</h4><p className="lab-text pre-line">{lab.visitor_walkthrough}</p></>}
-      {lab.live_demo && !same && <><h4 className="sub-title">Live demos</h4><p className="lab-text pre-line">{lab.live_demo}</p></>}
-      {lab.demo_stand && <p className="small-note mt-2">{lab.demo_stand}</p>}
+      {title && <h4 className="sub-title">{title}</h4>}
+      <ul className="item-cards">{items.map((x) => <li key={x}>{x}</li>)}</ul>
     </>
   );
 }
+
+/** "a, b; c\nd" → ['a', 'b', 'c', 'd'] — for answers kept as one text field (equipment). */
+export const splitItems = (text: string | null | undefined) =>
+  (text ?? '').split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean);
 
 export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void; onTeam: () => void }) {
   const { user, caps } = useAuth();
@@ -77,6 +81,8 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
   const { data: opps } = useOpportunities();
   const { data: eventsData } = useEvents();
   const { saved, toggle } = useSavedLabs();
+  const ext = useExternalEvents();
+  const competitions = (ext.data ?? []).filter((e) => e.external_event_labs.some((x) => x.lab_id === lab.id)).length;
 
   const projects = (projectsData ?? []).filter((p) => p.lab_id === lab.id);
   const cases = (opps ?? []).filter((o) => o.opportunity_hosts.some((h) => h.lab_id === lab.id || (h.project_id && projects.some((p) => p.id === h.project_id))));
@@ -84,11 +90,12 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
   const upcoming = events.filter((e) => new Date(e.starts_at).getTime() > Date.now());
   const pending = (inbox.data ?? []).filter((a) => a.status === 'submitted' && cases.some((c) => c.id === a.opportunity_id)).length;
 
+  // current team by position (heads first); past members (and former heads) go to their own block
   const team = useMemo(
-    () => TEAM_ORDER.map((role) => ({ role, people: lab.lab_members.filter((m) => m.role === role).sort((a, b) => a.sort_order - b.sort_order) })).filter((g) => g.people.length),
+    () => TEAM_ORDER.map((role) => ({ role, people: lab.lab_members.filter((m) => m.role === role && !m.is_past).sort((a, b) => a.sort_order - b.sort_order) })).filter((g) => g.people.length),
     [lab.lab_members],
   );
-  const formerLeads = lab.lab_members.filter((m) => m.role === 'former_lead');
+  const past = lab.lab_members.filter((m) => m.role === 'former_lead' || m.is_past).sort((a, b) => (b.graduation_year ?? 0) - (a.graduation_year ?? 0) || a.sort_order - b.sort_order);
 
   return (
     <main className="container content-page lab-page">
@@ -139,14 +146,16 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
               {lab.founders.length > 0 && <div><dt>Founder{lab.founders.length > 1 ? 's' : ''}</dt><dd>{lab.founders.join(', ')}</dd></div>}
               {lab.year_founded && <div><dt>Founded</dt><dd>{lab.year_founded}</dd></div>}
               {lab.location && <div><dt>Location</dt><dd><MapPin size={13} />{lab.location}</dd></div>}
+              {lab.direction && <div><dt>Direction</dt><dd>{lab.direction}</dd></div>}
               {lab.website && <div><dt>Website</dt><dd><a href={lab.website} target="_blank" rel="noopener noreferrer">{lab.website.replace(/^https?:\/\//, '').replace(/\/$/, '')}</a></dd></div>}
               {lab.contact_email && <div><dt>Contact</dt><dd><a href={gmailCompose(lab.contact_email)} target="_blank" rel="noopener noreferrer"><Mail size={13} className="inline" /> {lab.contact_email}</a></dd></div>}
             </dl>
             <Chips title="Research areas" items={lab.tags} />
+            <Chips title="Equipment" items={splitItems(lab.equipment)} />
             <Chips title="Skills" items={lab.skills ?? []} />
             {lab.social_links.length > 0 && (
               <div className="social-row">
-                {lab.social_links.map((s) => <Button key={s.url} asChild size="sm" variant="outline"><a href={s.url} target="_blank" rel="noopener noreferrer"><ExternalLink />{s.platform}</a></Button>)}
+                {lab.social_links.map((x) => <Button key={x.url} asChild size="sm" variant="outline"><a href={x.url} target="_blank" rel="noopener noreferrer"><ExternalLink />{x.platform}</a></Button>)}
               </div>
             )}
           </Section>
@@ -170,37 +179,35 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
             <p className="small-note mt-2">{CATEGORY_LABEL.lab}s and {CATEGORY_LABEL.research.toLowerCase()}s are how students join the lab.</p>
           </section>
 
-          <Section title="Achievements" icon={Award} show={lab.awards.length > 0 || lab.grants.length > 0}>
-            <List title="Awards & competitions" items={lab.awards} />
-            <List title="Grants" items={lab.grants} />
-          </Section>
-
-          <Section title="Teaching & events" icon={GraduationCap} show={[lab.seminars, lab.courses, lab.organized_events].some((a) => a.length) || upcoming.length > 0}>
+          <Section title="Upcoming activities" icon={CalendarDays} show={upcoming.length > 0 || (lab.upcoming_activities ?? []).length > 0}>
             {upcoming.length > 0 && (
-              <>
-                <h4 className="sub-title">Upcoming</h4>
-                <ul className="rows">{upcoming.map((e) => <li key={e.id}><div><strong>{e.title}</strong><small>{eventDate(e.starts_at).long} · {eventDate(e.starts_at).time} · Room {e.room}</small></div><Button asChild size="sm" variant="outline"><Link to="/events/$eventId" params={{ eventId: e.id }}>Details</Link></Button></li>)}</ul>
-              </>
+              <ul className="rows">{upcoming.map((e) => <li key={e.id}><div><strong>{e.title}</strong><small>{eventDate(e.starts_at).long} · {eventDate(e.starts_at).time} · Room {e.room}</small></div><Button asChild size="sm" variant="outline"><Link to="/events/$eventId" params={{ eventId: e.id }}>Details</Link></Button></li>)}</ul>
             )}
-            <List title="Seminars & workshops" items={lab.seminars} />
-            <List title="Courses" items={lab.courses} />
-            <List title="Organized events" items={lab.organized_events} />
+            <Cards items={lab.upcoming_activities ?? []} />
           </Section>
 
-          <Section title="Competitions" icon={Trophy} show={lab.external_events.length > 0}>
-            <Chips title="Competitions we take part in" items={lab.external_events} />
+          <Section title="Achievements" icon={Award} show={lab.awards.length > 0 || lab.grants.length > 0}>
+            <Cards title="Awards & competition wins" items={lab.awards} />
+            <Cards title="Grants" items={lab.grants} />
+          </Section>
+
+          <Section title="Teaching & events" icon={GraduationCap} show={[lab.seminars, lab.courses, lab.organized_events].some((a) => a.length)}>
+            <Cards title="Seminars & workshops" items={lab.seminars} />
+            <Cards title="Courses" items={lab.courses} />
+            <Cards title="Organized events" items={lab.organized_events} />
+          </Section>
+
+          <Section title="External activities you took part in" icon={Trophy} show={lab.external_events.length > 0 || competitions > 0}>
+            <LabCompetitions labId={lab.id} />
+            <Cards title={competitions > 0 ? 'Also' : undefined} items={lab.external_events} />
           </Section>
 
           <Section title="Community & conferences" icon={Landmark}
             show={[lab.orgs_kz, lab.orgs_global, lab.events_kz, lab.events_global].some((a) => a.length > 0)}>
-            <List title="Organizations in Kazakhstan" items={lab.orgs_kz} />
-            <List title="International organizations" items={lab.orgs_global} />
-            <List title="Events in Kazakhstan" items={lab.events_kz} />
-            <List title="International events" items={lab.events_global} />
-          </Section>
-
-          <Section title="Visit the lab" icon={MapPin} show={!!(lab.visitor_walkthrough || lab.live_demo || lab.demo_stand)}>
-            <VisitInfo lab={lab} />
+            <Cards title="Organizations in Kazakhstan" items={lab.orgs_kz} />
+            <Cards title="International organizations" items={lab.orgs_global} />
+            <Cards title="Events in Kazakhstan" items={lab.events_kz} />
+            <Cards title="International events" items={lab.events_global} />
           </Section>
 
           <Section title="Photos" icon={CalendarDays} show={lab.photo_urls.length > 0 || !!lab.photo_archive_link}>
@@ -214,11 +221,11 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
             <Section title="Internal — lab heads & SITAM staff only" icon={Lock}>
               {!internal.data ? <p className="small-note">Nothing filled in yet.</p> : (
                 <>
-                  <List title="Goals for the coming year" items={internal.data.goals} />
-                  <List title="Support needed from SDU / SITAM" items={internal.data.required_support} />
-                  <List title="Equipment & resource gaps" items={internal.data.resource_gaps} />
-                  <List title="Guest presenters" items={internal.data.presenters} />
-                  {internal.data.action_plan_link && <Button asChild size="sm" variant="outline" className="mt-3"><a href={internal.data.action_plan_link} target="_blank" rel="noopener noreferrer"><ExternalLink />Semester action plan</a></Button>}
+                  <Cards title="Goals for the coming year" items={internal.data.goals} />
+                  <Cards title="Support needed from SDU / SITAM" items={internal.data.required_support} />
+                  <Cards title="Equipment & resource gaps" items={internal.data.resource_gaps} />
+                  <Cards title="Guest presenters" items={internal.data.presenters} />
+                  {internal.data.action_plan_link && <Button asChild size="sm" variant="outline" className="mt-3"><a href={internal.data.action_plan_link} target="_blank" rel="noopener noreferrer"><ExternalLink />Academic Year Plan</a></Button>}
                 </>
               )}
             </Section>
@@ -228,8 +235,8 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
         <aside className="lab-aside">
           <Section title="Team" icon={Users}>
             {team.map((g) => (
-              <div key={g.role} className="team-group">
-                <h4 className="sub-title">{LAB_ROLE_LABEL[g.role]}</h4>
+              <div key={g.role} className={HEAD_ROLES.includes(g.role) ? 'team-group is-heads' : 'team-group'}>
+                <h4 className="sub-title">{HEAD_ROLES.includes(g.role) ? <><Crown size={12} className="inline" /> {LAB_ROLE_LABEL[g.role]}</> : LAB_ROLE_LABEL[g.role]}</h4>
                 <ul className="team-list">
                   {g.people.map((m) => (
                     <li key={m.id}>
@@ -244,18 +251,29 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
                 </ul>
               </div>
             ))}
-            {formerLeads.length > 0 && <Chips title="Former leads" items={formerLeads.map((m) => `${m.full_name}${m.term ? ` (${m.term})` : ''}`)} />}
           </Section>
 
-          <Section title="Partners" icon={Landmark} show={lab.current_partners.length > 0 || lab.prospective_partners.length > 0}>
-            <List title="Current" items={lab.current_partners} />
-            <List title="Looking to work with" items={lab.prospective_partners} />
-            <Button asChild size="sm" variant="outline" className="mt-3"><Link to="/partners">Partner with this lab<ArrowUpRight /></Link></Button>
+          <Section title="Past team" icon={History} show={past.length > 0}>
+            <ul className="past-team">
+              {past.map((m) => (
+                <li key={m.id}>
+                  <span>{m.full_name}</span>
+                  <small>
+                    {m.role === 'former_lead' ? `Former head${m.term ? ` · ${m.term}` : ''}` : LAB_POSITION_LABEL[m.role]}
+                    {m.graduation_year ? ` · Class of ${m.graduation_year}` : ''}
+                  </small>
+                </li>
+              ))}
+            </ul>
+          </Section>
+
+          <Section title="Partners" icon={Landmark} show={lab.current_partners.length > 0}>
+            <Cards items={lab.current_partners} />
           </Section>
 
           <Section title="Alumni" icon={GraduationCap} show={lab.notable_alumni.length > 0 || lab.alumni_contributors.length > 0}>
-            <List title="Notable alumni" items={lab.notable_alumni} />
-            <List title="Alumni who can help" items={lab.alumni_contributors} />
+            <Cards title="Notable alumni" items={lab.notable_alumni} />
+            <Cards title="Alumni who can help" items={lab.alumni_contributors} />
           </Section>
 
           <p className="small-note">Updated {new Date(lab.updated_at).toLocaleDateString('en-GB')}</p>

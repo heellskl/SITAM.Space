@@ -374,7 +374,7 @@ export function EventForm({ preset, onDone }: { preset?: HostSel; onDone?: () =>
 
   return (
     <form className="partner-form auth-form" onSubmit={submit} noValidate>
-      <label>Type<select name="kind" defaultValue={hosts.labs.length ? 'research' : 'industrial'}><option value="research">Research Day</option><option value="industrial">Industrial Day</option></select></label>
+      <label>Type<select name="kind" defaultValue={hosts.labs.length ? 'research' : 'industrial'}><option value="research">Research</option><option value="industrial">Industry</option></select></label>
       <HostPicker value={hostSel} onChange={setHostSel} />
       <label>Title<input name="title" maxLength={160} /></label>
       <label>Description<textarea name="description" rows={2} maxLength={3000} /></label>
@@ -402,7 +402,7 @@ export function EventDialog({ preset, onClose }: { preset?: HostSel; onClose: ()
       <DialogContent className="hub-dialog wide">
         <span className="eyebrow">Event</span>
         <DialogTitle>New event</DialogTitle>
-        <DialogDescription>Research Days: Tuesdays 17:00 · Industrial Days: Thursdays 17:00 · Room C1.2. It appears on the Events page right away.</DialogDescription>
+        <DialogDescription>Research: Tuesdays 17:00 · Industry: Thursdays 17:00 · Room C1.2. It appears on the Events page right away.</DialogDescription>
         <EventForm {...(preset ? { preset } : {})} onDone={onClose} />
       </DialogContent>
     </Dialog>
@@ -416,7 +416,7 @@ export function EventsPanel() {
   return (
     <section className="panel">
       <h3 className="panel-title"><CalendarPlus size={15} />Publish an event</h3>
-      <p className="small-note mb-3">Research Days: Tuesdays 17:00. Industrial Days: Thursdays 17:00. Room C1.2. A lab can co-host with a company or one of its projects.</p>
+      <p className="small-note mb-3">Research: Tuesdays 17:00. Industry: Thursdays 17:00. Room C1.2. A lab can co-host with a company or one of its projects.</p>
       <EventForm />
     </section>
   );

@@ -38,6 +38,9 @@ export type LabMember = {
   term: string | null;
   can_edit: boolean;
   sort_order: number;
+  /** v11: a past team member, with the year they graduated */
+  is_past?: boolean;
+  graduation_year?: number | null;
 };
 
 export type SocialLink = { platform: string; url: string };
@@ -81,6 +84,9 @@ export type Lab = {
   skills?: string[];
   contact_email?: string | null;
   setup_completed_at?: string | null;
+  /** v11: second lab filter, and what the lab plans next */
+  direction?: string | null;
+  upcoming_activities?: string[];
   updated_at: string;
   lab_members: LabMember[];
 };
@@ -168,6 +174,7 @@ export type SitamEvent = {
   capacity: number;
   organizer_id: string | null;
   reported_attendance: number | null;
+  poster_url?: string | null;
   event_hosts: Host[];
   registered: number;
   attended: number;
@@ -352,7 +359,7 @@ const HOSTS = `${EVENT_HOSTS}, person_id, person_name, person_username`;
 
 /* ───────────────────────────── Labs ───────────────────────────── */
 
-const LAB_SELECT = '*, lab_members(id, lab_id, user_id, full_name, title, role, term, can_edit, sort_order)';
+const LAB_SELECT = '*, lab_members(id, lab_id, user_id, full_name, title, role, term, can_edit, sort_order, is_past, graduation_year)';
 
 export function useLabs() {
   return useQuery({ queryKey: qk.labs, staleTime: 60_000, queryFn: () => rows<Lab[]>(db.from('labs').select(LAB_SELECT).order('name')) });
@@ -559,7 +566,7 @@ export function labSetupSteps(lab: Lab) {
     { key: 'team', label: 'Team (2+ people)', done: team.length >= 2 },
   ] as const;
 }
-export type MemberDraft = { id?: string; full_name: string; title: string; role: LabRole; term: string; email: string; contact: string };
+export type MemberDraft = { id?: string; full_name: string; title: string; role: LabRole; term: string; email: string; contact: string; is_past?: boolean; graduation_year?: string };
 export type ProjectDraft = { id?: string; title: string; kind: ProjectKind; status: ProjectStatus; summary: string; year: string; github_url: string; demo_url: string; paper_url: string; tags: string };
 
 export async function saveLab(
@@ -582,10 +589,15 @@ export async function saveLab(
     if (dErr) fail(dErr);
   }
   for (const [i, m] of members.entries()) {
-    const row = { full_name: m.full_name.trim(), title: m.title.trim() || null, role: m.role, term: m.term.trim() || null, sort_order: i };
+    const gy = Number(m.graduation_year);
+    const row = {
+      full_name: m.full_name.trim(), title: m.title.trim() || null, role: m.role, term: m.term.trim() || null, sort_order: i,
+      is_past: !!m.is_past, graduation_year: m.is_past && Number.isInteger(gy) && gy >= 1990 && gy <= 2100 ? gy : null,
+    };
     const before = m.id ? lab.lab_members.find((x) => x.id === m.id) : undefined;
     // Unchanged rows are skipped, so a student lead can save the form without touching protected head rows.
-    const same = before && before.full_name === row.full_name && (before.title ?? null) === row.title && before.role === row.role && (before.term ?? null) === row.term && before.sort_order === row.sort_order;
+    const same = before && before.full_name === row.full_name && (before.title ?? null) === row.title && before.role === row.role && (before.term ?? null) === row.term
+      && before.sort_order === row.sort_order && !!before.is_past === row.is_past && (before.graduation_year ?? null) === row.graduation_year;
     const res = m.id
       ? same
         ? { data: { id: m.id }, error: null }
@@ -1011,6 +1023,7 @@ export type ExternalEntry = {
 export type ExternalEvent = {
   id: string; series_id: string | null; kind: ExternalKind; title: string; organizer: string | null; location: string | null; url: string | null;
   starts_on: string | null; ends_on: string | null; year: number | null; description: string | null; created_by: string | null;
+  poster_url?: string | null;
   event_series: EventSeries | null;
   external_event_labs: ExternalEntry[];
 };
@@ -1094,6 +1107,21 @@ export function useRemoveParticipation() {
       if (error) fail(error);
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.externalEvents }),
+  });
+}
+
+/** v11: event posters (SDU events and external events). The picture goes to the lab-assets bucket first. */
+export function useSetPoster() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { kind: 'sdu' | 'external'; id: string; url: string | null }) => {
+      const { error } = await db.rpc(v.kind === 'sdu' ? 'set_event_poster' : 'set_external_event_poster', { p_event: v.id, p_url: v.url });
+      if (error) fail(error);
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.events });
+      void qc.invalidateQueries({ queryKey: qk.externalEvents });
+    },
   });
 }
 

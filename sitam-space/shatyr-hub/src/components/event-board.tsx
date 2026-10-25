@@ -1,17 +1,13 @@
 import { useMemo, useState } from 'react';
-import { Link } from '@tanstack/react-router';
+import { Link, useNavigate } from '@tanstack/react-router';
 import { QRCodeSVG } from 'qrcode.react';
-import { ArrowUpRight, BriefcaseBusiness, CalendarDays, CheckCircle2, Clock3, FlaskConical, History, ListChecks, MapPin, Ticket as TicketIcon, Trophy, Users } from 'lucide-react';
-import { toast } from 'sonner';
+import { CalendarDays, ChevronLeft, ChevronRight, History, LayoutGrid, Trophy } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { eventDate, hostNames, humanError, ticketUrl, useEvents, useMyRegistrations, useRegister, type EventKind, type Host, type Registration, type SitamEvent } from '@/lib/api';
+import { EXTERNAL_KIND_LABEL, eventDate, externalDates, hostNames, humanError, isUpcomingExternal, ticketUrl, useEvents, useExternalEvents, type ExternalEvent, type Host, type Registration, type SitamEvent } from '@/lib/api';
 import { mineFirst, useMyLabs } from '@/lib/my-labs';
-import { useAuth, type Capabilities } from '@/lib/auth';
-import { LoginRequiredDialog } from '@/components/login-required';
+import { type Capabilities } from '@/lib/auth';
 import { EVENT_META } from '@/lib/sitam-data';
-import { ExternalEventsBoard } from '@/components/external-events';
+import { ExternalEventDialog, ExternalEventSheet, useExternalRights } from '@/components/external-events';
 
 /** Mirrors can_manage_event() in the database (for showing buttons only; the DB decides). */
 export function canManageEvent(e: Pick<SitamEvent, 'organizer_id' | 'event_hosts'>, userId: string | undefined, caps: Capabilities) {
@@ -43,7 +39,7 @@ export function TicketBadge({ event, reg, holder }: { event: Pick<SitamEvent, 'k
       <div className="eticket-main">
         <div className="eticket-brand">
           <img src="/sitam-emblem.png" alt="" width={18} height={22} />
-          <span>SITAM<b>.</b>SPACE</span>
+          <span>SITAM SPACE</span>
           <span className="eticket-kind">{EVENT_META[event.kind].label}</span>
         </div>
         <strong className="eticket-title">{event.title}</strong>
@@ -70,175 +66,218 @@ export function TicketBadge({ event, reg, holder }: { event: Pick<SitamEvent, 'k
   );
 }
 
-function EventCard({ event, reg, canManage, onRegister, onShow, busy }: { event: SitamEvent; reg?: Registration | undefined; canManage: boolean; onRegister: () => void; onShow: () => void; busy: boolean }) {
-  const d = eventDate(event.starts_at);
-  const Icon = event.kind === 'industrial' ? BriefcaseBusiness : FlaskConical;
-  const seatsLeft = Math.max(0, event.capacity - event.registered);
-  return (
-    <article className="event-tile">
-      <div className="date-tile" aria-hidden>
-        <span>{d.month}</span>
-        <strong>{d.day}</strong>
-        <span>{d.weekday}</span>
-      </div>
-      <div className="event-tile-body">
-        <span className="eyebrow"><Icon size={12} /> {EVENT_META[event.kind].label}</span>
-        <h3><Link to="/events/$eventId" params={{ eventId: event.id }}>{event.title}</Link></h3>
-        {event.speaker && <p className="speaker"><strong>{event.speaker}</strong>{event.speaker_role && <span>{event.speaker_role}</span>}</p>}
-        <HostPills hosts={event.event_hosts} />
-        <div className="event-meta">
-          <span><Clock3 size={14} />{d.time}</span>
-          <span><MapPin size={14} />Room {event.room}</span>
-          <span><Users size={14} />{seatsLeft} of {event.capacity} seats left</span>
+/* ═════════════ v11 feed: SDU events + external events, two filters, list or calendar, posters ═════════════ */
+
+type FeedType = 'industry' | 'research' | 'competitions';
+type FeedWhere = 'internal' | 'external';
+type FeedItem = {
+  key: string;
+  type: FeedType;
+  where: FeedWhere;
+  title: string;
+  host: string;
+  start: Date | null;            // null = only the year is known
+  end: Date | null;
+  year: number | null;
+  upcoming: boolean;
+  poster: string | null;
+  meta: string;                  // second line under the title
+  sdu?: SitamEvent;
+  external?: ExternalEvent;
+};
+const TYPE_LABEL: Record<FeedType, string> = { industry: 'Industry', research: 'Research', competitions: 'Competitions' };
+const WHERE_LABEL: Record<FeedWhere, string> = { internal: 'Internal', external: 'External' };
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+
+function toFeed(events: SitamEvent[], external: ExternalEvent[], now: number): FeedItem[] {
+  const sdu = events.map((e): FeedItem => {
+    const start = new Date(e.starts_at);
+    return {
+      key: `sdu-${e.id}`, type: e.kind === 'industrial' ? 'industry' : 'research', where: 'internal', title: e.title,
+      host: hostNames(e.event_hosts) || 'SITAM', start, end: null, year: start.getFullYear(), upcoming: start.getTime() > now - 3_600_000,
+      poster: e.poster_url ?? null, meta: `${eventDate(e.starts_at).short} · ${eventDate(e.starts_at).time} · Room ${e.room}`, sdu: e,
+    };
+  });
+  const ext = external.map((x): FeedItem => {
+    const start = x.starts_on ? new Date(`${x.starts_on}T09:00:00`) : null;
+    return {
+      key: `ext-${x.id}`, type: x.kind === 'conference' ? 'research' : 'competitions', where: 'external', title: x.title,
+      host: x.organizer ?? EXTERNAL_KIND_LABEL[x.kind], start, end: x.ends_on ? new Date(`${x.ends_on}T18:00:00`) : null, year: x.year,
+      upcoming: isUpcomingExternal(x), poster: x.poster_url ?? null,
+      meta: `${externalDates(x)}${x.location ? ` · ${x.location}` : ''}`, external: x,
+    };
+  });
+  return [...sdu, ...ext];
+}
+
+/** Poster card in the spirit of SDU Life: a picture (or a designed cover), host chip, title, categories. */
+function PosterCard({ item, onOpen }: { item: FeedItem; onOpen: (i: FeedItem) => void }) {
+  const results = item.external?.external_event_labs.filter((x) => x.result) ?? [];
+  const cover = (
+    <div className={`poster poster-${item.type}`}>
+      {item.poster ? <img src={item.poster} alt="" loading="lazy" referrerPolicy="no-referrer" /> : (
+        <div className="poster-cover" aria-hidden>
+          <span className="poster-cover-type">{TYPE_LABEL[item.type]}</span>
+          <strong className="poster-cover-title">{item.title}</strong>
+          <span className="poster-cover-date">
+            {item.start ? <><b>{item.start.getDate()}</b>{MONTHS[item.start.getMonth()]} {item.start.getFullYear()}</> : <b>{item.year ?? '—'}</b>}
+          </span>
         </div>
-        <div className="stack-list">{event.tags.map((t) => <span key={t}>{t}</span>)}</div>
-      </div>
-      <div className="event-tile-cta">
-        {reg ? (
-          <Button variant="secondary" onClick={onShow}><TicketIcon />View QR ticket</Button>
-        ) : (
-          <Button onClick={onRegister} disabled={busy || seatsLeft === 0}>{seatsLeft === 0 ? 'Fully booked' : <>Register<ArrowUpRight /></>}</Button>
-        )}
-        {canManage && (
-          <Button asChild variant="outline" size="sm"><Link to="/events/$eventId" params={{ eventId: event.id }}><ListChecks />Attendees · {event.registered}</Link></Button>
-        )}
-      </div>
-    </article>
+      )}
+      <span className="poster-chip">{item.host}</span>
+      {results.length > 0 && <span className="poster-win"><Trophy size={12} />{results[0]!.result}</span>}
+    </div>
+  );
+  const body = (
+    <>
+      {cover}
+      <h3 className="poster-title">{item.title}</h3>
+      <p className="poster-tags">{TYPE_LABEL[item.type]} · {WHERE_LABEL[item.where]} · {item.meta}</p>
+    </>
+  );
+  return item.sdu ? (
+    <Link to="/events/$eventId" params={{ eventId: item.sdu.id }} className="poster-card">{body}</Link>
+  ) : (
+    <button type="button" className="poster-card" onClick={() => onOpen(item)}>{body}</button>
   );
 }
 
-export function EventBoard({ compact = false, query = '' }: { compact?: boolean; query?: string }) {
-  const { user, profile, caps } = useAuth();
-  const { data, isLoading, error } = useEvents();
-  const regs = useMyRegistrations(user?.id);
-  const register = useRegister();
-  const [tab, setTab] = useState<EventKind | 'history' | 'external'>('industrial');
-  const [active, setActive] = useState<{ event: SitamEvent; reg: Registration } | null>(null);
-  const [historyFilter, setHistoryFilter] = useState<'all' | EventKind>('all');
-  const [needLogin, setNeedLogin] = useState(false);
-
-  const my = useMyLabs();
-  const ofMyLab = (e: SitamEvent) => e.event_hosts.some((h) => my.isMineLab(h.lab_id));
-  const now = Date.now();
-  const term = query.trim().toLowerCase();
-  const events = (data ?? []).filter((e) => !term || `${e.title} ${e.speaker ?? ''} ${hostNames(e.event_hosts)} ${e.tags.join(' ')}`.toLowerCase().includes(term));
-  // events hosted by the head's own labs first (date order kept inside each group)
-  const upcoming = useMemo(() => mineFirst(events.filter((e) => new Date(e.starts_at).getTime() > now - 3_600_000), ofMyLab), [events, now, my]);
-  const past = useMemo(
-    () => mineFirst(events.filter((e) => new Date(e.starts_at).getTime() <= now - 3_600_000).sort((a, b) => b.starts_at.localeCompare(a.starts_at)), ofMyLab),
-    [events, now, my],
-  );
-  const holder = profile ? `${profile.firstName} ${profile.lastName}`.trim() : undefined;
-  const regFor = (id: string) => (regs.data ?? []).find((r) => r.event_id === id);
-  const canManage = (e: SitamEvent) => canManageEvent(e, user?.id, caps);
-
-  function doRegister(e: SitamEvent) {
-    if (!user) {
-      setNeedLogin(true);
-      return;
+/** Month grid (Mon–Sun). Days with events list them; a click opens the event. */
+function CalendarView({ items, onOpen }: { items: FeedItem[]; onOpen: (i: FeedItem) => void }) {
+  const [month, setMonth] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
+  const byDay = useMemo(() => {
+    const m = new Map<string, FeedItem[]>();
+    for (const it of items) {
+      if (!it.start) continue;
+      const last = it.end && it.end > it.start ? it.end : it.start;
+      for (let d = new Date(it.start.getFullYear(), it.start.getMonth(), it.start.getDate()), n = 0; d <= last && n < 14; d.setDate(d.getDate() + 1), n++) {
+        const k = dayKey(d);
+        m.set(k, [...(m.get(k) ?? []), it]);
+      }
     }
-    register.mutate(e.id, {
-      onSuccess: (reg) => {
-        setActive({ event: e, reg });
-        toast.success('You are registered', { description: e.title });
-      },
-      onError: (err) => toast.error('Could not register', { description: humanError(err) }),
-    });
-  }
+    return m;
+  }, [items]);
+  const first = (month.getDay() + 6) % 7;
+  const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+  const cells = Array.from({ length: Math.ceil((first + days) / 7) * 7 }, (_, i) => i - first + 1);
+  const today = dayKey(new Date());
+  const go = (delta: number) => setMonth((m) => new Date(m.getFullYear(), m.getMonth() + delta, 1));
+  return (
+    <div className="ev-cal">
+      <div className="ev-cal-head">
+        <Button variant="ghost" size="icon" aria-label="Previous month" onClick={() => go(-1)}><ChevronLeft /></Button>
+        <strong>{month.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })}</strong>
+        <Button variant="ghost" size="icon" aria-label="Next month" onClick={() => go(1)}><ChevronRight /></Button>
+        <Button variant="outline" size="sm" onClick={() => setMonth(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); })}>Today</Button>
+      </div>
+      <div className="ev-cal-grid" role="grid" aria-label="Events calendar">
+        {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d) => <span key={d} className="ev-cal-dow" role="columnheader">{d}</span>)}
+        {cells.map((n, i) => {
+          if (n < 1 || n > days) return <span key={i} className="ev-cal-cell is-out" aria-hidden />;
+          const date = new Date(month.getFullYear(), month.getMonth(), n);
+          const list = byDay.get(dayKey(date)) ?? [];
+          return (
+            <div key={i} className={`ev-cal-cell${dayKey(date) === today ? ' is-today' : ''}`} role="gridcell" aria-label={`${n} ${month.toLocaleDateString('en-GB', { month: 'long' })}: ${list.length} events`}>
+              <span className="ev-cal-day">{n}</span>
+              {list.slice(0, 3).map((it) => (
+                <button key={it.key} type="button" className={`ev-cal-item ev-${it.type}${it.upcoming ? '' : ' is-past'}`} onClick={() => onOpen(it)} title={it.title}>
+                  {it.title}
+                </button>
+              ))}
+              {list.length > 3 && <span className="ev-cal-more">+{list.length - 3} more</span>}
+            </div>
+          );
+        })}
+      </div>
+      <p className="ev-cal-legend">
+        {(Object.keys(TYPE_LABEL) as FeedType[]).map((t) => <span key={t}><i className={`ev-${t}`} />{TYPE_LABEL[t]}</span>)}
+      </p>
+    </div>
+  );
+}
 
-  const shownPast = past.filter((p) => historyFilter === 'all' || p.kind === historyFilter);
-  const totalAttended = shownPast.reduce((s, e) => s + e.attended, 0);
+export function EventBoard({ query = '' }: { query?: string }) {
+  const { data, isLoading, error } = useEvents();
+  const ext = useExternalEvents();
+  const navigate = useNavigate();
+  const rights = useExternalRights();
+  const [type, setType] = useState<FeedType | 'all'>('all');
+  const [where, setWhere] = useState<FeedWhere | 'all'>('all');
+  const [view, setView] = useState<'list' | 'calendar'>('list');
+  const [open, setOpen] = useState<ExternalEvent | null>(null);
+  const [adding, setAdding] = useState(false);
+  const my = useMyLabs();
+
+  const term = query.trim().toLowerCase();
+  const items = useMemo(() => {
+    const all = toFeed(data ?? [], ext.data ?? [], Date.now());
+    return all.filter((it) =>
+      (type === 'all' || it.type === type) && (where === 'all' || it.where === where)
+      && (!term || `${it.title} ${it.host} ${it.sdu?.speaker ?? ''} ${it.sdu?.tags.join(' ') ?? ''}`.toLowerCase().includes(term)));
+  }, [data, ext.data, type, where, term]);
+  const mineFirstItem = (it: FeedItem) => !!it.sdu?.event_hosts.some((h) => my.isMineLab(h.lab_id)) || !!it.external?.external_event_labs.some((x) => my.isMineLab(x.lab_id));
+  const upcoming = mineFirst(items.filter((i) => i.upcoming).sort((a, b) => (a.start?.getTime() ?? Infinity) - (b.start?.getTime() ?? Infinity)), mineFirstItem);
+  const past = items.filter((i) => !i.upcoming).sort((a, b) => (b.start?.getTime() ?? (b.year ?? 0) * 1e11) - (a.start?.getTime() ?? (a.year ?? 0) * 1e11));
+  const openItem = (it: FeedItem) => {
+    if (it.sdu) void navigate({ to: '/events/$eventId', params: { eventId: it.sdu.id } });
+    else if (it.external) setOpen(it.external);
+  };
+  const loading = isLoading || ext.isLoading;
 
   return (
     <>
-      {error && <p className="form-alert">{humanError(error)}</p>}
-      <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>
-        <div className="events-toolbar">
-          <TabsList>
-            <TabsTrigger value="industrial"><BriefcaseBusiness size={15} />Industrial Days</TabsTrigger>
-            <TabsTrigger value="research"><FlaskConical size={15} />Research Days</TabsTrigger>
-            <TabsTrigger value="external"><Trophy size={15} />Competitions & Hackathons</TabsTrigger>
-            <TabsTrigger value="history"><History size={15} />Events History</TabsTrigger>
-          </TabsList>
-          <span className="recurring">
-            <CalendarDays size={14} />
-            {tab === 'history' ? `${shownPast.length} past events · ${totalAttended} attendees`
-              : tab === 'external' ? 'Outside SITAM · labs that take part, their teams and results'
-              : `${EVENT_META[tab].weekdayName}s · ${EVENT_META[tab].time} · Room C1.2`}
-          </span>
+      {(error || ext.error) && <p className="form-alert">{humanError(error ?? ext.error)}</p>}
+      <div className="ev-toolbar">
+        <div className="ev-filters">
+          <div className="chip-filter" role="group" aria-label="Type">
+            <span className="chip-filter-label">Type</span>
+            {(['all', 'industry', 'research', 'competitions'] as const).map((t) => (
+              <button key={t} type="button" className={type === t ? 'chip is-on' : 'chip'} aria-pressed={type === t} onClick={() => setType(t)}>{t === 'all' ? 'All' : TYPE_LABEL[t]}</button>
+            ))}
+          </div>
+          <div className="chip-filter" role="group" aria-label="Where">
+            <span className="chip-filter-label">Where</span>
+            {(['all', 'internal', 'external'] as const).map((w) => (
+              <button key={w} type="button" className={where === w ? 'chip is-on' : 'chip'} aria-pressed={where === w} onClick={() => setWhere(w)}
+                title={w === 'internal' ? 'Organized by SDU' : w === 'external' ? 'Organized outside SDU' : undefined}>{w === 'all' ? 'All' : WHERE_LABEL[w]}</button>
+            ))}
+          </div>
         </div>
-
-        {(['industrial', 'research'] as const).map((kind) => {
-          const list = upcoming.filter((e) => e.kind === kind).slice(0, compact ? 2 : undefined);
-          return (
-            <TabsContent key={kind} value={kind}>
-              <div className="event-list">
-                {isLoading && <div className="event-tile skeleton-card" aria-hidden />}
-                {list.map((e) => (
-                  <EventCard
-                    key={e.id}
-                    event={e}
-                    reg={regFor(e.id)}
-                    canManage={canManage(e)}
-                    busy={register.isPending}
-                    onRegister={() => doRegister(e)}
-                    onShow={() => { const r = regFor(e.id); if (r) setActive({ event: e, reg: r }); }}
-                  />
-                ))}
-                {!isLoading && list.length === 0 && <div className="mini-empty"><CalendarDays size={20} /><p>No upcoming {EVENT_META[kind].label} yet.</p></div>}
-              </div>
-            </TabsContent>
-          );
-        })}
-
-        <TabsContent value="external">
-          <ExternalEventsBoard query={query} />
-        </TabsContent>
-
-        <TabsContent value="history">
-          <div className="filter-list mb-4">
-            {(['all', 'industrial', 'research'] as const).map((f) => (
-              <Button key={f} variant="ghost" className={historyFilter === f ? 'filter active' : 'filter'} aria-pressed={historyFilter === f} onClick={() => setHistoryFilter(f)}>
-                {f === 'all' ? 'All events' : EVENT_META[f].label}
-              </Button>
-            ))}
+        <div className="ev-actions">
+          {rights.canAdd && <Button size="sm" variant="outline" onClick={() => setAdding(true)}><Trophy />Add external event</Button>}
+          <div className="view-switch" role="group" aria-label="View">
+            <button type="button" className={view === 'list' ? 'is-on' : ''} aria-pressed={view === 'list'} onClick={() => setView('list')}><LayoutGrid size={15} />List</button>
+            <button type="button" className={view === 'calendar' ? 'is-on' : ''} aria-pressed={view === 'calendar'} onClick={() => setView('calendar')}><CalendarDays size={15} />Calendar</button>
           </div>
-          <div className="history-table" role="table" aria-label="Past events">
-            <div className="history-row history-head" role="row">
-              <span role="columnheader">Date</span><span role="columnheader">Event</span><span role="columnheader">Speaker / host</span><span role="columnheader">Attended</span>
+        </div>
+      </div>
+
+      {view === 'calendar' ? (
+        <CalendarView items={items} onOpen={openItem} />
+      ) : (
+        <>
+          <section aria-label="Upcoming events">
+            <div className="poster-grid">
+              {loading && Array.from({ length: 4 }, (_, i) => <div key={i} className="poster-card skeleton-card" aria-hidden />)}
+              {upcoming.map((it) => <PosterCard key={it.key} item={it} onOpen={openItem} />)}
             </div>
-            {shownPast.slice(0, compact ? 5 : undefined).map((p) => (
-              <div key={p.id} className="history-row" role="row">
-                <span role="cell" className="history-date">{eventDate(p.starts_at).short}</span>
-                <span role="cell">
-                  <span className="eyebrow">{EVENT_META[p.kind].label}</span>
-                  <strong>{p.title}</strong>
-                </span>
-                <span role="cell" className="small-note">
-                  {p.speaker ?? '—'}
-                  {hostNames(p.event_hosts) !== 'SITAM' && <> · {hostNames(p.event_hosts)}</>}
-                </span>
-                <span role="cell" className="history-count">
-                  <Users size={13} />{p.attended || '—'}
-                  {canManage(p) && <Link to="/events/$eventId" params={{ eventId: p.id }} className="history-list-link">list</Link>}
-                </span>
-              </div>
-            ))}
-            {shownPast.length === 0 && <div className="mini-empty"><History size={20} /><p>No past events yet.</p></div>}
-          </div>
-        </TabsContent>
-      </Tabs>
+            {!loading && upcoming.length === 0 && <div className="mini-empty"><CalendarDays size={20} /><p>No upcoming events for these filters.</p></div>}
+          </section>
 
-      <LoginRequiredDialog open={needLogin} onClose={() => setNeedLogin(false)} next="/events" />
-      <Dialog open={!!active} onOpenChange={(o) => !o && setActive(null)}>
-        <DialogContent className="hub-dialog">
-          <CheckCircle2 className="text-primary" />
-          <DialogTitle>You’re registered</DialogTitle>
-          <DialogDescription>Show this QR badge at the door of Room {active?.event.room ?? 'C1.2'}. It is also saved in your profile.</DialogDescription>
-          {active && <TicketBadge event={active.event} reg={active.reg} holder={holder} />}
-          <Button onClick={() => setActive(null)}>Done</Button>
-        </DialogContent>
-      </Dialog>
+          {past.length > 0 && (
+            <section className="past-events" aria-labelledby="past-events">
+              <h2 id="past-events"><History size={18} />Past Events · {past.length}</h2>
+              <div className="poster-grid is-past">
+                {past.map((it) => <PosterCard key={it.key} item={it} onOpen={openItem} />)}
+              </div>
+            </section>
+          )}
+        </>
+      )}
+
+      {open && <ExternalEventSheet event={open} all={ext.data ?? []} onClose={() => setOpen(null)} />}
+      {adding && <ExternalEventDialog event={null} onClose={() => setAdding(false)} />}
     </>
   );
 }

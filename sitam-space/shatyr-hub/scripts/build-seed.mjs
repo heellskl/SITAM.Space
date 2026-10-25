@@ -61,7 +61,7 @@ function person(raw) {
   return { name, title: title || null, contact: contacts.join(' ') || null };
 }
 
-const FOCUS_RENAME = { 'Academic / Education': 'Courses' }; // v7 renamed this category
+const FOCUS_RENAME = { 'Academic / Education': 'Education', Courses: 'Education' }; // v11: Industry & Commercial Projects · Research · Education
 /** Keep a value a head already entered; fill it only when it is still empty. */
 const keepText = (c) => `${c} = coalesce(nullif(public.labs.${c}, ''), excluded.${c})`;
 const keepArr = (c) => `${c} = case when cardinality(public.labs.${c}) = 0 then excluded.${c} else public.labs.${c} end`;

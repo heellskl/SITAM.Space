@@ -1,14 +1,42 @@
 import { useMemo, useState, type FormEvent } from 'react';
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { ArrowLeft, CheckCircle2, Clock3, Download, MapPin, ScanLine, Search, Ticket as TicketIcon, Users } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Clock3, Download, ImagePlus, MapPin, ScanLine, Search, Ticket as TicketIcon, Users } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { HostPills, TicketBadge, canManageEvent } from '@/components/event-board';
+import { PosterPicker, uploadPoster } from '@/components/external-events';
 import {
-  eventDate, humanError, useAttendees, useCancelRegistration, useCheckIn, useEvents, useMyRegistrations, useRegister, type Attendee,
+  eventDate, humanError, useAttendees, useCancelRegistration, useCheckIn, useEvents, useMyRegistrations, useRegister, useSetPoster, type Attendee,
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { EVENT_META } from '@/lib/sitam-data';
+
+/** Organizers add or change the event poster (shown on the Events page cards). */
+function PosterPanel({ eventId, current, folder }: { eventId: string; current: string | null; folder: string }) {
+  const setPoster = useSetPoster();
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  async function save(next: File | null) {
+    setBusy(true);
+    try {
+      const url = next ? await uploadPoster(next, folder) : null;
+      await setPoster.mutateAsync({ kind: 'sdu', id: eventId, url });
+      toast.success(next ? 'Poster saved' : 'Poster removed');
+      setFile(null);
+    } catch (e) {
+      toast.error('Poster not saved', { description: humanError(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="panel mb-6">
+      <h3 className="panel-title"><ImagePlus size={16} />Poster</h3>
+      <PosterPicker current={current} file={file} onFile={(f) => { setFile(f); if (f) void save(f); }} onClear={current ? () => void save(null) : undefined} />
+      {busy && <p className="small-note">Saving…</p>}
+    </section>
+  );
+}
 
 export const Route = createFileRoute('/events/$eventId')({
   head: () => ({ meta: [{ title: 'Event — SITAM SPACE · SDU' }] }),
@@ -89,6 +117,8 @@ function EventPage() {
       {event.speaker && <p className="speaker mt-3"><strong>{event.speaker}</strong>{event.speaker_role && <span> · {event.speaker_role}</span>}</p>}
       {event.description && <p className="page-intro">{event.description}</p>}
       {event.event_hosts.length > 0 && <div className="mb-6"><span className="sub-title">Hosted by</span><HostPills hosts={event.event_hosts} /></div>}
+      {event.poster_url && <img className="event-poster" src={event.poster_url} alt={`Poster: ${event.title}`} referrerPolicy="no-referrer" />}
+      {canManage && <PosterPanel eventId={event.id} current={event.poster_url ?? null} folder={event.event_hosts.find((h) => h.lab_id && caps.managedLabs.some((m) => m.id === h.lab_id))?.lab_id ?? user?.id ?? ''} />}
 
       {!isPast && (
         <section className="panel mb-6">

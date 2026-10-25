@@ -136,7 +136,7 @@ do $$ begin
     case when exists (select 1 from lab_members where user_id='00000000-0000-0000-0000-00000000c003' and role='member' and not can_edit) then 'PASS' else 'FAIL' end;
 end $$;
 select pg_temp.as_super();
-select 'Academic / Education renamed to Courses: ' || case when not exists (select 1 from labs where 'Academic / Education' = any(focus)) then 'PASS' else 'FAIL' end;
+select 'lab focus uses Education (no Courses / Academic / Education): ' || case when not exists (select 1 from labs where focus && array['Courses', 'Academic / Education']) then 'PASS' else 'FAIL' end;
 select 'student leads lost management (heads only): ' || case when not exists (select 1 from lab_members where can_edit and role::text not in ('lead','co_lead')) then 'PASS' else 'FAIL' end;
 
 -- v9.5: no e-mail codes — new accounts are confirmed at once, the form data is still saved
@@ -212,3 +212,28 @@ select 'lab form awards became results (8): ' || case when (select count(*) from
 set role anon;
 select 'guests can read competitions and results: ' || case when (select count(*) from external_event_labs) >= 9 then 'PASS' else 'FAIL' end;
 reset role;
+
+\echo '── v11: focus order, directions, past members, posters'
+select 'focus in the order Industry · Research · Education: ' || case when (select focus from labs where slug='ai-lab') = array['Industry & Commercial Projects', 'Research', 'Education'] then 'PASS' else 'FAIL' end;
+select 'every listed lab has a direction (21): ' || case when (select count(*) from labs where direction is not null) = 21 then 'PASS' else 'FAIL' end;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d001');
+select set_config('sitam.m', (select id::text from lab_members where lab_id = (select id from labs where slug='robotics-lab') and role::text not in ('lead','co_lead','former_lead') limit 1), false);
+do $$ declare n int; begin
+  update lab_members set is_past = true where id = current_setting('sitam.m')::uuid; get diagnostics n = row_count;
+  raise notice '% head of another lab cannot mark a past member', case when n = 0 then 'PASS' else 'FAIL' end;
+exception when others then raise notice 'PASS head of another lab cannot mark a past member (%)', sqlerrm; end $$;
+select pg_temp.as_super();
+select public.assign_lab_head((select id from labs where slug='robotics-lab'), '00000000-0000-0000-0000-00000000d003') from (select pg_temp.as_user('00000000-0000-0000-0000-00000000c001')) x;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d003');
+do $$ declare n int; begin
+  update lab_members set is_past = true, graduation_year = 2025 where id = current_setting('sitam.m')::uuid; get diagnostics n = row_count;
+  raise notice '% head marks a past member with graduation year', case when n = 1 then 'PASS' else 'FAIL' end;
+end $$;
+do $$ begin
+  perform public.set_external_event_poster(current_setting('sitam.ev')::uuid, 'https://example.org/p.jpg');
+  raise notice 'FAIL a non-author set an external poster';
+exception when others then raise notice 'PASS only the author / coordinator sets an external poster (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d001');
+select public.set_external_event_poster(current_setting('sitam.ev')::uuid, 'https://example.org/poster.jpg');
+select pg_temp.as_super();
+select 'author sets the poster of an external event: ' || case when (select poster_url from external_events where id = current_setting('sitam.ev')::uuid) = 'https://example.org/poster.jpg' then 'PASS' else 'FAIL' end;
