@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import {
   EXTERNAL_KIND_LABEL, externalDates, hasStartedExternal, humanError, isUpcomingExternal, useDeleteExternalEvent, useEventSeries,
-  uploadLabImage, useExternalEvents, useLabs, useProjects, useRemoveParticipation, useSaveExternalEvent, useSaveParticipation, useSetPoster,
+  uploadLabImage, useExternalEvents, useLabs, useProjects, useRemoveParticipation, useSaveExternalEvent, useSaveParticipation, useSetExternalPlace, useSetPoster,
   type ExternalEntry, type ExternalEvent, type ExternalEventDraft, type ExternalKind, type ParticipantRole, type ParticipationDraft,
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
@@ -214,7 +214,10 @@ export function ExternalEventDialog({ event, onClose }: { event: ExternalEvent |
   const del = useDeleteExternalEvent();
   const series = useEventSeries();
   const setPoster = useSetPoster();
+  const setPlace = useSetExternalPlace();
   const { user, caps } = useAuth();
+  const [place, setPlaceType] = useState<'sdu' | 'outside' | 'online'>(event?.location_type ?? 'outside');
+  const [cohosted, setCohosted] = useState(!!event?.cohosted);
   const [poster, setPosterFile] = useState<File | null>(null);
   const [clearPoster, setClearPoster] = useState(false);
   const [d, setD] = useState<ExternalEventDraft>(() => ({
@@ -232,6 +235,9 @@ export function ExternalEventDialog({ event, onClose }: { event: ExternalEvent |
     if (d.url.trim() && !/^https?:\/\//i.test(d.url.trim())) return setError('The link must start with https://');
     try {
       const id = await save.mutateAsync(d);
+      if (!event || place !== (event.location_type ?? 'outside') || cohosted !== !!event.cohosted) {
+        await setPlace.mutateAsync({ id, location_type: place, cohosted });
+      }
       if (poster) {
         const folder = caps.managedLabs[0]?.id ?? user?.id ?? '';
         const url = await uploadPoster(poster, folder);
@@ -262,6 +268,14 @@ export function ExternalEventDialog({ event, onClose }: { event: ExternalEvent |
             <label>City / venue<input value={d.location} onChange={(e) => set('location', e.target.value)} maxLength={160} placeholder="Astana" /></label>
           </div>
           <div className="auth-row">
+            <label>Location
+              <select value={place} onChange={(e) => setPlaceType(e.target.value as 'sdu' | 'outside' | 'online')}>
+                <option value="sdu">At SDU</option><option value="outside">Outside SDU</option><option value="online">Online</option>
+              </select>
+            </label>
+            <label className="check self-end"><input type="checkbox" checked={cohosted} onChange={(e) => setCohosted(e.target.checked)} />Co-hosted with SDU</label>
+          </div>
+          <div className="auth-row">
             <label>Starts<input type="date" value={d.starts_on} onChange={(e) => set('starts_on', e.target.value)} /></label>
             <label>Ends<input type="date" value={d.ends_on} onChange={(e) => set('ends_on', e.target.value)} /></label>
           </div>
@@ -284,7 +298,7 @@ export function ExternalEventDialog({ event, onClose }: { event: ExternalEvent |
           )}
           {error && <p className="form-alert" role="alert">{error}</p>}
           <div className="dialog-actions wrap">
-            <Button type="submit" disabled={save.isPending || setPoster.isPending}>{save.isPending || setPoster.isPending ? 'Saving…' : event ? 'Save' : 'Add event'}</Button>
+            <Button type="submit" disabled={save.isPending || setPoster.isPending || setPlace.isPending}>{save.isPending || setPoster.isPending || setPlace.isPending ? 'Saving…' : event ? 'Save' : 'Add event'}</Button>
             {event && (
               <Button type="button" variant="ghost" disabled={del.isPending} onClick={() => {
                 if (!window.confirm(`Delete “${event.title}” with all participations?`)) return;

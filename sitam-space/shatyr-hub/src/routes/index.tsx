@@ -140,7 +140,7 @@ function Index() {
             <li><span className="about2-ic tone-amber"><Building2 size={16} /></span><div><strong>Partners</strong><span>See what we build and collaborate</span></div></li>
           </ul>
           <dl className="about2-stats">
-            <div><dt><CountUp value={labs.data?.length} /></dt><dd>Laboratories</dd></div>
+            <div><dt><CountUp value={labs.data?.filter((l) => (l.kind ?? 'lab') === 'lab').length} /></dt><dd>Laboratories</dd></div>
             <div><dt><CountUp value={projects.data?.length} /></dt><dd>Projects</dd></div>
             <div><dt><CountUp value={involved} /></dt><dd>Students involved</dd></div>
             <div><dt><CountUp value={pubs.data?.length} /></dt><dd>Scopus publications</dd></div>

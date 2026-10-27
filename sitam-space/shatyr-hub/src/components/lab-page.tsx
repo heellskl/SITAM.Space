@@ -73,7 +73,7 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
   const mine = caps.labMemberships.find((m) => m.id === lab.id);
   // E-mails of members with an account (visible to signed-in users) — click to write to them.
   const people = usePeople(lab.lab_members.map((m) => m.user_id).filter((x): x is string => !!x), !!user);
-  const emailOf = new Map((people.data ?? []).map((p) => [p.id, p.email]));
+  const personOf = new Map((people.data ?? []).map((p) => [p.id, p]));
   const [adding, setAdding] = useState<'event' | 'opportunity' | null>(null);
   const internal = useLabInternal(lab.id, isManager || caps.isStaff);
   const inbox = useInbox(isManager);
@@ -99,12 +99,14 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
 
   return (
     <main className="container content-page lab-page">
-      <Link to="/labs" className="back-link"><ArrowLeft size={14} />All labs</Link>
+      {lab.kind === 'community'
+        ? <Link to="/labs" search={{ tab: 'communities' }} className="back-link"><ArrowLeft size={14} />All communities</Link>
+        : <Link to="/labs" className="back-link"><ArrowLeft size={14} />All labs</Link>}
 
       <header className="lab-hero">
         <LabLogo lab={lab} size={32} />
         <div className="lab-hero-text">
-          <span className="eyebrow">{lab.location ? `${lab.location} · ` : ''}{lab.year_founded ? `Since ${lab.year_founded}` : 'Laboratory'}</span>
+          <span className="eyebrow">{lab.location ? `${lab.location} · ` : ''}{lab.year_founded ? `Since ${lab.year_founded}` : lab.kind === 'community' ? 'Student community' : 'Laboratory'}</span>
           <h1>{lab.name}</h1>
           <div className="lab-hero-meta">
             {mine && <span className={mine.canEdit ? 'role-chip' : 'role-chip member'}>{mine.canEdit ? 'You manage this lab' : 'Your lab'} · {LAB_POSITION_LABEL[mine.role as LabRole] ?? mine.role}</span>}
@@ -130,8 +132,8 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
           <div className="lab-publish" role="group" aria-label="Publish from this lab">
             <span className="small-note">Publish from {lab.name} — it appears in the shared sections automatically:</span>
             <Button size="sm" onClick={() => setAdding('event')}><CalendarPlus />Event → Events</Button>
-            <Button size="sm" onClick={() => setAdding('opportunity')}><Plus />Vacancy / case → Opportunities</Button>
-            <Button size="sm" onClick={onEdit}><Rocket />Project → Projects</Button>
+            <Button size="sm" onClick={() => setAdding('opportunity')}><Plus />Vacancy / case → Industry</Button>
+            <Button size="sm" onClick={onEdit}><Rocket />Project → Labs · Projects</Button>
           </div>
         )}
       </header>
@@ -244,7 +246,7 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
                       <div>
                         <strong>{m.user_id && user ? <Link to="/people/$id" params={{ id: m.user_id }}>{m.full_name}</Link> : m.full_name}</strong>
                         {m.title && <small>{m.title}</small>}
-                        {m.user_id && emailOf.get(m.user_id) && <a className="person-mail small" href={gmailCompose(emailOf.get(m.user_id) ?? "")} target="_blank" rel="noopener noreferrer"><Mail size={11} />{emailOf.get(m.user_id)}</a>}
+                        {m.user_id && personOf.get(m.user_id) && <PersonEmails person={personOf.get(m.user_id)!} />}
                       </div>
                     </li>
                   ))}
@@ -280,5 +282,22 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
         </aside>
       </div>
     </main>
+  );
+}
+
+/** SDU e-mail + personal e-mail (when the person added one), each opens Gmail. */
+export function PersonEmails({ person, size = 11 }: { person: { email: string; personal_email?: string | null | undefined }; size?: number }) {
+  const list = [
+    { label: 'SDU', email: person.email },
+    ...(person.personal_email && person.personal_email.toLowerCase() !== person.email.toLowerCase() ? [{ label: 'Personal', email: person.personal_email }] : []),
+  ].filter((x) => !!x.email);
+  return (
+    <span className="person-mails">
+      {list.map((x) => (
+        <a key={x.label} className="person-mail small" href={gmailCompose(x.email)} target="_blank" rel="noopener noreferrer" title={`${x.label} e-mail`}>
+          <Mail size={size} /><span className="person-mail-kind">{x.label}</span>{x.email}
+        </a>
+      ))}
+    </span>
   );
 }

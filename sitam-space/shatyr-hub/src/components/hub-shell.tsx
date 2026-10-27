@@ -1,24 +1,24 @@
-import { Link, useRouterState } from '@tanstack/react-router';
+import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
 import { gmailCompose } from '@/lib/utils';
 import { useEffect, useState } from 'react';
 import {
   BookOpen, Briefcase, CalendarDays, ChevronsLeft, ChevronsRight, CircleHelp, FlaskConical, House, LayoutDashboard,
-  LogIn, LogOut, Mail, Menu, Rocket, ShieldCheck, UserPlus, UserRound,
+  ChevronsUpDown, LogIn, LogOut, Mail, Menu, Settings, ShieldCheck, UserPlus, UserRound,
 } from 'lucide-react';
-import { ROLE_LABEL, useAuth } from '@/lib/auth';
+import { useAuth } from '@/lib/auth';
 import { BRAND } from '@/lib/sitam-data';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 
 // Sidebar order requested for the leader-first platform.
 export const navigation = [
   { to: '/', label: 'Home', icon: House, hint: 'About SITAM SPACE and the school in numbers' },
-  { to: '/labs', label: 'Labs', icon: FlaskConical, hint: 'All SITAM laboratories, their teams and projects' },
+  { to: '/labs', label: 'Labs', icon: FlaskConical, hint: 'Laboratories, student communities and projects' },
   { to: '/events', label: 'Events', icon: CalendarDays, hint: 'Industry and research events, competitions and hackathons' },
-  { to: '/projects', label: 'Projects', icon: Rocket, hint: 'What the labs build and research' },
-  { to: '/opportunities', label: 'Opportunities', icon: Briefcase, hint: 'Vacancies, internships and lab cases to apply for' },
+  { to: '/opportunities', label: 'Industry', icon: Briefcase, hint: 'Industry events, vacancies and internships, partner companies' },
   { to: '/research', label: 'Research', icon: BookOpen, hint: 'Publications and researchers of SITAM (Scopus)' },
   { to: '/faq', label: 'FAQ', icon: CircleHelp, hint: 'Answers to common questions' },
 ] as const;
@@ -59,13 +59,48 @@ function SideLink({ to, label, icon: Icon, onNavigate, badge, exact, hint }: {
   );
 }
 
+/** Account button at the bottom of the menu: avatar + "Profile". Opens Profile · Settings · Log out. */
+function ProfileMenu({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: (() => void) | undefined }) {
+  const { profile, signOut } = useAuth();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  if (!profile) return null;
+  const go = (to: '/profile', search?: { settings: true }) => {
+    setOpen(false);
+    onNavigate?.();
+    void navigate(search ? { to, search } : { to });
+  };
+  async function logOut() {
+    setOpen(false);
+    onNavigate?.();
+    await signOut();
+    // leave every protected page at once — the sign-in page replaces it in the history
+    await navigate({ to: '/login', replace: true });
+  }
+  const initials = (profile.firstName[0] ?? '') + (profile.lastName[0] ?? '');
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen} modal={false}>
+      <DropdownMenuTrigger asChild>
+        <button type="button" className="side-user side-user-btn" aria-label="Profile menu">
+          <span className="avatar avatar-sm" aria-hidden>{profile.avatarUrl ? <img src={profile.avatarUrl} alt="" referrerPolicy="no-referrer" className="avatar-img" /> : initials || <UserRound size={14} />}</span>
+          {!collapsed && <strong className="side-label">Profile</strong>}
+          {!collapsed && <ChevronsUpDown size={14} className="side-user-caret" aria-hidden />}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="top" align="start" sideOffset={8} className="profile-menu">
+        <DropdownMenuItem onSelect={() => go('/profile')}><UserRound size={15} />Profile</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => go('/profile', { settings: true })}><Settings size={15} />Settings</DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => void logOut()} className="profile-menu-out"><LogOut size={15} />Log out</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 /** Navigation + personal account menu. Used for the desktop sidebar and inside the mobile sheet. */
 function SidebarBody({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: (() => void) | undefined }) {
-  const { user, profile, caps, loading, signOut } = useAuth();
+  const { user, profile, caps, loading } = useAuth();
   const canManage = caps.canReview || caps.isPartner || caps.isTeacher || caps.isAdmin;
-  const isLeader = caps.managedLabs.length > 0;
-  // The primary university role always stays visible; lab headship is shown next to it.
-  const roleLine = profile ? [ROLE_LABEL[profile.role], isLeader && 'Lab head', caps.isCoordinator && 'Coordinator'].filter(Boolean).join(' · ') : '';
   const waiting = caps.pendingModeration + caps.pendingLabHeads;
 
   return (
@@ -81,16 +116,7 @@ function SidebarBody({ collapsed, onNavigate }: { collapsed: boolean; onNavigate
           <>
             {caps.isCoordinator && <SideLink to="/admin" label="Admin" icon={ShieldCheck} hint="Labs and their heads (coordinator only)" onNavigate={onNavigate} />}
             {canManage && <SideLink to="/manage" label="Manage" icon={LayoutDashboard} badge={waiting} hint="Applications, submissions and your listings" onNavigate={onNavigate} />}
-            <SideLink to="/profile" label="Profile & settings" icon={UserRound} hint="Your details, CV, tickets and applications" onNavigate={onNavigate} />
-            <button type="button" className="side-link" onClick={() => { onNavigate?.(); void signOut(); }} title="Log out">
-              <LogOut size={18} aria-hidden /><span className="side-label">Log out</span>
-            </button>
-            {!collapsed && (
-              <div className="side-user">
-                <span className="avatar avatar-sm" aria-hidden>{profile.avatarUrl ? <img src={profile.avatarUrl} alt="" referrerPolicy="no-referrer" className="avatar-img" /> : (profile.firstName[0] ?? "") + (profile.lastName[0] ?? "")}</span>
-                <div><strong>{`${profile.firstName} ${profile.lastName}`.trim() || profile.email}</strong><small>{roleLine}</small></div>
-              </div>
-            )}
+            <ProfileMenu collapsed={collapsed} onNavigate={onNavigate} />
           </>
         ) : (
           <>

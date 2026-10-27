@@ -42,6 +42,8 @@ export type Profile = {
   cvUploadedAt: string | null;
   faculty?: string;
   groupName?: string;
+  /** v12: second, personal e-mail (the SDU e-mail is `email`) */
+  personalEmail?: string;
   avatarUrl?: string;
 };
 
@@ -89,7 +91,7 @@ const NO_CAPS: Capabilities = {
 type DbProfile = {
   id: string; role: Role; first_name: string; last_name: string; email: string; course: number | null; major: string | null;
   department: string | null; position: string | null; phone: string | null; bio: string | null; staff_verified: boolean | null;
-  faculty?: string | null; group_name?: string | null; avatar_url?: string | null;
+  faculty?: string | null; group_name?: string | null; avatar_url?: string | null; personal_email?: string | null;
   cv_path: string | null; cv_filename: string | null; cv_uploaded_at: string | null;
 };
 type DbContext = {
@@ -114,6 +116,7 @@ function toProfile(p: DbProfile): Profile {
     ...(p.bio ? { bio: p.bio } : {}),
     ...(p.faculty ? { faculty: p.faculty } : {}),
     ...(p.group_name ? { groupName: p.group_name } : {}),
+    ...(p.personal_email ? { personalEmail: p.personal_email } : {}),
     ...(p.avatar_url ? { avatarUrl: p.avatar_url } : {}),
     staffVerified: !!p.staff_verified,
     cvPath: p.cv_path,

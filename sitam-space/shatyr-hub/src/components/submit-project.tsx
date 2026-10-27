@@ -36,12 +36,11 @@ export function SubmitProjectButton({ kind = 'project', label }: { kind?: Projec
 export function SubmitProjectDialog({ defaultKind, onClose }: { defaultKind: ProjectKind; onClose: () => void }) {
   const { profile, caps } = useAuth();
   const submit = useSubmitProject();
-  const [kind, setKind] = useState<ProjectKind>(defaultKind);
+  // the button decides the type: "Submit your research" is research only, "Submit your project" is a project only
+  const kind: ProjectKind = defaultKind;
   const [error, setError] = useState('');
   const [done, setDone] = useState<'pending' | 'approved' | null>(null);
   const instant = (caps.isPhd && kind === 'research') || caps.isAdmin;
-  // Startups were removed from the catalog; projects and research stay.
-  const kinds: ProjectKind[] = defaultKind === 'research' ? ['research', 'project'] : ['project', 'research'];
 
   async function send(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -96,17 +95,9 @@ export function SubmitProjectDialog({ defaultKind, onClose }: { defaultKind: Pro
             <span className="eyebrow">{instant ? 'Published right away' : 'Reviewed by the SITAM office'}</span>
             <DialogTitle>Submit your {KIND_LABEL[kind].toLowerCase()}</DialogTitle>
             <DialogDescription>
-              Your own project or research — not from a lab. After approval it appears in the catalog.
+              {kind === 'research' ? 'Your own research — not from a lab. After approval it appears on the Research page.' : 'Your own project — not from a lab. After approval it appears in the catalog.'}
             </DialogDescription>
             <form className="partner-form auth-form" onSubmit={send} noValidate>
-              <fieldset>
-                <legend>Type</legend>
-                <div className="kind-switch" role="group" aria-label="Type">
-                  {kinds.map((k) => (
-                    <button key={k} type="button" className={kind === k ? 'role-option role-active' : 'role-option'} aria-pressed={kind === k} onClick={() => setKind(k)}>{KIND_LABEL[k]}</button>
-                  ))}
-                </div>
-              </fieldset>
               <label>Title<input name="title" maxLength={200} placeholder={kind === 'research' ? 'Federated learning for hospital data' : 'Campus navigation app'} /></label>
               <label>What is it?<textarea name="summary" rows={4} maxLength={2000} placeholder="Problem, what you built or found, current stage." /></label>
               <div className="auth-row">

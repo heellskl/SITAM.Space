@@ -34,7 +34,8 @@ function ChipFilter<T extends string>({ label, options, value, onChange }: { lab
   );
 }
 
-export function LabsFeed() {
+/** kind = 'lab' (laboratories) or 'community' (student communities: same page, same tools). */
+export function LabsFeed({ kind = 'lab' }: { kind?: 'lab' | 'community' }) {
   const { data, isLoading, error } = useLabs();
   const projects = useProjects();
   const [q, setQ] = useState('');
@@ -45,10 +46,11 @@ export function LabsFeed() {
   const labs = useMemo(() => {
     const term = q.trim().toLowerCase();
     return (data ?? []).filter((l) =>
-      (focus === 'all' || l.focus.includes(focus))
+      (l.kind ?? 'lab') === kind
+      && (focus === 'all' || l.focus.includes(focus))
       && (direction === 'all' || l.direction === direction)
       && (!term || `${l.name} ${l.tags.join(' ')} ${(l.skills ?? []).join(' ')} ${l.lab_members.map((m) => m.full_name).join(' ')}`.toLowerCase().includes(term)));
-  }, [data, q, focus, direction]);
+  }, [data, q, focus, direction, kind]);
 
   const projectCount = useMemo(() => {
     const m = new Map<string, number>();
@@ -84,11 +86,13 @@ export function LabsFeed() {
 
   return (
     <>
-      <SearchBar value={q} onChange={setQ} placeholder="Search labs, people, topics" />
-      <div className="lab-filters">
-        <ChipFilter label="Focus" options={LAB_FOCUS} value={focus} onChange={setFocus} />
-        <ChipFilter label="Direction" options={LAB_DIRECTIONS} value={direction} onChange={setDirection} />
-      </div>
+      <SearchBar value={q} onChange={setQ} placeholder={kind === 'community' ? 'Search communities, people, topics' : 'Search labs, people, topics'} />
+      {kind === 'lab' && (
+        <div className="lab-filters">
+          <ChipFilter label="Focus" options={LAB_FOCUS} value={focus} onChange={setFocus} />
+          <ChipFilter label="Direction" options={LAB_DIRECTIONS} value={direction} onChange={setDirection} />
+        </div>
+      )}
 
       {error && <p className="form-alert">{humanError(error)}</p>}
 
@@ -107,13 +111,13 @@ export function LabsFeed() {
           </div>
         </section>
       )}
-      {mine.length > 0 && others.length > 0 && <h2 className="mylabs-title mylabs-others">Other laboratories</h2>}
+      {/* no "Other laboratories" heading: the rest of the list simply follows */}
 
-      <div className="labcard-grid" aria-label="Laboratories">
+      <div className={mine.length ? 'labcard-grid mylabs-rest' : 'labcard-grid'} aria-label={kind === 'community' ? 'Communities' : 'Laboratories'}>
         {isLoading && Array.from({ length: 8 }, (_, i) => <div key={i} className="labcard skeleton-card" aria-hidden />)}
         {others.map(card)}
       </div>
-      {!isLoading && labs.length === 0 && <div className="empty-state"><FlaskConical /><h3>No labs match these filters</h3></div>}
+      {!isLoading && labs.length === 0 && <div className="empty-state"><FlaskConical /><h3>{kind === 'community' ? 'No communities found' : 'No labs match these filters'}</h3></div>}
     </>
   );
 }

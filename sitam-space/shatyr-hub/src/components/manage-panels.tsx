@@ -153,7 +153,7 @@ function useMyHosts() {
     companies: caps.companies.filter((c) => c.verified).map((c) => ({ id: c.id, name: c.name })),
     projects: (projects.data ?? []).filter((p) => p.lab_id && labIds.has(p.lab_id)).map((p) => ({ id: p.id, name: `${p.title} (${p.labs?.name ?? ''})` })),
     unverified: caps.companies.filter((c) => !c.verified),
-    /** Verified professors (and admins) post in their own name: shown as "Prof. Name" on Opportunities. */
+    /** Verified professors (and admins) post in their own name: shown as "Prof. Name" on Industry → Opportunities. */
     me: caps.isStaff ? `${profile?.firstName ?? ''} ${profile?.lastName ?? ''}`.trim() || 'Me' : null,
   };
 }
@@ -282,7 +282,7 @@ export function ListingDialog({ opp, onClose, preset, defaultCategory }: { opp: 
         project_ids: hostSel.projects,
         as_me: !!hostSel.me,
       });
-      toast.success(opp ? 'Updated' : 'Published', { description: 'It is on the Opportunities page now; applications arrive in Manage → Applications.' });
+      toast.success(opp ? 'Updated' : 'Published', { description: 'It is on the Industry page now; applications arrive in Manage → Applications.' });
       onClose();
     } catch (err) {
       setError(humanError(err));
@@ -294,7 +294,7 @@ export function ListingDialog({ opp, onClose, preset, defaultCategory }: { opp: 
       <DialogContent className="hub-dialog wide">
         <span className="eyebrow">Opportunity</span>
         <DialogTitle>{opp ? 'Edit opportunity' : 'New opportunity'}</DialogTitle>
-        <DialogDescription>Published opportunities appear on the Opportunities page automatically.</DialogDescription>
+        <DialogDescription>Published opportunities appear on the Industry page (Opportunities) automatically.</DialogDescription>
         <form className="partner-form auth-form" onSubmit={submit} noValidate>
           <div className="auth-row">
             <label>Category

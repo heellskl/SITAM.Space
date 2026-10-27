@@ -9,7 +9,9 @@ import {
 } from '@/components/ui/alert-dialog';
 import { PeoplePicker } from '@/components/people-picker';
 import { SearchBar } from '@/components/search-bar';
-import { HEAD_ROLES, humanError, useAdminLabActions, useLabs, type Lab } from '@/lib/api';
+import { HEAD_ROLES, humanError, useAdminLabActions, useLabs, useSetLabKind, type Lab } from '@/lib/api';
+
+const COMMUNITY = '__community__';
 import { useAuth } from '@/lib/auth';
 import { pageHead } from '@/lib/hub-data';
 import { LAB_FOCUS } from '@/lib/sitam-data';
@@ -24,6 +26,7 @@ function Admin() {
   const { caps, loading } = useAuth();
   const labs = useLabs();
   const actions = useAdminLabActions();
+  const setKind = useSetLabKind();
   const [q, setQ] = useState('');
   const [name, setName] = useState('');
   const [focus, setFocus] = useState<string>(LAB_FOCUS[0]);
@@ -43,9 +46,18 @@ function Admin() {
 
   function create(e: FormEvent) {
     e.preventDefault();
+    const community = focus === COMMUNITY;
     actions.createLab.mutate(
-      { name, focus: [focus] },
-      { onSuccess: () => { toast.success('Lab created', { description: name }); setName(''); }, onError: (err) => toast.error(humanError(err)) },
+      { name, focus: community ? [] : [focus] },
+      {
+        onSuccess: (row) => {
+          const id = (row as { id?: string } | null)?.id;
+          if (community && id) setKind.mutate({ id, kind: 'community' }, { onError: (err) => toast.error(humanError(err)) });
+          toast.success(community ? 'Community created' : 'Lab created', { description: name });
+          setName('');
+        },
+        onError: (err) => toast.error(humanError(err)),
+      },
     );
   }
 
@@ -59,6 +71,7 @@ function Admin() {
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Lab name" maxLength={120} aria-label="Lab name" style={{ flex: '1 1 260px' }} />
           <select value={focus} onChange={(e) => setFocus(e.target.value)} aria-label="Category">
             {LAB_FOCUS.map((f) => <option key={f} value={f}>{f}</option>)}
+            <option value={COMMUNITY}>Student community</option>
           </select>
           <Button type="submit" disabled={actions.createLab.isPending || name.trim().length < 2}><Plus />Create</Button>
         </form>
@@ -74,7 +87,11 @@ function Admin() {
           return (
             <div key={l.id} className="admin-lab">
               <div className="admin-lab-head">
-                <strong><Link to="/labs/$slug" params={{ slug: l.slug }}>{l.name}</Link> <small className="small-note">{l.focus.join(' · ')}</small></strong>
+                <strong><Link to="/labs/$slug" params={{ slug: l.slug }}>{l.name}</Link> <small className="small-note">{l.kind === 'community' ? 'Community' : l.focus.join(' · ')}</small></strong>
+                <Button size="sm" variant="ghost" disabled={setKind.isPending} title="Show it under Labs or under Communities"
+                  onClick={() => setKind.mutate({ id: l.id, kind: l.kind === 'community' ? 'lab' : 'community' }, { onError: (err) => toast.error(humanError(err)) })}>
+                  {l.kind === 'community' ? 'Make it a lab' : 'Make it a community'}
+                </Button>
                 <Button asChild size="sm" variant="outline"><Link to="/labs/$slug" params={{ slug: l.slug }} search={{ edit: true }}><Pencil />Edit</Link></Button>
                 <Button size="sm" variant="ghost" onClick={() => setToDelete(l)} aria-label={`Delete ${l.name}`}><Trash2 /></Button>
               </div>

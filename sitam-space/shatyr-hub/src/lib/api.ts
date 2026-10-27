@@ -21,6 +21,10 @@ export const MANAGER_ROLES: LabRole[] = ['lead', 'co_lead'];
 export const LAB_ROLE_ORDER: LabRole[] = [
   'lead', 'co_lead', 'student_lead', 'deputy_student_lead', 'mentor', 'project_coordinator', 'research_assistant', 'student_researcher', 'member', 'former_lead',
 ];
+/** Positions for a select: "Head" is offered once (lead); co_lead / former_lead only when the row already has it. */
+export function positionOptions(list: readonly LabRole[], current?: LabRole): LabRole[] {
+  return list.filter((r) => (r !== 'co_lead' && r !== 'former_lead') || r === current);
+}
 /** One person's position (singular), for selects and badges. */
 export const LAB_POSITION_LABEL: Record<LabRole, string> = {
   lead: 'Head', co_lead: 'Head', student_lead: 'Student lead', deputy_student_lead: 'Deputy student lead',
@@ -87,6 +91,8 @@ export type Lab = {
   /** v11: second lab filter, and what the lab plans next */
   direction?: string | null;
   upcoming_activities?: string[];
+  /** v12: 'lab' (laboratory) or 'community' (student community, e.g. AWS Student Builders Group) */
+  kind?: 'lab' | 'community';
   updated_at: string;
   lab_members: LabMember[];
 };
@@ -441,7 +447,7 @@ export function useRemoveLabMember() {
 export type Person = {
   id: string; first_name: string; last_name: string; role: string; email: string;
   course: number | null; major: string | null; department: string | null; position: string | null; bio: string | null;
-  faculty?: string | null; group_name?: string | null; avatar_url?: string | null;
+  faculty?: string | null; group_name?: string | null; avatar_url?: string | null; personal_email?: string | null;
 };
 
 export function usePeople(ids: string[], enabled = true) {
@@ -1024,6 +1030,9 @@ export type ExternalEvent = {
   id: string; series_id: string | null; kind: ExternalKind; title: string; organizer: string | null; location: string | null; url: string | null;
   starts_on: string | null; ends_on: string | null; year: number | null; description: string | null; created_by: string | null;
   poster_url?: string | null;
+  /** v12: where it happens and whether SDU co-hosts it */
+  location_type?: 'sdu' | 'outside' | 'online';
+  cohosted?: boolean;
   event_series: EventSeries | null;
   external_event_labs: ExternalEntry[];
 };
@@ -1122,6 +1131,59 @@ export function useSetPoster() {
       void qc.invalidateQueries({ queryKey: qk.events });
       void qc.invalidateQueries({ queryKey: qk.externalEvents });
     },
+  });
+}
+
+/** v12: where an external event happens and whether SDU co-hosts it (author or coordinator; checked in SQL). */
+export function useSetExternalPlace() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { id: string; location_type: 'sdu' | 'outside' | 'online'; cohosted: boolean }) => {
+      const { error } = await db.rpc('set_external_event_place', { p_event: v.id, p_location_type: v.location_type, p_cohosted: v.cohosted });
+      if (error) fail(error);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.externalEvents }),
+  });
+}
+
+/* ───────────────────────────── Industry partners (v12) ───────────────────────────── */
+export type IndustryPartner = {
+  id: string; name: string; short_name: string | null; logo_url: string | null; website: string | null; ceo: string | null;
+  founded_year: number | null; sdu_alumni: string[]; upcoming_projects: string[]; completed_projects: string[]; lab_ids: string[]; sort_order: number;
+};
+export type IndustryPartnerDraft = Omit<IndustryPartner, 'id'> & { id: string | null };
+const partnersKey = ['industry-partners'] as const;
+export function useIndustryPartners() {
+  return useQuery({
+    queryKey: partnersKey, staleTime: 60_000,
+    queryFn: () => rows<IndustryPartner[]>(db.from('industry_partners').select('*').order('sort_order').order('name')),
+  });
+}
+/** Coordinator only (row-level security on industry_partners). */
+export function useSavePartner() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (d: IndustryPartnerDraft) => {
+      const { id, ...row } = d;
+      const { error } = id ? await db.from('industry_partners').update({ ...row, updated_at: new Date().toISOString() }).eq('id', id) : await db.from('industry_partners').insert(row);
+      if (error) fail(error);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: partnersKey }),
+  });
+}
+export function useDeletePartner() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => { const { error } = await db.from('industry_partners').delete().eq('id', id); if (error) fail(error); },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: partnersKey }),
+  });
+}
+/** v12, coordinator only (trigger labs_kind_guard): laboratory or student community. */
+export function useSetLabKind() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { id: string; kind: 'lab' | 'community' }) => { const { error } = await db.from('labs').update({ kind: v.kind }).eq('id', v.id); if (error) fail(error); },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.labs }),
   });
 }
 

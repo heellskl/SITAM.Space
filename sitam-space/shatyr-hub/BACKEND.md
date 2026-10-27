@@ -121,3 +121,12 @@ delete from companies where name = 'Demo Partner (sample)';
 ## v11 (2026-10-25)
 - `20261025100000_sitam_v11_labs_events.sql`: focus Courses / Academic / Education → Education, order Industry · Research · Education; `labs.direction` (filled for the 21 labs; RedHat → Cloud & Cybersecurity), `labs.upcoming_activities`, `lab_members.is_past` + `graduation_year` (column grants for heads), `events.poster_url` + `set_event_poster` (organizers), `external_events.poster_url` + `set_external_event_poster` (author / coordinator).
 - Existing database → `supabase/update-to-v11.sql`. Tests: 57 checks.
+
+## v12 (2026-10-27)
+- Migration `20261027100000_sitam_v12_industry_communities.sql` (run `supabase/update-to-v12.sql` on the live project; re-runnable).
+- `labs.kind` ('lab' | 'community') + trigger `labs_kind_guard` (only `is_admin()` changes it). Seeds 3 communities: AWS Student Builders Group, Competitive Programming Team, SDU Official Hackathon Team.
+- Focus "Industry & Commercial Projects" → "Commercial Projects".
+- `profiles.personal_email` (column grant update; in `public_people`, signed-in users only).
+- `external_events.location_type` ('sdu' | 'outside' | 'online'), `external_events.cohosted`; RPC `set_external_event_place(event, location_type, cohosted)` — author or coordinator.
+- `industry_partners` (name, short_name, logo_url, website, ceo, founded_year, sdu_alumni[], upcoming_projects[], completed_projects[], lab_ids[]): public read, coordinator writes (RLS). Seeded from the lab forms (5 partners); CEO / year / alumni are left empty for the coordinator.
+- Tests: `supabase/tests/permissions_tests.sql` — 68 checks.

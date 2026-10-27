@@ -1,12 +1,15 @@
 import { useState } from 'react';
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { ArrowUpRight, FlaskConical, Plus } from 'lucide-react';
+import { ArrowUpRight, Briefcase, Building2, FlaskConical, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ListingDialog } from '@/components/manage-panels';
 import { useMyLabs } from '@/components/my-labs';
 import { eventDate, opportunityLabel, useOpportunities } from '@/lib/api';
 import { OpportunityBoard, type OppTab } from '@/components/opportunity-board';
 import { pageHead } from '@/lib/hub-data';
+import { EventBoard } from '@/components/event-board';
+import { IndustryPartners } from '@/components/industry-partners';
+import { SearchBar } from '@/components/search-bar';
 
 const TABS: OppTab[] = ['all', 'industrial', 'lab', 'research'];
 
@@ -15,7 +18,7 @@ export const Route = createFileRoute('/opportunities')({
     ...(typeof s['tab'] === 'string' && (TABS as string[]).includes(s['tab']) ? { tab: s['tab'] as OppTab } : {}),
     ...(typeof s['open'] === 'string' ? { open: s['open'] } : {}),
   }),
-  head: () => pageHead('Opportunities', 'Industrial cases (vacancies, internships, projects), lab cases and research cases for SDU students.'),
+  head: () => pageHead('Industry', 'Industry events, industrial cases (vacancies, internships, projects), lab and research cases, and SITAM industry partners.'),
   component: Opportunities,
 });
 
@@ -30,7 +33,7 @@ function MyLabCases() {
   return (
     <section className="labs-section" aria-labelledby="my-lab-cases">
       <div className="labs-section-head">
-        <h2 id="my-lab-cases"><FlaskConical size={18} />Open cases of my labs</h2>
+        <h3 id="my-lab-cases" className="industry-sub"><FlaskConical size={16} />Open cases of my labs</h3>
         <div className="dash-quick">
           <Button size="sm" onClick={() => setAdding(true)}><Plus />Post a lab case</Button>
           <Button asChild size="sm" variant="outline"><Link to="/manage" search={{ tab: 'inbox' }}>Applications<ArrowUpRight /></Link></Button>
@@ -53,14 +56,26 @@ function MyLabCases() {
   );
 }
 
+/** Industry (formerly Opportunities): industry events with the Events filters, then Opportunities and Partners. */
 function Opportunities() {
   const { tab, open } = Route.useSearch();
+  const [q, setQ] = useState('');
   return (
     <main className="container content-page">
-      <h1>Opportunities</h1>
-      <div className="mt-6" />
-      <MyLabCases />
-      <OpportunityBoard key={tab ?? 'all'} initialTab={tab ?? 'all'} openId={open} />
+      <h1>Industry</h1>
+      <div className="mt-6"><SearchBar value={q} onChange={setQ} placeholder="Search industry events, speakers, companies" /></div>
+      <EventBoard query={q} fixedType="industry" allowAdd={false} />
+
+      <section className="industry-section" aria-labelledby="industry-opps" id="opportunities">
+        <h2 id="industry-opps"><Briefcase size={20} />Opportunities</h2>
+        <MyLabCases />
+        <OpportunityBoard key={tab ?? 'all'} initialTab={tab ?? 'all'} openId={open} />
+      </section>
+
+      <section className="industry-section" aria-labelledby="industry-partners" id="partners">
+        <h2 id="industry-partners"><Building2 size={20} />Partners</h2>
+        <IndustryPartners />
+      </section>
     </main>
   );
 }

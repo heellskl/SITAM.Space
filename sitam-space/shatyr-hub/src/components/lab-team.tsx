@@ -15,8 +15,7 @@ import {
 import { LabLogo } from '@/components/lab-browser';
 import {
   HEAD_ROLES, LAB_POSITION_LABEL, LAB_ROLE_ORDER, MANAGER_ROLES, humanError, personName, useAddLabMember, usePeople, useRemoveLabMember, useUpdateLabMember,
-  type Lab, type LabMember, type LabRole, type Person,
-} from '@/lib/api';
+  type Lab, type LabMember, type LabRole, type Person, positionOptions } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { gmailCompose } from '@/lib/utils';
 
@@ -95,7 +94,7 @@ export function LabTeamManager({ lab, onEdit }: { lab: Lab; onEdit: () => void }
         <div className="inline-form mb-3">
           <label className="small-note">Position{' '}
             <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as LabRole })}>
-              {addable.map((r) => <option key={r} value={r}>{LAB_POSITION_LABEL[r]}</option>)}
+              {positionOptions(addable).map((r) => <option key={r} value={r}>{LAB_POSITION_LABEL[r]}</option>)}
             </select>
           </label>
           <input value={form.title} maxLength={200} placeholder="Title (optional), e.g. 3rd year, CS" onChange={(e) => setForm({ ...form, title: e.target.value })} aria-label="Title" />
@@ -134,7 +133,7 @@ export function LabTeamManager({ lab, onEdit }: { lab: Lab; onEdit: () => void }
                         <span className="role-chip">{LAB_POSITION_LABEL[m.role]}</span>
                       ) : (
                         <select aria-label={`Position of ${m.full_name}`} value={m.role} disabled={update.isPending} onChange={(e) => changeRole(m, e.target.value as LabRole)}>
-                          {positions.map((r) => <option key={r} value={r}>{LAB_POSITION_LABEL[r]}</option>)}
+                          {positionOptions(positions, m.role).map((r) => <option key={r} value={r}>{LAB_POSITION_LABEL[r]}</option>)}
                         </select>
                       )}
                     </td>

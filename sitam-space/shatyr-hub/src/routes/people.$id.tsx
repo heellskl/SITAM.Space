@@ -1,3 +1,4 @@
+import { PersonEmails } from '@/components/lab-page';
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { gmailCompose } from '@/lib/utils';
 import { ArrowLeft, FlaskConical, LogIn, Mail, UserRound } from 'lucide-react';
@@ -48,7 +49,7 @@ function PersonPage() {
           <span className="eyebrow">{ROLE_LABEL[person.role as Role] ?? person.role}{labs.some((l) => l.role === 'lead' || l.role === 'co_lead') ? ' · LAB HEAD' : ''}</span>
           <h1>{name}</h1>
           {details && <p className="small-note">{details}</p>}
-          <p className="mt-2"><a className="person-mail" href={gmailCompose(person.email)} target="_blank" rel="noopener noreferrer"><Mail size={15} />{person.email}</a></p>
+          <p className="mt-2"><PersonEmails person={person} size={15} /></p>
         </div>
         <div className="profile-head-actions">
           <Button asChild><a href={gmailCompose(person.email)} target="_blank" rel="noopener noreferrer"><Mail />Write an e-mail</a></Button>

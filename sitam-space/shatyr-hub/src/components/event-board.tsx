@@ -24,7 +24,7 @@ export function HostPills({ hosts }: { hosts: Host[] }) {
       {hosts.map((h) =>
         h.labs ? <Link key={h.id} to="/labs/$slug" params={{ slug: h.labs.slug }} className="pill pill-live">{h.labs.name}</Link>
         : h.companies ? <span key={h.id} className="pill pill-gold">{h.companies.name}</span>
-        : h.projects ? <Link key={h.id} to="/projects" className="pill pill-done">{h.projects.title}</Link> : null,
+        : h.projects ? <Link key={h.id} to="/labs" search={{ tab: 'projects' }} className="pill pill-done">{h.projects.title}</Link> : null,
       )}
     </p>
   );
@@ -66,14 +66,16 @@ export function TicketBadge({ event, reg, holder }: { event: Pick<SitamEvent, 'k
   );
 }
 
-/* ═════════════ v11 feed: SDU events + external events, two filters, list or calendar, posters ═════════════ */
+/* ═════════════ v11/v12 feed: SDU events + external events, filters, list or calendar, posters ═════════════ */
 
-type FeedType = 'industry' | 'research' | 'competitions';
-type FeedWhere = 'internal' | 'external';
+export type FeedType = 'industry' | 'research' | 'competitions';
+type FeedLocation = 'sdu' | 'outside' | 'online';
+type FeedOrganizer = 'sdu' | 'external' | 'cohosted';
 type FeedItem = {
   key: string;
   type: FeedType;
-  where: FeedWhere;
+  location: FeedLocation;
+  organizer: FeedOrganizer;
   title: string;
   host: string;
   start: Date | null;            // null = only the year is known
@@ -86,7 +88,11 @@ type FeedItem = {
   external?: ExternalEvent;
 };
 const TYPE_LABEL: Record<FeedType, string> = { industry: 'Industry', research: 'Research', competitions: 'Competitions' };
-const WHERE_LABEL: Record<FeedWhere, string> = { internal: 'Internal', external: 'External' };
+const LOCATION_LABEL: Record<FeedLocation, string> = { sdu: 'At SDU', outside: 'Outside SDU', online: 'Online' };
+const ORGANIZER_LABEL: Record<FeedOrganizer, string> = { sdu: 'SDU', external: 'External', cohosted: 'Co-hosted' };
+const ONLINE = /(^|\W)(online|zoom|google meet|meet\.google|teams|remote|webinar)(\W|$)/i;
+/** More than this many cards → the rest is behind "Show all". */
+const PAGE = 8;
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 
@@ -94,7 +100,10 @@ function toFeed(events: SitamEvent[], external: ExternalEvent[], now: number): F
   const sdu = events.map((e): FeedItem => {
     const start = new Date(e.starts_at);
     return {
-      key: `sdu-${e.id}`, type: e.kind === 'industrial' ? 'industry' : 'research', where: 'internal', title: e.title,
+      key: `sdu-${e.id}`, type: e.kind === 'industrial' ? 'industry' : 'research', title: e.title,
+      location: ONLINE.test(e.room ?? '') ? 'online' : 'sdu',
+      // an SDU event with a company among its hosts is co-hosted
+      organizer: e.event_hosts.some((h) => !!h.company_id) ? 'cohosted' : 'sdu',
       host: hostNames(e.event_hosts) || 'SITAM', start, end: null, year: start.getFullYear(), upcoming: start.getTime() > now - 3_600_000,
       poster: e.poster_url ?? null, meta: `${eventDate(e.starts_at).short} · ${eventDate(e.starts_at).time} · Room ${e.room}`, sdu: e,
     };
@@ -102,7 +111,9 @@ function toFeed(events: SitamEvent[], external: ExternalEvent[], now: number): F
   const ext = external.map((x): FeedItem => {
     const start = x.starts_on ? new Date(`${x.starts_on}T09:00:00`) : null;
     return {
-      key: `ext-${x.id}`, type: x.kind === 'conference' ? 'research' : 'competitions', where: 'external', title: x.title,
+      key: `ext-${x.id}`, type: x.kind === 'conference' ? 'research' : 'competitions', title: x.title,
+      location: x.location_type ?? (ONLINE.test(x.location ?? '') ? 'online' : 'outside'),
+      organizer: x.cohosted ? 'cohosted' : 'external',
       host: x.organizer ?? EXTERNAL_KIND_LABEL[x.kind], start, end: x.ends_on ? new Date(`${x.ends_on}T18:00:00`) : null, year: x.year,
       upcoming: isUpcomingExternal(x), poster: x.poster_url ?? null,
       meta: `${externalDates(x)}${x.location ? ` · ${x.location}` : ''}`, external: x,
@@ -133,7 +144,7 @@ function PosterCard({ item, onOpen }: { item: FeedItem; onOpen: (i: FeedItem) =>
     <>
       {cover}
       <h3 className="poster-title">{item.title}</h3>
-      <p className="poster-tags">{TYPE_LABEL[item.type]} · {WHERE_LABEL[item.where]} · {item.meta}</p>
+      <p className="poster-tags"><span className={`ev-tag ev-${item.type}`}>{TYPE_LABEL[item.type]}</span> {LOCATION_LABEL[item.location]} · {item.meta}</p>
     </>
   );
   return item.sdu ? (
@@ -162,6 +173,7 @@ function CalendarView({ items, onOpen }: { items: FeedItem[]; onOpen: (i: FeedIt
   const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
   const cells = Array.from({ length: Math.ceil((first + days) / 7) * 7 }, (_, i) => i - first + 1);
   const today = dayKey(new Date());
+  const todayStart = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()).getTime();
   const go = (delta: number) => setMonth((m) => new Date(m.getFullYear(), m.getMonth() + delta, 1));
   return (
     <div className="ev-cal">
@@ -178,7 +190,7 @@ function CalendarView({ items, onOpen }: { items: FeedItem[]; onOpen: (i: FeedIt
           const date = new Date(month.getFullYear(), month.getMonth(), n);
           const list = byDay.get(dayKey(date)) ?? [];
           return (
-            <div key={i} className={`ev-cal-cell${dayKey(date) === today ? ' is-today' : ''}`} role="gridcell" aria-label={`${n} ${month.toLocaleDateString('en-GB', { month: 'long' })}: ${list.length} events`}>
+            <div key={i} className={`ev-cal-cell${dayKey(date) === today ? ' is-today' : date.getTime() < todayStart ? ' is-past-day' : ''}`} role="gridcell" aria-current={dayKey(date) === today ? 'date' : undefined} aria-label={`${n} ${month.toLocaleDateString('en-GB', { month: 'long' })}${dayKey(date) === today ? ' (today)' : ''}: ${list.length} events`}>
               <span className="ev-cal-day">{n}</span>
               {list.slice(0, 3).map((it) => (
                 <button key={it.key} type="button" className={`ev-cal-item ev-${it.type}${it.upcoming ? '' : ' is-past'}`} onClick={() => onOpen(it)} title={it.title}>
@@ -197,13 +209,53 @@ function CalendarView({ items, onOpen }: { items: FeedItem[]; onOpen: (i: FeedIt
   );
 }
 
-export function EventBoard({ query = '' }: { query?: string }) {
+/** One filter row: label + "All" + options. */
+function FilterRow<T extends string>({ label, options, labels, value, onChange }: {
+  label: string; options: readonly T[]; labels: Record<T, string>; value: T | 'all'; onChange: (v: T | 'all') => void;
+}) {
+  return (
+    <div className="chip-filter" role="group" aria-label={label}>
+      <span className="chip-filter-label">{label}</span>
+      {(['all', ...options] as (T | 'all')[]).map((o) => (
+        <button key={o} type="button" className={value === o ? 'chip is-on' : 'chip'} aria-pressed={value === o} onClick={() => onChange(o)}>{o === 'all' ? 'All' : labels[o as T]}</button>
+      ))}
+    </div>
+  );
+}
+
+/** Poster grid that shows the first 8 cards and a "Show all" button for the rest. */
+function PosterList({ items, onOpen, past }: { items: FeedItem[]; onOpen: (i: FeedItem) => void; past?: boolean }) {
+  const [all, setAll] = useState(false);
+  const shown = all ? items : items.slice(0, PAGE);
+  return (
+    <>
+      <div className={past ? 'poster-grid is-past' : 'poster-grid'}>
+        {shown.map((it) => <PosterCard key={it.key} item={it} onOpen={onOpen} />)}
+      </div>
+      {items.length > PAGE && (
+        <div className="show-more">
+          <Button variant="outline" size="sm" onClick={() => setAll((x) => !x)} aria-expanded={all}>
+            {all ? 'Show less' : `Show all · ${items.length}`}
+          </Button>
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * Events feed. `fixedType` (Industry page) shows one type only and hides the Type filter;
+ * the Location and Organized by filters work the same everywhere, for upcoming and past events.
+ */
+export function EventBoard({ query = '', fixedType, allowAdd = true }: { query?: string; fixedType?: FeedType; allowAdd?: boolean }) {
   const { data, isLoading, error } = useEvents();
   const ext = useExternalEvents();
   const navigate = useNavigate();
   const rights = useExternalRights();
-  const [type, setType] = useState<FeedType | 'all'>('all');
-  const [where, setWhere] = useState<FeedWhere | 'all'>('all');
+  const [typeSel, setType] = useState<FeedType | 'all'>('all');
+  const type = fixedType ?? typeSel;
+  const [location, setLocation] = useState<FeedLocation | 'all'>('all');
+  const [organizer, setOrganizer] = useState<FeedOrganizer | 'all'>('all');
   const [view, setView] = useState<'list' | 'calendar'>('list');
   const [open, setOpen] = useState<ExternalEvent | null>(null);
   const [adding, setAdding] = useState(false);
@@ -213,9 +265,9 @@ export function EventBoard({ query = '' }: { query?: string }) {
   const items = useMemo(() => {
     const all = toFeed(data ?? [], ext.data ?? [], Date.now());
     return all.filter((it) =>
-      (type === 'all' || it.type === type) && (where === 'all' || it.where === where)
+      (type === 'all' || it.type === type) && (location === 'all' || it.location === location) && (organizer === 'all' || it.organizer === organizer)
       && (!term || `${it.title} ${it.host} ${it.sdu?.speaker ?? ''} ${it.sdu?.tags.join(' ') ?? ''}`.toLowerCase().includes(term)));
-  }, [data, ext.data, type, where, term]);
+  }, [data, ext.data, type, location, organizer, term]);
   const mineFirstItem = (it: FeedItem) => !!it.sdu?.event_hosts.some((h) => my.isMineLab(h.lab_id)) || !!it.external?.external_event_labs.some((x) => my.isMineLab(x.lab_id));
   const upcoming = mineFirst(items.filter((i) => i.upcoming).sort((a, b) => (a.start?.getTime() ?? Infinity) - (b.start?.getTime() ?? Infinity)), mineFirstItem);
   const past = items.filter((i) => !i.upcoming).sort((a, b) => (b.start?.getTime() ?? (b.year ?? 0) * 1e11) - (a.start?.getTime() ?? (a.year ?? 0) * 1e11));
@@ -224,28 +276,20 @@ export function EventBoard({ query = '' }: { query?: string }) {
     else if (it.external) setOpen(it.external);
   };
   const loading = isLoading || ext.isLoading;
+  // remount the lists when filters change, so "Show all" starts collapsed again
+  const listKey = `${type}-${location}-${organizer}-${term}`;
 
   return (
     <>
       {(error || ext.error) && <p className="form-alert">{humanError(error ?? ext.error)}</p>}
       <div className="ev-toolbar">
         <div className="ev-filters">
-          <div className="chip-filter" role="group" aria-label="Type">
-            <span className="chip-filter-label">Type</span>
-            {(['all', 'industry', 'research', 'competitions'] as const).map((t) => (
-              <button key={t} type="button" className={type === t ? 'chip is-on' : 'chip'} aria-pressed={type === t} onClick={() => setType(t)}>{t === 'all' ? 'All' : TYPE_LABEL[t]}</button>
-            ))}
-          </div>
-          <div className="chip-filter" role="group" aria-label="Where">
-            <span className="chip-filter-label">Where</span>
-            {(['all', 'internal', 'external'] as const).map((w) => (
-              <button key={w} type="button" className={where === w ? 'chip is-on' : 'chip'} aria-pressed={where === w} onClick={() => setWhere(w)}
-                title={w === 'internal' ? 'Organized by SDU' : w === 'external' ? 'Organized outside SDU' : undefined}>{w === 'all' ? 'All' : WHERE_LABEL[w]}</button>
-            ))}
-          </div>
+          {!fixedType && <FilterRow label="Type" options={['industry', 'research', 'competitions'] as const} labels={TYPE_LABEL} value={typeSel} onChange={setType} />}
+          <FilterRow label="Location" options={['sdu', 'outside', 'online'] as const} labels={LOCATION_LABEL} value={location} onChange={setLocation} />
+          <FilterRow label="Organized by" options={['sdu', 'external', 'cohosted'] as const} labels={ORGANIZER_LABEL} value={organizer} onChange={setOrganizer} />
         </div>
         <div className="ev-actions">
-          {rights.canAdd && <Button size="sm" variant="outline" onClick={() => setAdding(true)}><Trophy />Add external event</Button>}
+          {allowAdd && rights.canAdd && <Button size="sm" variant="outline" onClick={() => setAdding(true)}><Trophy />Add external event</Button>}
           <div className="view-switch" role="group" aria-label="View">
             <button type="button" className={view === 'list' ? 'is-on' : ''} aria-pressed={view === 'list'} onClick={() => setView('list')}><LayoutGrid size={15} />List</button>
             <button type="button" className={view === 'calendar' ? 'is-on' : ''} aria-pressed={view === 'calendar'} onClick={() => setView('calendar')}><CalendarDays size={15} />Calendar</button>
@@ -258,19 +302,15 @@ export function EventBoard({ query = '' }: { query?: string }) {
       ) : (
         <>
           <section aria-label="Upcoming events">
-            <div className="poster-grid">
-              {loading && Array.from({ length: 4 }, (_, i) => <div key={i} className="poster-card skeleton-card" aria-hidden />)}
-              {upcoming.map((it) => <PosterCard key={it.key} item={it} onOpen={openItem} />)}
-            </div>
+            {loading && <div className="poster-grid">{Array.from({ length: 4 }, (_, i) => <div key={i} className="poster-card skeleton-card" aria-hidden />)}</div>}
+            {!loading && <PosterList key={`u-${listKey}`} items={upcoming} onOpen={openItem} />}
             {!loading && upcoming.length === 0 && <div className="mini-empty"><CalendarDays size={20} /><p>No upcoming events for these filters.</p></div>}
           </section>
 
           {past.length > 0 && (
-            <section className="past-events" aria-labelledby="past-events">
-              <h2 id="past-events"><History size={18} />Past Events · {past.length}</h2>
-              <div className="poster-grid is-past">
-                {past.map((it) => <PosterCard key={it.key} item={it} onOpen={openItem} />)}
-              </div>
+            <section className="past-events" aria-labelledby={`past-events-${fixedType ?? 'all'}`}>
+              <h2 id={`past-events-${fixedType ?? 'all'}`}><History size={18} />Past Events · {past.length}</h2>
+              <PosterList key={`p-${listKey}`} items={past} onOpen={openItem} past />
             </section>
           )}
         </>

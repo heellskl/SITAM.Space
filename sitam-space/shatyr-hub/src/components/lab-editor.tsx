@@ -1,11 +1,11 @@
 // Lab head editor — mirrors the lab form (labs.json fields). List answers: one item per line.
 
 import { useState, type ReactNode } from 'react';
-import { ArrowLeft, ImagePlus, Lock, Plus, Save, Trash2, Upload } from 'lucide-react';
+import { ArrowLeft, ImagePlus, Loader2, Lock, Plus, Save, Trash2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import {
-  HEAD_ROLES, LAB_POSITION_LABEL, LAB_ROLE_ORDER, humanError, labSetupSteps, saveLab, uploadLabImage, useLabContacts, useLabInternal, useLabs, useProjects,
+  HEAD_ROLES, LAB_POSITION_LABEL, LAB_ROLE_ORDER, humanError, positionOptions, labSetupSteps, saveLab, uploadLabImage, useLabContacts, useLabInternal, useLabs, useProjects,
   type Lab, type LabInternal, type LabRole, type MemberDraft, type ProjectDraft, type SocialLink,
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
@@ -343,7 +343,7 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
                 <input aria-label="Full name" placeholder="Full name" value={m.full_name} disabled={locked} onChange={(e) => patchMember(i, { full_name: e.target.value })} />
                 <input aria-label="Title" placeholder="Title / year & major" value={m.title} disabled={locked} onChange={(e) => patchMember(i, { title: e.target.value })} />
                 <select aria-label="Position" value={m.role} disabled={locked} onChange={(e) => patchMember(i, { role: e.target.value as LabRole })}>
-                  {ROLES.filter((r) => canEditHeads || locked || !isHeadRole(r)).map((r) => <option key={r} value={r}>{SINGULAR[r]}</option>)}
+                  {positionOptions(ROLES.filter((r) => canEditHeads || locked || !isHeadRole(r)), m.role).map((r) => <option key={r} value={r}>{SINGULAR[r]}</option>)}
                 </select>
                 {m.role === 'former_lead' ? (
                   <input aria-label="Term" placeholder="2023–2025" value={m.term} onChange={(e) => patchMember(i, { term: e.target.value })} />
@@ -351,12 +351,13 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
                   <input aria-label="SDU e-mail" placeholder="SDU e-mail (private)" value={m.email} onChange={(e) => patchMember(i, { email: e.target.value })} />
                 )}
                 <input aria-label="Contact" placeholder="Phone / Telegram (private)" value={m.contact} onChange={(e) => patchMember(i, { contact: e.target.value })} />
-                {!isHeadRole(m.role) && m.role !== 'former_lead' && (
-                  <span className="team-past">
+                {/* always one cell, so every row has the same columns and nothing spills out of the box */}
+                <span className="team-past">
+                  {!isHeadRole(m.role) && m.role !== 'former_lead' && <>
                     <label className="check"><input type="checkbox" checked={!!m.is_past} onChange={(e) => patchMember(i, { is_past: e.target.checked })} />Past member</label>
                     {m.is_past && <input aria-label="Graduation year" placeholder="Graduated (year)" inputMode="numeric" maxLength={4} value={m.graduation_year ?? ''} onChange={(e) => patchMember(i, { graduation_year: e.target.value })} />}
-                  </span>
-                )}
+                  </>}
+                </span>
                 <Button type="button" variant="ghost" size="icon" aria-label="Remove" disabled={locked} onClick={() => setMembers((l) => l.filter((_, j) => j !== i))}><Trash2 /></Button>
               </div>
               );
@@ -366,7 +367,7 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
           <p className="small-note">Heads are at the top. Mark people who left as “Past member” and add the year they graduated — they move to “Past team” on the lab page.</p>
         </Block>}
 
-        {tab === 'projects' && <Block title="Projects" wide note="Lab projects appear on the Projects page and the Overview. A demo link is optional — share it only if you want to.">
+        {tab === 'projects' && <Block title="Projects" wide note="Lab projects appear in Labs → Projects and on the lab page. A demo link is optional — share it only if you want to.">
           <div className="project-editor">
             {projs.map((p, i) => (
               <div key={p.id ?? `new-${i}`} className="project-row">
@@ -438,7 +439,9 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
       {error && <p className="form-alert mt-4" role="alert">{error}</p>}
       <div className="editor-actions">
         <Button variant="outline" onClick={onDone} disabled={busy}>Cancel</Button>
-        <Button onClick={save} disabled={busy}><Save />{busy ? 'Saving…' : 'Save lab page'}</Button>
+        <Button onClick={save} disabled={busy} className={busy ? 'save-btn is-saving' : 'save-btn'} aria-busy={busy}>
+          {busy ? <Loader2 className="animate-spin" /> : <Save />}{busy ? 'Saving…' : 'Save lab'}
+        </Button>
       </div>
     </main>
   );

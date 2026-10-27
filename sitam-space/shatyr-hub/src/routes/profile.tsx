@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { gmailCompose } from '@/lib/utils';
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { ArrowUpRight, BarChart3, Bookmark, Briefcase, FileText, Inbox, KeyRound, Lightbulb, LogIn, Mail, Megaphone, Pencil, Phone, Ticket as TicketIcon, Trash2, Upload } from 'lucide-react';
@@ -19,6 +19,8 @@ import { DEPARTMENTS } from '@/lib/sitam-data';
 import { pageHead } from '@/lib/hub-data';
 
 export const Route = createFileRoute('/profile')({
+  // ?settings=true (from the profile menu) opens the details form
+  validateSearch: (s: Record<string, unknown>): { settings?: true } => (s['settings'] === true || s['settings'] === 'true' ? { settings: true } : {}),
   head: () => pageHead('Profile', 'Your SITAM SPACE profile: CV, applications, event tickets and saved labs.'),
   component: Profile,
 });
@@ -50,7 +52,9 @@ function Profile() {
   const listings = useManagedOpportunities(!!user && !!profile && profile.role === 'teacher', user?.id);
   const research = useProfessor(caps.professorUsername ?? '');
   const [posting, setPosting] = useState(false);
-  const [editing, setEditing] = useState(false);
+  const { settings } = Route.useSearch();
+  const [editing, setEditing] = useState(!!settings);
+  useEffect(() => { if (settings) setEditing(true); }, [settings]);
   const [busy, setBusy] = useState(false);
   const [ticket, setTicket] = useState<{ event: SitamEvent; reg: Registration } | null>(null);
 
@@ -148,7 +152,7 @@ function Profile() {
             <h3 className="panel-title"><Megaphone size={16} />My opportunities</h3>
             <p className="small-note mb-3">
               {caps.isStaff
-                ? 'Topics, research positions and thesis offers you post appear on the Opportunities page automatically. You see every applicant (name, contacts, e-mail, CV) in Manage → Applications.'
+                ? 'Topics, research positions and thesis offers you post appear on the Industry page (Opportunities) automatically. You see every applicant (name, contacts, e-mail, CV) in Manage → Applications.'
                 : 'You can post opportunities in your own name as soon as the SITAM office verifies your teacher account.'}
             </p>
             {(() => {
@@ -337,10 +341,12 @@ function DetailsDialog({ onClose }: { onClose: () => void }) {
     const s = (k: string) => String(d.get(k) ?? '').trim();
     const patch: Record<string, string | null> = {
       first_name: s('first_name'), last_name: s('last_name'), faculty: s('faculty') || null, group_name: s('group_name') || null,
+      personal_email: s('personal_email') || null,
     };
     if (student) patch['major'] = (major === OTHER_MAJOR ? s('majorCustom') : major) || null;
     if (staff) patch['department'] = (dept === 'Other' ? s('deptCustom') : dept) || null;
     if (patch['first_name']!.length < 2 || patch['last_name']!.length < 2) return setError('Enter your first and last name.');
+    if (patch['personal_email'] && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(patch['personal_email'])) return setError('Check the personal e-mail.');
     setBusy(true);
     const { error: err } = await db.from('profiles').update(patch).eq('id', user!.id);
     setBusy(false);
@@ -368,6 +374,10 @@ function DetailsDialog({ onClose }: { onClose: () => void }) {
             </span>
           </div>
           <div className="auth-row">
+            <div className="auth-row">
+              <label>SDU e-mail<input value={profile.email} readOnly aria-readonly /></label>
+              <label>Personal e-mail<input name="personal_email" type="email" defaultValue={profile.personalEmail ?? ''} maxLength={160} placeholder="name@gmail.com" /></label>
+            </div>
             <label>Faculty<input name="faculty" defaultValue={profile.faculty ?? ''} maxLength={120} placeholder="Engineering and Natural Sciences" /></label>
             <label>{profile.role === 'student' ? 'Group' : 'Department'}<input name="group_name" defaultValue={profile.groupName ?? ''} maxLength={120} placeholder={profile.role === 'student' ? 'IS-22-1' : 'Computer Science'} /></label>
           </div>

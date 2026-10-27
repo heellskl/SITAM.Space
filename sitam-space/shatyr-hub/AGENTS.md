@@ -59,3 +59,13 @@
 - Lab page: research areas / equipment / skills as chips; answers as separate cards; heads highlighted; "Past team" = former heads + `lab_members.is_past` with `graduation_year`; "Upcoming activities" (`labs.upcoming_activities` + upcoming events); "External activities you took part in". Removed: Looking to work with, Visit the lab, tour, live demos.
 - Lab form: 6 tabs — About · Logo & links · Team · Projects · Activities · Partners; chips input with suggestions from other labs (`tag-input.tsx`); numbered team rows; "Academic Year Plan".
 - Database: existing → `supabase/update-to-v11.sql`; empty → `supabase/setup-new-database.sql`. Both end with the access fix (`fix-permissions.sql`).
+
+## SITAM SPACE v12 — current rules (override older notes above)
+- Sidebar bottom: one "Profile" button (avatar + the word Profile, no role line) → dropdown Profile · Settings · Log out (`ProfileMenu` in hub-shell.tsx). Log out = signOut() then navigate to /login (replace). Settings = `/profile?settings=true` (opens the details form).
+- Navigation: Home, Labs, Events, Industry (route `/opportunities`, page title "Industry"), Research, FAQ. No Projects item.
+- Labs page (`labs.index.tsx`): tabs Labs · Communities · Projects (`?tab=communities|projects`, projects sub-tab `?ptab=community`). `/projects` redirects there. Communities = `labs.kind = 'community'` (same page/tools as a lab); only the coordinator changes `kind` (trigger `labs_kind_guard`; Admin → "Make it a community").
+- Lab focus: Commercial Projects · Research · Education (`LAB_FOCUS`).
+- Two e-mails: `profiles.personal_email` (edited in Profile → Settings), shown with the SDU e-mail by `PersonEmails` (lab-page.tsx) on lab teams and /people.
+- Events (`event-board.tsx`): filters Type · Location (At SDU / Outside SDU / Online) · Organized by (SDU / External / Co-hosted). SDU events: Online when the room says online/zoom/meet/teams; co-hosted when a company is a host. External events: `external_events.location_type`, `cohosted` via `set_external_event_place`. 8 cards, then "Show all". Calendar: past days grey, today amber. Colours: Industry #B45309, Research #1D4ED8, Competitions #047857.
+- Industry page: industry events (`EventBoard fixedType="industry"`), then "Opportunities" (board) and "Partners" (`industry-partners.tsx`, table `industry_partners`, coordinator edits).
+- Database: existing → `supabase/update-to-v12.sql`; empty → `supabase/setup-new-database.sql`.

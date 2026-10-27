@@ -21,7 +21,7 @@ export const EVENT_META = {
 } as const;
 
 // v11: three focus categories, in this order
-export const LAB_FOCUS = ['Industry & Commercial Projects', 'Research', 'Education'] as const;
+export const LAB_FOCUS = ['Commercial Projects', 'Research', 'Education'] as const;
 /** v11: second lab filter (labs.direction) */
 export const LAB_DIRECTIONS = ['AI & Data Science', 'Cloud & Cybersecurity', 'Robotics & IoT', 'Multimedia & Digital', 'Mathematics & Fundamental Sciences'] as const;
 

@@ -214,7 +214,7 @@ select 'guests can read competitions and results: ' || case when (select count(*
 reset role;
 
 \echo '── v11: focus order, directions, past members, posters'
-select 'focus in the order Industry · Research · Education: ' || case when (select focus from labs where slug='ai-lab') = array['Industry & Commercial Projects', 'Research', 'Education'] then 'PASS' else 'FAIL' end;
+select 'focus in the order Commercial Projects · Research · Education: ' || case when (select focus from labs where slug='ai-lab') = array['Commercial Projects', 'Research', 'Education'] then 'PASS' else 'FAIL' end;
 select 'every listed lab has a direction (21): ' || case when (select count(*) from labs where direction is not null) = 21 then 'PASS' else 'FAIL' end;
 select pg_temp.as_user('00000000-0000-0000-0000-00000000d001');
 select set_config('sitam.m', (select id::text from lab_members where lab_id = (select id from labs where slug='robotics-lab') and role::text not in ('lead','co_lead','former_lead') limit 1), false);
@@ -237,3 +237,39 @@ select pg_temp.as_user('00000000-0000-0000-0000-00000000d001');
 select public.set_external_event_poster(current_setting('sitam.ev')::uuid, 'https://example.org/poster.jpg');
 select pg_temp.as_super();
 select 'author sets the poster of an external event: ' || case when (select poster_url from external_events where id = current_setting('sitam.ev')::uuid) = 'https://example.org/poster.jpg' then 'PASS' else 'FAIL' end;
+
+\echo '── v12: communities, personal e-mail, event place, industry partners'
+select 'three communities, 21 labs: ' || case when (select count(*) from labs where kind='community') = 3 and (select count(*) from labs where kind='lab') >= 21 then 'PASS' else 'FAIL' end;
+select 'no lab keeps the old focus name: ' || case when not exists (select 1 from labs where 'Industry & Commercial Projects' = any(focus)) then 'PASS' else 'FAIL' end;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d003');
+do $$ begin
+  update labs set kind = 'community' where slug = 'robotics-lab';
+  raise notice 'FAIL a head turned the lab into a community';
+exception when others then raise notice 'PASS a head cannot turn the lab into a community (%)', sqlerrm; end $$;
+do $$ declare n int; begin
+  update labs set description = description || '' where slug = 'robotics-lab'; get diagnostics n = row_count;
+  raise notice '% the head still edits the lab info', case when n = 1 then 'PASS' else 'FAIL' end;
+end $$;
+update profiles set personal_email = 'aru.personal@gmail.com' where id = auth.uid();
+select 'a user adds a personal e-mail, visible in public_people: ' || case when (select personal_email from public_people where id = '00000000-0000-0000-0000-00000000d003') = 'aru.personal@gmail.com' then 'PASS' else 'FAIL' end;
+do $$ begin
+  perform public.set_external_event_place(current_setting('sitam.ev')::uuid, 'online', false);
+  raise notice 'FAIL a non-author changed the event place';
+exception when others then raise notice 'PASS only the author / coordinator sets the event place (%)', sqlerrm; end $$;
+do $$ declare n int; begin
+  insert into industry_partners (name) values ('Fake Partner LLC'); get diagnostics n = row_count;
+  raise notice '% a head added an industry partner', case when n = 0 then 'PASS' else 'FAIL' end;
+exception when others then raise notice 'PASS only the coordinator adds industry partners (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d001');
+select public.set_external_event_place(current_setting('sitam.ev')::uuid, 'sdu', true);
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c001');
+update labs set kind = 'community' where slug = 'robotics-lab';
+update labs set kind = 'lab' where slug = 'robotics-lab';
+insert into industry_partners (name, short_name, founded_year) values ('Test Partner LLC', 'TP', 2015);
+select pg_temp.as_super();
+select 'author marks an external event as at SDU, co-hosted: ' || case when (select location_type = 'sdu' and cohosted from external_events where id = current_setting('sitam.ev')::uuid) then 'PASS' else 'FAIL' end;
+select 'seeded GameJam / Freedom Challenge are co-hosted at SDU: ' || case when (select count(*) from external_events where cohosted and location_type='sdu' and (title ilike 'SDU Winter GameJam%' or title ilike 'Freedom Ecosystem Challenge%')) >= 2 then 'PASS' else 'FAIL' end;
+select 'coordinator adds a partner; seeded partners linked to labs: ' || case when exists (select 1 from industry_partners where name='Test Partner LLC') and (select count(*) from industry_partners where cardinality(lab_ids) > 0) = 5 then 'PASS' else 'FAIL' end;
+set role anon;
+select 'guests read the partners: ' || case when (select count(*) from industry_partners) >= 6 then 'PASS' else 'FAIL' end;
+reset role;
