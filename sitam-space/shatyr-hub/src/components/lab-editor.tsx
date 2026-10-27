@@ -5,12 +5,13 @@ import { ArrowLeft, ImagePlus, Loader2, Lock, Plus, Save, Trash2, Upload } from 
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import {
-  HEAD_ROLES, LAB_POSITION_LABEL, LAB_ROLE_ORDER, humanError, positionOptions, labSetupSteps, saveLab, uploadLabImage, useLabContacts, useLabInternal, useLabs, useProjects,
+  HEAD_ROLES, LAB_POSITION_LABEL, LAB_ROLE_ORDER, humanError, positionOptions, labSetupSteps, saveLab, uploadLabImage, useLabContacts, useLabInternal, useProjects,
   type Lab, type LabInternal, type LabRole, type MemberDraft, type ProjectDraft, type SocialLink,
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { LAB_DIRECTIONS, LAB_FOCUS } from '@/lib/sitam-data';
 import { TagInput } from '@/components/tag-input';
+import { useTagCatalog } from '@/lib/lab-tags';
 import { splitItems } from '@/components/lab-page';
 
 const lines = (s: string) => s.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -134,11 +135,11 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
   const [skillList, setSkillList] = useState<string[]>(lab.skills ?? []);
   const [equipList, setEquipList] = useState<string[]>(splitItems(lab.equipment));
   // suggestions: what the other labs already use
-  const allLabs = useLabs();
-  const known = (pick: (l: Lab) => string[]) => [...new Set((allLabs.data ?? []).flatMap(pick))].sort((a, b) => a.localeCompare(b));
-  const tagSuggest = known((l) => l.tags);
-  const skillSuggest = known((l) => l.skills ?? []);
-  const equipSuggest = known((l) => splitItems(l.equipment));
+  // one shared list (all labs, most used first): what another lab added is offered here too
+  const catalog = useTagCatalog();
+  const tagSuggest = catalog.area;
+  const skillSuggest = catalog.skill;
+  const equipSuggest = catalog.equipment;
   const [socials, setSocials] = useState<SocialLink[]>(lab.social_links.length ? lab.social_links : [{ platform: 'LinkedIn', url: '' }]);
   const [logo, setLogo] = useState(lab.logo_url);
   const [photos, setPhotos] = useState<string[]>(lab.photo_urls);

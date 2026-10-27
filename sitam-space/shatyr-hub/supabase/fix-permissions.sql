@@ -80,3 +80,5 @@ revoke execute on function public.set_external_event_place(uuid, text, boolean) 
 grant execute on function public.set_external_event_place(uuid, text, boolean) to authenticated;
 grant select on public.industry_partners to anon, authenticated;
 grant insert, update, delete on public.industry_partners to authenticated;
+revoke execute on function public.admin_rename_lab_tag(text, text, text) from anon, public;
+grant execute on function public.admin_rename_lab_tag(text, text, text) to authenticated;

@@ -273,3 +273,20 @@ select 'coordinator adds a partner; seeded partners linked to labs: ' || case wh
 set role anon;
 select 'guests read the partners: ' || case when (select count(*) from industry_partners) >= 6 then 'PASS' else 'FAIL' end;
 reset role;
+
+\echo '── v12.1: shared tags, coordinator renames / merges / removes'
+update labs set tags = array['pytorch', 'NLP'], skills = array['Python'], equipment = 'GPU server, 3D printer' where slug = 'ai-lab';
+update labs set tags = array['PyTorch'], equipment = 'gpu server; Oscilloscope' where slug = 'robotics-lab';
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d003');
+do $$ begin
+  perform public.admin_rename_lab_tag('area', 'pytorch', 'Torch');
+  raise notice 'FAIL a lab head renamed a tag in every lab';
+exception when others then raise notice 'PASS only the coordinator renames tags (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c001');
+select public.admin_rename_lab_tag('area', 'pytorch', 'PyTorch');
+select public.admin_rename_lab_tag('equipment', 'GPU server', 'GPU cluster');
+select public.admin_rename_lab_tag('skill', 'python', null);
+select pg_temp.as_super();
+select 'merge keeps one spelling per lab: ' || case when (select tags from labs where slug='ai-lab') = array['PyTorch', 'NLP'] and (select tags from labs where slug='robotics-lab') = array['PyTorch'] then 'PASS' else 'FAIL' end;
+select 'equipment renamed in every lab: ' || case when (select equipment from labs where slug='ai-lab') = 'GPU cluster, 3D printer' and (select equipment from labs where slug='robotics-lab') = 'GPU cluster, Oscilloscope' then 'PASS' else 'FAIL' end;
+select 'removed tag is gone: ' || case when not exists (select 1 from labs where 'Python' = any(skills)) then 'PASS' else 'FAIL' end;

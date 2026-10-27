@@ -5,7 +5,7 @@ import { ProjectsPanel } from '@/components/projects-panel';
 import { pageHead } from '@/lib/hub-data';
 
 type LabsTab = 'labs' | 'communities' | 'projects';
-type LabsSearch = { lab?: string; tab?: LabsTab; ptab?: 'labs' | 'community' };
+type LabsSearch = { lab?: string; tab?: LabsTab; ptab?: 'labs' | 'community'; topic?: string };
 const TABS: { id: LabsTab; label: string; icon: typeof FlaskConical }[] = [
   { id: 'labs', label: 'Labs', icon: FlaskConical },
   { id: 'communities', label: 'Communities', icon: Users },
@@ -17,6 +17,7 @@ export const Route = createFileRoute('/labs/')({
     ...(typeof s['lab'] === 'string' && s['lab'] ? { lab: s['lab'].slice(0, 80) } : {}),
     ...(s['tab'] === 'communities' || s['tab'] === 'projects' ? { tab: s['tab'] } : {}),
     ...(s['ptab'] === 'community' ? { ptab: 'community' as const } : {}),
+    ...(typeof s['topic'] === 'string' && /^(area|skill|equipment):./.test(s['topic']) ? { topic: s['topic'].slice(0, 80) } : {}),
   }),
   // old links (/labs?lab=slug) open the lab's own page
   beforeLoad: ({ search }) => {
@@ -27,7 +28,7 @@ export const Route = createFileRoute('/labs/')({
 });
 
 function Labs() {
-  const { tab = 'labs', ptab = 'labs' } = Route.useSearch();
+  const { tab = 'labs', ptab = 'labs', topic = '' } = Route.useSearch();
   const navigate = Route.useNavigate();
   const go = (t: LabsTab) => navigate({ search: t === 'labs' ? {} : { tab: t }, replace: true });
   return (
@@ -42,8 +43,10 @@ function Labs() {
         ))}
       </div>
       <div className="mt-5">
-        {tab === 'labs' && <LabsFeed kind="lab" />}
-        {tab === 'communities' && <LabsFeed kind="community" />}
+        {tab !== 'projects' && (
+          <LabsFeed key={tab} kind={tab === 'communities' ? 'community' : 'lab'} topic={topic}
+            onTopic={(t) => navigate({ search: { ...(tab === 'communities' ? { tab } : {}), ...(t ? { topic: t } : {}) }, replace: true })} />
+        )}
         {tab === 'projects' && (
           <ProjectsPanel tab={ptab} onTab={(t) => navigate({ search: { tab: 'projects', ...(t === 'community' ? { ptab: 'community' as const } : {}) }, replace: true })} />
         )}

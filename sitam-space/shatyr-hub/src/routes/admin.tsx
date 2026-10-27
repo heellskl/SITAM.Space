@@ -9,6 +9,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { PeoplePicker } from '@/components/people-picker';
 import { SearchBar } from '@/components/search-bar';
+import { TagManager } from '@/components/tag-manager';
 import { HEAD_ROLES, humanError, useAdminLabActions, useLabs, useSetLabKind, type Lab } from '@/lib/api';
 
 const COMMUNITY = '__community__';
@@ -122,6 +123,8 @@ function Admin() {
           );
         })}
       </section>
+
+      <TagManager />
 
       <AlertDialog open={!!toDelete} onOpenChange={(o) => !o && setToDelete(null)}>
         <AlertDialogContent>

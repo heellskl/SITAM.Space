@@ -5,7 +5,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { Link } from '@tanstack/react-router';
 import {
   ArrowUpRight, Bot, BookOpen, Boxes, BrainCircuit, ChartColumn, Eye, Globe, HeartPulse, MessagesSquare, Palette, ServerCog, ShieldCheck, Wallet,
-  CalendarPlus, FlaskConical, Pencil, Plus, UserCog } from 'lucide-react';
+  CalendarPlus, FlaskConical, Pencil, Plus, UserCog, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { LabLogo } from '@/components/lab-browser';
 import { EventDialog } from '@/components/manage-panels';
@@ -14,6 +14,7 @@ import { humanError, useLabs, useProjects, type Lab } from '@/lib/api';
 import { labProfile, type LabIconKey } from '@/lib/lab-profile';
 import { useMyLabs } from '@/lib/my-labs';
 import { LAB_DIRECTIONS, LAB_FOCUS } from '@/lib/sitam-data';
+import { buildCatalog, TAG_KIND_LABEL, tagsOf, type TagKind } from '@/lib/lab-tags';
 
 const ICONS: Record<LabIconKey, typeof FlaskConical> = {
   chart: ChartColumn, brain: BrainCircuit, globe: Globe, palette: Palette, shield: ShieldCheck, server: ServerCog, bot: Bot,
@@ -35,28 +36,61 @@ function ChipFilter<T extends string>({ label, options, value, onChange }: { lab
 }
 
 /** kind = 'lab' (laboratories) or 'community' (student communities: same page, same tools). */
-export function LabsFeed({ kind = 'lab' }: { kind?: 'lab' | 'community' }) {
+type SortKey = 'name' | 'projects' | 'team';
+
+/** Research area / skill / equipment filter: one select over the shared tag list, grouped, with lab counts. */
+function TopicFilter({ value, onChange, labs }: { value: string; onChange: (v: string) => void; labs: Lab[] }) {
+  const groups = useMemo(() => (['area', 'skill', 'equipment'] as TagKind[]).map((k) => ({ kind: k, list: buildCatalog(labs, k) })), [labs]);
+  return (
+    <label className="lab-select">
+      <span className="chip-filter-label">Topic</span>
+      <select value={value} onChange={(e) => onChange(e.target.value)} aria-label="Filter by research area, skill or equipment">
+        <option value="">All research areas, skills and equipment</option>
+        {groups.map((g) => g.list.length > 0 && (
+          <optgroup key={g.kind} label={TAG_KIND_LABEL[g.kind]}>
+            {g.list.map((t) => <option key={`${g.kind}:${t.name}`} value={`${g.kind}:${t.name}`}>{t.name} ({t.count})</option>)}
+          </optgroup>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+export function LabsFeed({ kind = 'lab', topic = '', onTopic }: { kind?: 'lab' | 'community'; topic?: string; onTopic?: (t: string) => void }) {
   const { data, isLoading, error } = useLabs();
   const projects = useProjects();
   const [q, setQ] = useState('');
   const [focus, setFocus] = useState<(typeof LAB_FOCUS)[number] | 'all'>('all');
   const [direction, setDirection] = useState<(typeof LAB_DIRECTIONS)[number] | 'all'>('all');
   const my = useMyLabs();
-
-  const labs = useMemo(() => {
-    const term = q.trim().toLowerCase();
-    return (data ?? []).filter((l) =>
-      (l.kind ?? 'lab') === kind
-      && (focus === 'all' || l.focus.includes(focus))
-      && (direction === 'all' || l.direction === direction)
-      && (!term || `${l.name} ${l.tags.join(' ')} ${(l.skills ?? []).join(' ')} ${l.lab_members.map((m) => m.full_name).join(' ')}`.toLowerCase().includes(term)));
-  }, [data, q, focus, direction, kind]);
+  const [topicLocal, setTopicLocal] = useState(topic);
+  const topicSel = onTopic ? topic : topicLocal;
+  const setTopic = onTopic ?? setTopicLocal;
+  const [sort, setSort] = useState<SortKey>('name');
+  const ofKind = useMemo(() => (data ?? []).filter((l) => (l.kind ?? 'lab') === kind), [data, kind]);
 
   const projectCount = useMemo(() => {
     const m = new Map<string, number>();
     for (const p of projects.data ?? []) if (p.lab_id) m.set(p.lab_id, (m.get(p.lab_id) ?? 0) + 1);
     return m;
   }, [projects.data]);
+
+  const labs = useMemo(() => {
+    const term = q.trim().toLowerCase();
+    const [tk, ...rest] = topicSel.split(':');
+    const tname = rest.join(':').toLowerCase();
+    const list = ofKind.filter((l) =>
+      (!topicSel || tagsOf(l, tk as TagKind).some((t) => t.toLowerCase() === tname))
+      && (focus === 'all' || l.focus.includes(focus))
+      && (direction === 'all' || l.direction === direction)
+      && (!term || `${l.name} ${l.tags.join(' ')} ${(l.skills ?? []).join(' ')} ${l.equipment ?? ''} ${l.lab_members.map((m) => m.full_name).join(' ')}`.toLowerCase().includes(term)));
+    const team = (l: Lab) => l.lab_members.filter((m) => m.role !== 'former_lead' && !m.is_past).length;
+    return list.sort((a, b) =>
+      sort === 'projects' ? (projectCount.get(b.id) ?? 0) - (projectCount.get(a.id) ?? 0) || a.name.localeCompare(b.name)
+      : sort === 'team' ? team(b) - team(a) || a.name.localeCompare(b.name)
+      : a.name.localeCompare(b.name));
+  }, [ofKind, q, focus, direction, topicSel, sort, projectCount]);
+
 
   const mine = labs.filter((l) => my.isMineLab(l.id));
   const others = labs.filter((l) => !my.isMineLab(l.id));
@@ -87,12 +121,22 @@ export function LabsFeed({ kind = 'lab' }: { kind?: 'lab' | 'community' }) {
   return (
     <>
       <SearchBar value={q} onChange={setQ} placeholder={kind === 'community' ? 'Search communities, people, topics' : 'Search labs, people, topics'} />
-      {kind === 'lab' && (
-        <div className="lab-filters">
-          <ChipFilter label="Focus" options={LAB_FOCUS} value={focus} onChange={setFocus} />
-          <ChipFilter label="Direction" options={LAB_DIRECTIONS} value={direction} onChange={setDirection} />
+      <div className="lab-filters">
+        {kind === 'lab' && <ChipFilter label="Focus" options={LAB_FOCUS} value={focus} onChange={setFocus} />}
+        {kind === 'lab' && <ChipFilter label="Direction" options={LAB_DIRECTIONS} value={direction} onChange={setDirection} />}
+        <div className="lab-selects">
+          <TopicFilter value={topicSel} onChange={setTopic} labs={ofKind} />
+          <label className="lab-select">
+            <span className="chip-filter-label">Sort</span>
+            <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)} aria-label="Sort labs">
+              <option value="name">Name A–Z</option>
+              <option value="projects">Most projects</option>
+              <option value="team">Largest team</option>
+            </select>
+          </label>
+          {topicSel && <button type="button" className="chip is-on" onClick={() => setTopic('')} aria-label="Clear topic filter">{topicSel.split(':').slice(1).join(':')} <X size={12} /></button>}
         </div>
-      )}
+      </div>
 
       {error && <p className="form-alert">{humanError(error)}</p>}
 

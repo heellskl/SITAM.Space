@@ -9,4 +9,4 @@ for f in supabase/migrations/*.sql; do psql -d sitam_test -1 -f "$f"; done
 psql -d sitam_test -X -f supabase/tests/permissions_tests.sql
 ```
 
-Every line should print `PASS` (68 checks): registration, coordinator, head/member rights, projects, events, v10 heads list and competitions, v11, v12 (communities, personal e-mail, event place, industry partners).
+Every line should print `PASS` (72 checks): registration, coordinator, head/member rights, projects, events, v10 heads list and competitions, v11, v12 (communities, personal e-mail, event place, industry partners, shared tags).
