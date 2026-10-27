@@ -67,5 +67,5 @@
 - Lab focus: Commercial Projects · Research · Education (`LAB_FOCUS`).
 - Two e-mails: `profiles.personal_email` (edited in Profile → Settings), shown with the SDU e-mail by `PersonEmails` (lab-page.tsx) on lab teams and /people.
 - Events (`event-board.tsx`): filters Type · Location (At SDU / Outside SDU / Online) · Organized by (SDU / External / Co-hosted). SDU events: Online when the room says online/zoom/meet/teams; co-hosted when a company is a host. External events: `external_events.location_type`, `cohosted` via `set_external_event_place`. 8 cards, then "Show all". Calendar: past days grey, today amber. Colours: Industry #B45309, Research #1D4ED8, Competitions #047857.
-- Industry page: industry events (`EventBoard fixedType="industry"`), then "Opportunities" (board) and "Partners" (`industry-partners.tsx`, table `industry_partners`, coordinator edits).
+- Industry page: no events. Under the heading two tabs — Opportunities (default, board) and Partners (`?view=partners`, `industry-partners.tsx`, table `industry_partners`, coordinator edits).
 - Database: existing → `supabase/update-to-v12.sql`; empty → `supabase/setup-new-database.sql`.

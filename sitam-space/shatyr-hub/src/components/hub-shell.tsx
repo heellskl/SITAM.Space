@@ -18,7 +18,7 @@ export const navigation = [
   { to: '/', label: 'Home', icon: House, hint: 'About SITAM SPACE and the school in numbers' },
   { to: '/labs', label: 'Labs', icon: FlaskConical, hint: 'Laboratories, student communities and projects' },
   { to: '/events', label: 'Events', icon: CalendarDays, hint: 'Industry and research events, competitions and hackathons' },
-  { to: '/opportunities', label: 'Industry', icon: Briefcase, hint: 'Industry events, vacancies and internships, partner companies' },
+  { to: '/opportunities', label: 'Industry', icon: Briefcase, hint: 'Vacancies, internships, lab cases and partner companies' },
   { to: '/research', label: 'Research', icon: BookOpen, hint: 'Publications and researchers of SITAM (Scopus)' },
   { to: '/faq', label: 'FAQ', icon: CircleHelp, hint: 'Answers to common questions' },
 ] as const;

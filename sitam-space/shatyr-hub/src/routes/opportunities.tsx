@@ -7,18 +7,17 @@ import { useMyLabs } from '@/components/my-labs';
 import { eventDate, opportunityLabel, useOpportunities } from '@/lib/api';
 import { OpportunityBoard, type OppTab } from '@/components/opportunity-board';
 import { pageHead } from '@/lib/hub-data';
-import { EventBoard } from '@/components/event-board';
 import { IndustryPartners } from '@/components/industry-partners';
-import { SearchBar } from '@/components/search-bar';
 
 const TABS: OppTab[] = ['all', 'industrial', 'lab', 'research'];
 
 export const Route = createFileRoute('/opportunities')({
-  validateSearch: (s: Record<string, unknown>): { tab?: OppTab; open?: string } => ({
+  validateSearch: (s: Record<string, unknown>): { tab?: OppTab; open?: string; view?: 'partners' } => ({
+    ...(s['view'] === 'partners' ? { view: 'partners' as const } : {}),
     ...(typeof s['tab'] === 'string' && (TABS as string[]).includes(s['tab']) ? { tab: s['tab'] as OppTab } : {}),
     ...(typeof s['open'] === 'string' ? { open: s['open'] } : {}),
   }),
-  head: () => pageHead('Industry', 'Industry events, industrial cases (vacancies, internships, projects), lab and research cases, and SITAM industry partners.'),
+  head: () => pageHead('Industry', 'Industrial cases (vacancies, internships, projects), lab and research cases, and SITAM industry partners.'),
   component: Opportunities,
 });
 
@@ -56,26 +55,26 @@ function MyLabCases() {
   );
 }
 
-/** Industry (formerly Opportunities): industry events with the Events filters, then Opportunities and Partners. */
+/** Industry (formerly Opportunities): under the heading two tabs — Opportunities (default) and Partners. */
 function Opportunities() {
-  const { tab, open } = Route.useSearch();
-  const [q, setQ] = useState('');
+  const { tab, open, view = 'opportunities' } = Route.useSearch();
+  const navigate = Route.useNavigate();
+  const go = (v: 'opportunities' | 'partners') => navigate({ search: v === 'partners' ? { view: 'partners' } : {}, replace: true });
   return (
     <main className="container content-page">
       <h1>Industry</h1>
-      <div className="mt-6"><SearchBar value={q} onChange={setQ} placeholder="Search industry events, speakers, companies" /></div>
-      <EventBoard query={q} fixedType="industry" allowAdd={false} />
-
-      <section className="industry-section" aria-labelledby="industry-opps" id="opportunities">
-        <h2 id="industry-opps"><Briefcase size={20} />Opportunities</h2>
-        <MyLabCases />
-        <OpportunityBoard key={tab ?? 'all'} initialTab={tab ?? 'all'} openId={open} />
-      </section>
-
-      <section className="industry-section" aria-labelledby="industry-partners" id="partners">
-        <h2 id="industry-partners"><Building2 size={20} />Partners</h2>
-        <IndustryPartners />
-      </section>
+      <div className="view-switch labs-switch" role="tablist" aria-label="Show">
+        <button type="button" role="tab" aria-selected={view === 'opportunities'} className={view === 'opportunities' ? 'is-on' : ''} onClick={() => go('opportunities')}><Briefcase size={15} />Opportunities</button>
+        <button type="button" role="tab" aria-selected={view === 'partners'} className={view === 'partners' ? 'is-on' : ''} onClick={() => go('partners')}><Building2 size={15} />Partners</button>
+      </div>
+      {view === 'partners' ? (
+        <div><IndustryPartners /></div>
+      ) : (
+        <div>
+          <MyLabCases />
+          <OpportunityBoard key={tab ?? 'all'} initialTab={tab ?? 'all'} openId={open} />
+        </div>
+      )}
     </main>
   );
 }
