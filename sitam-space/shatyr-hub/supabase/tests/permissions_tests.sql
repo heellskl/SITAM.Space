@@ -290,3 +290,31 @@ select pg_temp.as_super();
 select 'merge keeps one spelling per lab: ' || case when (select tags from labs where slug='ai-lab') = array['PyTorch', 'NLP'] and (select tags from labs where slug='robotics-lab') = array['PyTorch'] then 'PASS' else 'FAIL' end;
 select 'equipment renamed in every lab: ' || case when (select equipment from labs where slug='ai-lab') = 'GPU cluster, 3D printer' and (select equipment from labs where slug='robotics-lab') = 'GPU cluster, Oscilloscope' then 'PASS' else 'FAIL' end;
 select 'removed tag is gone: ' || case when not exists (select 1 from labs where 'Python' = any(skills)) then 'PASS' else 'FAIL' end;
+
+\echo '── v13: event photos, Academic Year Plan'
+do $$ declare v uuid; begin
+  insert into events (kind, title, starts_at) values ('research', 'Robotics demo day', now() - interval '3 days') returning id into v;
+  insert into event_hosts (event_id, lab_id) values (v, (select id from labs where slug='robotics-lab'));
+  perform set_config('sitam.sduev', v::text, false);
+end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d001');
+do $$ begin
+  perform public.set_event_photos(current_setting('sitam.sduev')::uuid, array['https://example.org/a.jpg']);
+  raise notice 'FAIL a head of another lab set event photos';
+exception when others then raise notice 'PASS only the organizers set event photos (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d003');
+select public.set_event_photos(current_setting('sitam.sduev')::uuid, array['https://example.org/a.jpg', 'https://example.org/b.jpg']);
+select pg_temp.as_super();
+select 'organizer adds event photos: ' || case when (select cardinality(photo_urls) from events where id = current_setting('sitam.sduev')::uuid) = 2 then 'PASS' else 'FAIL' end;
+select 'one current academic plan: ' || case when (select count(*) from academic_plans where is_current) = 1 then 'PASS' else 'FAIL' end;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d003');
+do $$ begin
+  insert into academic_plan_items (plan_id, title, kind, starts_on) select id, 'Fake date', 'other', starts_on from academic_plans limit 1;
+  raise notice 'FAIL a lab head added a plan date';
+exception when others then raise notice 'PASS only the coordinator edits the plan (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c001');
+insert into academic_plan_items (plan_id, title, kind, starts_on, audiences) select id, 'Research Poster Day', 'poster_day', date '2026-12-08', array['students', 'researchers'] from academic_plans where is_current;
+select pg_temp.as_super();
+set role anon;
+select 'guests read the plan: ' || case when (select count(*) from academic_plan_items where title = 'Research Poster Day') = 1 then 'PASS' else 'FAIL' end;
+reset role;

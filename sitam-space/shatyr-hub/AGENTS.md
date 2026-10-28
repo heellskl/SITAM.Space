@@ -68,5 +68,13 @@
 - Two e-mails: `profiles.personal_email` (edited in Profile → Settings), shown with the SDU e-mail by `PersonEmails` (lab-page.tsx) on lab teams and /people.
 - Events (`event-board.tsx`): filters Type · Location (At SDU / Outside SDU / Online) · Organized by (SDU / External / Co-hosted). SDU events: Online when the room says online/zoom/meet/teams; co-hosted when a company is a host. External events: `external_events.location_type`, `cohosted` via `set_external_event_place`. 8 cards, then "Show all". Calendar: past days grey, today amber. Colours: Industry #B45309, Research #1D4ED8, Competitions #047857.
 - Industry page: no events. Under the heading two tabs — Opportunities (default, board) and Partners (`?view=partners`, `industry-partners.tsx`, table `industry_partners`, coordinator edits).
-- Database: existing → `supabase/update-to-v12.sql`; empty → `supabase/setup-new-database.sql`.
+- Database: existing → `supabase/update-to-v13.sql` (includes v12, v12.1, v13; re-runnable); empty → `supabase/setup-new-database.sql`.
 - Shared tags (v12.1): `src/lib/lab-tags.ts` builds one catalog of research areas / skills / equipment from all labs (most used first, spelling = most common). `TagInput` shows it as a dropdown ("Used by other labs", counts, "Add … as a new tag"). Labs page: Topic filter (`?topic=area:NLP`) + Sort (Name, Most projects, Largest team); chips on the lab page link to that filter. Admin → "Tags of all labs" (`tag-manager.tsx`): rename / merge / remove everywhere via `admin_rename_lab_tag`.
+
+## SITAM SPACE v13 — current rules (override older notes above)
+- Font: Plus Jakarta Sans for all UI text and the logo (`--font-ui`, `--font-logo`); display headings keep `--font-head`. Logo = "SITAM SPACE" (800) / "INNOVATION ECOSYSTEM" (warm accent `--brand-warm`) / "Laboratories, research and people".
+- Profile menu has a solid surface (white / slate-900), z-index 100 (`.profile-menu`).
+- Events: time tabs All Events · Upcoming · Past Events above the filters; past cards show speaker / results.
+- Photos: stored in Supabase Storage (`lab-assets`), shown with `PhotoGallery` (grid + lightbox). Labs: `labs.photo_urls` (up to 60). Events: `events.photo_urls` via `set_event_photos` (organizers), panel on the event page. Google Drive link is only an optional "Full photo archive".
+- Academic Plan: `/academic-plan` (sidebar). Tables `academic_plans` (one `is_current`, `pdf_url`) + `academic_plan_items` (kind, dates, audiences students/researchers/industry, lab). Coordinator adds dates and uploads the official PDF (bucket `documents`); events from the Events page are shown on the timeline automatically. No PDF → "Save as PDF" prints the page (print styles).
+- Forms: `.partner-form` checkboxes are small and inline (`label.check`); opportunity tags use `TagInput` with suggestions from other listings.

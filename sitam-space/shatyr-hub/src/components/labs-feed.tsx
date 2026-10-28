@@ -102,7 +102,7 @@ export function LabsFeed({ kind = 'lab', topic = '', onTopic }: { kind?: 'lab' |
     return (
       <Link key={l.id} to="/labs/$slug" params={{ slug: l.slug }} className="labcard">
         <div className="labcard-top">
-          <span className={`labcard-icon tone-${pr.tone}`} aria-hidden>
+          <span className={`labcard-icon tone-${pr.tone}${l.logo_url ? ' has-logo' : ''}`} aria-hidden>
             {l.logo_url ? <LabLogo lab={l} size={18} /> : <Icon size={18} strokeWidth={1.75} />}
           </span>
           {my.isMineLab(l.id) && <span className="labcard-mine">Your lab</span>}

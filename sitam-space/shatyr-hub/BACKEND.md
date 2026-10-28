@@ -131,3 +131,10 @@ delete from companies where name = 'Demo Partner (sample)';
 - `industry_partners` (name, short_name, logo_url, website, ceo, founded_year, sdu_alumni[], upcoming_projects[], completed_projects[], lab_ids[]): public read, coordinator writes (RLS). Seeded from the lab forms (5 partners); CEO / year / alumni are left empty for the coordinator.
 - v12.1 `20261027120000_sitam_v12_1_lab_tags.sql`: `admin_rename_lab_tag(kind, old, new)` — coordinator renames / merges / removes a research area, skill or equipment item in every lab (case-insensitive, no duplicates).
 - Tests: `supabase/tests/permissions_tests.sql` — 72 checks.
+
+## v13 (2026-10-28)
+- Migration `20261028100000_sitam_v13_photos_academic_plan.sql`; run `supabase/update-to-v13.sql` (contains v12, v12.1 and v13; re-runnable).
+- `events.photo_urls` + RPC `set_event_photos(event, urls[])` (can_manage_event; ≤ 80 https links).
+- `academic_plans`, `academic_plan_items`: public read, coordinator (`is_admin()`) writes. Seeded: "Academic Year 2026–2027" (current, no dates — the coordinator adds them).
+- Storage bucket `documents` (public, PDF ≤ 20 MB), coordinator-only upload.
+- Tests: 77 checks.

@@ -2,7 +2,7 @@ import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
 import { gmailCompose } from '@/lib/utils';
 import { useEffect, useState } from 'react';
 import {
-  BookOpen, Briefcase, CalendarDays, ChevronsLeft, ChevronsRight, CircleHelp, FlaskConical, House, LayoutDashboard,
+  BookOpen, Briefcase, CalendarDays, CalendarRange, ChevronsLeft, ChevronsRight, CircleHelp, FlaskConical, House, LayoutDashboard,
   ChevronsUpDown, LogIn, LogOut, Mail, Menu, Settings, ShieldCheck, UserPlus, UserRound,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
@@ -18,6 +18,7 @@ export const navigation = [
   { to: '/', label: 'Home', icon: House, hint: 'About SITAM SPACE and the school in numbers' },
   { to: '/labs', label: 'Labs', icon: FlaskConical, hint: 'Laboratories, student communities and projects' },
   { to: '/events', label: 'Events', icon: CalendarDays, hint: 'Industry and research events, competitions and hackathons' },
+  { to: '/academic-plan', label: 'Academic Plan', icon: CalendarRange, hint: 'Deadlines, Poster Days, conferences and hackathons of the academic year' },
   { to: '/opportunities', label: 'Industry', icon: Briefcase, hint: 'Vacancies, internships, lab cases and partner companies' },
   { to: '/research', label: 'Research', icon: BookOpen, hint: 'Publications and researchers of SITAM (Scopus)' },
   { to: '/faq', label: 'FAQ', icon: CircleHelp, hint: 'Answers to common questions' },
@@ -31,8 +32,9 @@ function Logo({ compact }: { compact?: boolean }) {
       <img className="brand-emblem" src="/sitam-emblem.png" alt="" width={28} height={34} />
       {!compact && (
         <span className="brand-name">
-          SITAM SPACE
-          <small>{BRAND.tagline}</small>
+          <span className="brand-word">SITAM SPACE</span>
+          <small className="brand-tag">{BRAND.tagline}</small>
+          <small className="brand-sub">Laboratories, research and people</small>
         </span>
       )}
     </Link>

@@ -1,12 +1,13 @@
 import { useMemo, useState, type FormEvent } from 'react';
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { ArrowLeft, CheckCircle2, Clock3, Download, ImagePlus, MapPin, ScanLine, Search, Ticket as TicketIcon, Users } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Clock3, Download, ImagePlus, Images, MapPin, ScanLine, Search, Ticket as TicketIcon, Trash2, Users } from 'lucide-react';
+import { PhotoGallery } from '@/components/photo-gallery';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { HostPills, TicketBadge, canManageEvent } from '@/components/event-board';
 import { PosterPicker, uploadPoster } from '@/components/external-events';
 import {
-  eventDate, humanError, useAttendees, useCancelRegistration, useCheckIn, useEvents, useMyRegistrations, useRegister, useSetPoster, type Attendee,
+  eventDate, humanError, uploadLabImage, useAttendees, useCancelRegistration, useCheckIn, useEvents, useMyRegistrations, useRegister, useSetEventPhotos, useSetPoster, type Attendee,
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { EVENT_META } from '@/lib/sitam-data';
@@ -34,6 +35,55 @@ function PosterPanel({ eventId, current, folder }: { eventId: string; current: s
       <h3 className="panel-title"><ImagePlus size={16} />Poster</h3>
       <PosterPicker current={current} file={file} onFile={(f) => { setFile(f); if (f) void save(f); }} onClear={current ? () => void save(null) : undefined} />
       {busy && <p className="small-note">Saving…</p>}
+    </section>
+  );
+}
+
+/** Event photos: everyone sees the gallery; organizers upload to Supabase Storage and remove photos. */
+function EventPhotos({ eventId, title, photos, canManage, folder }: { eventId: string; title: string; photos: string[]; canManage: boolean; folder: string }) {
+  const setPhotos = useSetEventPhotos();
+  const [busy, setBusy] = useState(false);
+  if (!photos.length && !canManage) return null;
+  async function add(files: FileList | null) {
+    if (!files?.length) return;
+    setBusy(true);
+    try {
+      const urls: string[] = [];
+      for (const f of Array.from(files).slice(0, 20)) {
+        if (f.size > 10 * 1024 * 1024) { toast.error(`${f.name} is larger than 10 MB`); continue; }
+        urls.push(await uploadLabImage(folder, f, 'event-photos'));
+      }
+      await setPhotos.mutateAsync({ id: eventId, urls: [...photos, ...urls].slice(0, 80) });
+      toast.success(`${urls.length} ${urls.length === 1 ? 'photo' : 'photos'} added`);
+    } catch (e) {
+      toast.error('Photos not saved', { description: humanError(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="panel mb-6" aria-labelledby="event-photos">
+      <h3 className="panel-title" id="event-photos"><Images size={16} />Photos{photos.length ? ` · ${photos.length}` : ''}</h3>
+      <PhotoGallery photos={photos} title={`${title} — photos`} limit={12} />
+      {canManage && (
+        <div className="photo-admin">
+          <label className="file-pick"><ImagePlus size={14} />{busy ? 'Uploading…' : 'Add photos'}
+            <input type="file" multiple accept="image/png,image/jpeg,image/webp" className="sr-only" disabled={busy} onChange={(e) => void add(e.target.files)} />
+          </label>
+          {photos.length > 0 && (
+            <div className="photo-admin-list">
+              {photos.map((u) => (
+                <span key={u} className="photo-admin-item">
+                  <img src={u} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                  <button type="button" aria-label="Remove photo" disabled={setPhotos.isPending}
+                    onClick={() => setPhotos.mutate({ id: eventId, urls: photos.filter((x) => x !== u) }, { onError: (e) => toast.error(humanError(e)) })}><Trash2 size={13} /></button>
+                </span>
+              ))}
+            </div>
+          )}
+          {!photos.length && <p className="small-note">After the event, add photos here — they open in a gallery for everyone.</p>}
+        </div>
+      )}
     </section>
   );
 }
@@ -119,6 +169,8 @@ function EventPage() {
       {event.event_hosts.length > 0 && <div className="mb-6"><span className="sub-title">Hosted by</span><HostPills hosts={event.event_hosts} /></div>}
       {event.poster_url && <img className="event-poster" src={event.poster_url} alt={`Poster: ${event.title}`} referrerPolicy="no-referrer" />}
       {canManage && <PosterPanel eventId={event.id} current={event.poster_url ?? null} folder={event.event_hosts.find((h) => h.lab_id && caps.managedLabs.some((m) => m.id === h.lab_id))?.lab_id ?? user?.id ?? ''} />}
+      <EventPhotos eventId={event.id} title={event.title} photos={event.photo_urls ?? []} canManage={canManage}
+        folder={event.event_hosts.find((h) => h.lab_id && caps.managedLabs.some((m) => m.id === h.lab_id))?.lab_id ?? user?.id ?? ''} />
 
       {!isPast && (
         <section className="panel mb-6">

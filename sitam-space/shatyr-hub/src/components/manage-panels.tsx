@@ -7,11 +7,12 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import {
   CATEGORY_LABEL, INDUSTRIAL_LABEL, KIND_LABEL, MODERATION_LABEL, STATUS_LABEL, STATUS_TONE, formatDate, hostNames, humanError, opportunityLabel, signedUrl,
-  useAdminAction, useBriefs, useCompanies, useDeleteOpportunity, useInbox, useManagedOpportunities, useModerate, useModerationQueue, usePendingTeachers, useProjects,
+  useAdminAction, useBriefs, useCompanies, useDeleteOpportunity, useInbox, useManagedOpportunities, useModerate, useModerationQueue, useOpportunities, usePendingTeachers, useProjects,
   useReviewApplication, useSaveEvent, useSaveOpportunity, useUpdateBrief,
   type ApplicationStatus, type InboxItem, type IndustrialType, type ModerationItem, type Opportunity, type OpportunityCategory, type PartnerRequest,
 } from '@/lib/api';
 import { ROLE_LABEL, useAuth, type Role } from '@/lib/auth';
+import { TagInput } from '@/components/tag-input';
 
 /* ═════════════════════ Applications inbox ═════════════════════ */
 
@@ -254,6 +255,18 @@ export function ListingDialog({ opp, onClose, preset, defaultCategory }: { opp: 
       : preset ?? { labs: hosts.labs.slice(0, 1).map((l) => l.id), companies: hosts.companies.slice(0, 1).map((c) => c.id), projects: [], me: !hosts.labs.length && !hosts.companies.length && !!hosts.me },
   );
   const [error, setError] = useState('');
+  const [tags, setTags] = useState<string[]>(opp?.tags ?? []);
+  // the same tag list for every listing: what others already used is suggested first
+  const allOpps = useOpportunities();
+  const tagSuggest = useMemo(() => {
+    const m = new Map<string, { name: string; count: number }>();
+    for (const o of allOpps.data ?? []) for (const t of o.tags) {
+      const k = t.toLowerCase();
+      const e = m.get(k) ?? { name: t, count: 0 };
+      e.count += 1; m.set(k, e);
+    }
+    return [...m.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }, [allOpps.data]);
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -270,7 +283,7 @@ export function ListingDialog({ opp, onClose, preset, defaultCategory }: { opp: 
         title: s('title'),
         description: s('description'),
         requirements: s('requirements').split('\n').map((x) => x.trim()).filter(Boolean).slice(0, 10),
-        tags: s('tags').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 8),
+        tags: tags.slice(0, 8),
         deadline: s('deadline') || null,
         duration: s('duration') || null,
         paid: d.get('paid') === 'on',
@@ -316,16 +329,20 @@ export function ListingDialog({ opp, onClose, preset, defaultCategory }: { opp: 
           <label>Title<input name="title" maxLength={160} defaultValue={opp?.title ?? ''} /></label>
           <label>Description<textarea name="description" rows={4} maxLength={4000} defaultValue={opp?.description ?? ''} /></label>
           <label>Requirements (one per line)<textarea name="requirements" rows={3} defaultValue={opp?.requirements.join('\n') ?? ''} /></label>
-          <label>Tags (comma-separated)<input name="tags" defaultValue={opp?.tags.join(', ') ?? ''} /></label>
+          <div className="form-field"><span className="form-label">Tags</span>
+            <TagInput label="Tags" value={tags} onChange={setTags} suggestions={tagSuggest} max={8} placeholder="Type and press Enter: Python, Data, Internship…" />
+          </div>
           <div className="auth-row">
             <label>Duration<input name="duration" maxLength={60} defaultValue={opp?.duration ?? ''} placeholder="3 months / Full-time" /></label>
             <label>Format<select name="work_format" defaultValue={opp?.work_format ?? ''}><option value="">—</option><option value="onsite">On-site</option><option value="hybrid">Hybrid</option><option value="remote">Remote</option></select></label>
           </div>
           <div className="auth-row">
-            <label className="check"><input type="checkbox" name="paid" defaultChecked={opp?.paid ?? category === 'industrial'} /> Paid</label>
-            <label>Compensation<input name="compensation" maxLength={120} defaultValue={opp?.compensation ?? ''} placeholder="optional" /></label>
+            <label>Compensation<input name="compensation" maxLength={120} defaultValue={opp?.compensation ?? ''} placeholder="optional, e.g. 250 000 ₸ / month" /></label>
+            <div className="form-checks">
+              <label className="check"><input type="checkbox" name="paid" defaultChecked={opp?.paid ?? category === 'industrial'} /><span>Paid</span></label>
+              <label className="check"><input type="checkbox" name="is_active" defaultChecked={opp?.is_active ?? true} /><span>Published</span></label>
+            </div>
           </div>
-          <label className="check"><input type="checkbox" name="is_active" defaultChecked={opp?.is_active ?? true} /> Published</label>
           {error && <p className="form-alert">{error}</p>}
           <Button type="submit" disabled={save.isPending}>{save.isPending ? 'Saving…' : 'Save'}</Button>
         </form>

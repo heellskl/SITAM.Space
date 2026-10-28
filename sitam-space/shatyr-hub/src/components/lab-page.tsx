@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { gmailCompose } from '@/lib/utils';
 import { Link } from '@tanstack/react-router';
+import { PhotoGallery } from '@/components/photo-gallery';
 import {
   ArrowLeft, ArrowUpRight, Award, Bookmark, BookmarkCheck, BriefcaseBusiness, CalendarDays, Crown, ExternalLink, FlaskConical, History,
   CalendarPlus, GraduationCap, Inbox, Landmark, Lock, Mail, MapPin, Pencil, Plus, Rocket, Trophy, UserCog, Users,
@@ -219,9 +220,9 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
 
           <Section title="Photos" icon={CalendarDays} show={lab.photo_urls.length > 0 || !!lab.photo_archive_link}>
             {lab.photo_urls.length > 0 && (
-              <div className="lab-gallery">{lab.photo_urls.map((u) => <a key={u} href={u} target="_blank" rel="noopener noreferrer"><img src={u} alt={`${lab.name} activity`} loading="lazy" referrerPolicy="no-referrer" /></a>)}</div>
+              <PhotoGallery photos={lab.photo_urls} title={`${lab.name} — photos`} limit={9} />
             )}
-            {lab.photo_archive_link && <Button asChild variant="outline" size="sm" className="mt-3"><a href={lab.photo_archive_link} target="_blank" rel="noopener noreferrer"><ExternalLink />Photo archive</a></Button>}
+            {lab.photo_archive_link && <Button asChild variant="outline" size="sm" className="mt-3"><a href={lab.photo_archive_link} target="_blank" rel="noopener noreferrer"><ExternalLink />Full photo archive</a></Button>}
           </Section>
 
           {(isManager || caps.isStaff) && (

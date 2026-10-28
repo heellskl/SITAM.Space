@@ -82,3 +82,7 @@ grant select on public.industry_partners to anon, authenticated;
 grant insert, update, delete on public.industry_partners to authenticated;
 revoke execute on function public.admin_rename_lab_tag(text, text, text) from anon, public;
 grant execute on function public.admin_rename_lab_tag(text, text, text) to authenticated;
+revoke execute on function public.set_event_photos(uuid, text[]) from anon, public;
+grant execute on function public.set_event_photos(uuid, text[]) to authenticated;
+grant select on public.academic_plans, public.academic_plan_items to anon, authenticated;
+grant insert, update, delete on public.academic_plans, public.academic_plan_items to authenticated;

@@ -105,7 +105,7 @@ function toFeed(events: SitamEvent[], external: ExternalEvent[], now: number): F
       // an SDU event with a company among its hosts is co-hosted
       organizer: e.event_hosts.some((h) => !!h.company_id) ? 'cohosted' : 'sdu',
       host: hostNames(e.event_hosts) || 'SITAM', start, end: null, year: start.getFullYear(), upcoming: start.getTime() > now - 3_600_000,
-      poster: e.poster_url ?? null, meta: `${eventDate(e.starts_at).short} · ${eventDate(e.starts_at).time} · Room ${e.room}`, sdu: e,
+      poster: e.poster_url ?? null, meta: `${eventDate(e.starts_at).short} · ${eventDate(e.starts_at).time} · Room ${e.room}${e.speaker ? ` · ${e.speaker}` : ''}`, sdu: e,
     };
   });
   const ext = external.map((x): FeedItem => {
@@ -257,6 +257,7 @@ export function EventBoard({ query = '', fixedType, allowAdd = true }: { query?:
   const [location, setLocation] = useState<FeedLocation | 'all'>('all');
   const [organizer, setOrganizer] = useState<FeedOrganizer | 'all'>('all');
   const [view, setView] = useState<'list' | 'calendar'>('list');
+  const [when, setWhen] = useState<'all' | 'upcoming' | 'past'>('all');
   const [open, setOpen] = useState<ExternalEvent | null>(null);
   const [adding, setAdding] = useState(false);
   const my = useMyLabs();
@@ -282,6 +283,13 @@ export function EventBoard({ query = '', fixedType, allowAdd = true }: { query?:
   return (
     <>
       {(error || ext.error) && <p className="form-alert">{humanError(error ?? ext.error)}</p>}
+      <div className="view-switch ev-when" role="tablist" aria-label="Time">
+        {([['all', 'All Events'], ['upcoming', 'Upcoming'], ['past', 'Past Events']] as const).map(([k, label]) => (
+          <button key={k} type="button" role="tab" aria-selected={when === k} className={when === k ? 'is-on' : ''} onClick={() => setWhen(k)}>
+            {k === 'past' ? <History size={15} /> : <CalendarDays size={15} />}{label}{k === 'past' && past.length ? ` · ${past.length}` : k === 'upcoming' && upcoming.length ? ` · ${upcoming.length}` : ''}
+          </button>
+        ))}
+      </div>
       <div className="ev-toolbar">
         <div className="ev-filters">
           {!fixedType && <FilterRow label="Type" options={['industry', 'research', 'competitions'] as const} labels={TYPE_LABEL} value={typeSel} onChange={setType} />}
@@ -298,17 +306,18 @@ export function EventBoard({ query = '', fixedType, allowAdd = true }: { query?:
       </div>
 
       {view === 'calendar' ? (
-        <CalendarView items={items} onOpen={openItem} />
+        <CalendarView items={when === 'all' ? items : when === 'upcoming' ? upcoming : past} onOpen={openItem} />
       ) : (
         <>
-          <section aria-label="Upcoming events">
+          {when !== 'past' && <section aria-label="Upcoming events">
             {loading && <div className="poster-grid">{Array.from({ length: 4 }, (_, i) => <div key={i} className="poster-card skeleton-card" aria-hidden />)}</div>}
             {!loading && <PosterList key={`u-${listKey}`} items={upcoming} onOpen={openItem} />}
             {!loading && upcoming.length === 0 && <div className="mini-empty"><CalendarDays size={20} /><p>No upcoming events for these filters.</p></div>}
-          </section>
+          </section>}
 
-          {past.length > 0 && (
-            <section className="past-events" aria-labelledby={`past-events-${fixedType ?? 'all'}`}>
+          {when === 'past' && !loading && past.length === 0 && <div className="mini-empty"><History size={20} /><p>No past events for these filters.</p></div>}
+          {when !== 'upcoming' && past.length > 0 && (
+            <section className={when === 'past' ? 'past-events is-only' : 'past-events'} aria-labelledby={`past-events-${fixedType ?? 'all'}`}>
               <h2 id={`past-events-${fixedType ?? 'all'}`}><History size={18} />Past Events · {past.length}</h2>
               <PosterList key={`p-${listKey}`} items={past} onOpen={openItem} past />
             </section>

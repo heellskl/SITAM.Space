@@ -181,6 +181,8 @@ export type SitamEvent = {
   organizer_id: string | null;
   reported_attendance: number | null;
   poster_url?: string | null;
+  /** v13: event photos (Supabase Storage), set by the organizers */
+  photo_urls?: string[];
   event_hosts: Host[];
   registered: number;
   attended: number;
@@ -1131,6 +1133,18 @@ export function useSetPoster() {
       void qc.invalidateQueries({ queryKey: qk.events });
       void qc.invalidateQueries({ queryKey: qk.externalEvents });
     },
+  });
+}
+
+/** v13: the photos of an SDU event (organizers; checked in SQL by set_event_photos). */
+export function useSetEventPhotos() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { id: string; urls: string[] }) => {
+      const { error } = await db.rpc('set_event_photos', { p_event: v.id, p_urls: v.urls });
+      if (error) fail(error);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.events }),
   });
 }
 

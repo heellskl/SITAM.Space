@@ -173,7 +173,7 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
         if (first) setLogo(await uploadLabImage(lab.id, first, 'logo'));
       } else {
         const urls = await Promise.all(list.map((file) => uploadLabImage(lab.id, file, 'photos')));
-        setPhotos((p) => [...p, ...urls].slice(0, 30));
+        setPhotos((p) => [...p, ...urls].slice(0, 60));
       }
       toast.success('Uploaded — press Save to keep it');
     } catch (e) {
@@ -331,7 +331,8 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
             <ImagePlus size={16} /><span>Add photos (≤ 10 MB each)</span>
             <input type="file" multiple accept="image/png,image/jpeg,image/webp" onChange={(e) => upload(e.target.files, 'photos')} />
           </span>
-          <F label="Photo archive link"><input value={f.photo_archive_link} onChange={set('photo_archive_link')} placeholder="https://drive.google.com/…" /></F>
+          <small className="field-hint">Photos are stored on SITAM SPACE and open in a gallery right on the lab page (up to 60).</small>
+          <F label="Full archive link (optional)"><input value={f.photo_archive_link} onChange={set('photo_archive_link')} placeholder="https://drive.google.com/… — only for an extra archive" /></F>
         </Block>}
 
         {tab === 'team' && <Block title="Team" wide note={`Heads are assigned by the SITAM coordinator. Add members with “Manage members” on the lab page. E-mails and phones are private.`}>
