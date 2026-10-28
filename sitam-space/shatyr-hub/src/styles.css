@@ -2100,7 +2100,6 @@ html.dark .aud-industry { background: rgba(249, 115, 22, .2); color: #fed7aa; }
 /* v14: footer logo = sidebar logo; columns scroll with the page (no sticky side column); spacing in Manage → My labs */
 .footer-brand.brand { gap: 10px; }
 .footer-brand .brand-name { font-family: var(--font-logo); }
-.lab-aside { position: static !important; top: auto; }
 .manage-lab-role { margin: 4px 0 16px; }
 .submit-menu { min-width: 260px; }
 .submit-menu [role="menuitem"] { text-decoration: none; }
@@ -2113,3 +2112,17 @@ html.dark .aud-industry { background: rgba(249, 115, 22, .2); color: #fed7aa; }
 
 /* registration: the form sits in the middle, under the Student / Teacher / Industry partner switch */
 .auth-page .role-switch + .auth-form, .auth-page .role-switch ~ .auth-form { margin-inline: auto; width: 100%; }
+
+/* v14.1: two-column pages (lab page, researcher page) on a computer — each column scrolls on its own.
+   The page first scrolls past the header; then both columns stay on screen and the column under the
+   mouse scrolls by itself. On tablets and phones (< 1025px) it is one normal column. */
+@media (min-width: 1025px) {
+  .lab-layout { align-items: start; }
+  .lab-layout > .lab-main, .lab-layout > .lab-aside {
+    position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; overscroll-behavior: auto;
+    scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--muted-foreground) 35%, transparent) transparent;
+    padding-right: 4px;
+  }
+  .lab-layout > .lab-main::-webkit-scrollbar, .lab-layout > .lab-aside::-webkit-scrollbar { width: 6px; }
+  .lab-layout > .lab-main::-webkit-scrollbar-thumb, .lab-layout > .lab-aside::-webkit-scrollbar-thumb { border-radius: 999px; background: color-mix(in srgb, var(--muted-foreground) 35%, transparent); }
+}
