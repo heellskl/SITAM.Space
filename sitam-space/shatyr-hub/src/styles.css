@@ -2091,3 +2091,8 @@ html.dark .aud-industry { background: rgba(249, 115, 22, .2); color: #fed7aa; }
   .plan-card, .plan-date { box-shadow: none !important; border-color: #ccc !important; break-inside: avoid; }
   .plan-item.is-past { opacity: 1; }
 }
+
+/* v13.1: logo in one colour, no orange; no sub-line */
+.brand-name small.brand-tag { color: var(--navy); opacity: .72; }
+.on-hero .top-bar .brand-name small.brand-tag { color: #fff; }
+.brand-name small.brand-sub { display: none; }

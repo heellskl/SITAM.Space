@@ -43,17 +43,12 @@ export function List({ items, title }: { items: string[]; title?: string }) {
   );
 }
 
-export function Chips({ items, title, kind, community }: { items: string[]; title?: string; kind?: 'area' | 'skill' | 'equipment'; community?: boolean }) {
+export function Chips({ items, title }: { items: string[]; title?: string }) {
   if (!items.length) return null;
   return (
     <>
       {title && <h4 className="sub-title">{title}</h4>}
-      <div className="stack-list">
-        {items.map((s) => kind ? (
-          // a chip opens the list of all labs with the same tag
-          <Link key={s} to="/labs" search={{ ...(community ? { tab: 'communities' as const } : {}), topic: `${kind}:${s}` }} className="chip-link" title={`All ${community ? 'communities' : 'labs'} with “${s}”`}>{s}</Link>
-        ) : <span key={s}>{s}</span>)}
-      </div>
+      <div className="stack-list">{items.map((s) => <span key={s}>{s}</span>)}</div>
     </>
   );
 }
@@ -158,9 +153,9 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
               {lab.website && <div><dt>Website</dt><dd><a href={lab.website} target="_blank" rel="noopener noreferrer">{lab.website.replace(/^https?:\/\//, '').replace(/\/$/, '')}</a></dd></div>}
               {lab.contact_email && <div><dt>Contact</dt><dd><a href={gmailCompose(lab.contact_email)} target="_blank" rel="noopener noreferrer"><Mail size={13} className="inline" /> {lab.contact_email}</a></dd></div>}
             </dl>
-            <Chips title="Research areas" items={lab.tags} kind="area" community={lab.kind === 'community'} />
-            <Chips title="Equipment" items={splitItems(lab.equipment)} kind="equipment" community={lab.kind === 'community'} />
-            <Chips title="Skills" items={lab.skills ?? []} kind="skill" community={lab.kind === 'community'} />
+            <Chips title="Research areas" items={lab.tags} />
+            <Chips title="Equipment" items={splitItems(lab.equipment)} />
+            <Chips title="Skills" items={lab.skills ?? []} />
             {lab.social_links.length > 0 && (
               <div className="social-row">
                 {lab.social_links.map((x) => <Button key={x.url} asChild size="sm" variant="outline"><a href={x.url} target="_blank" rel="noopener noreferrer"><ExternalLink />{x.platform}</a></Button>)}
