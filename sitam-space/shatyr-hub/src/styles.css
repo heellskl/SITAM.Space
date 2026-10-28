@@ -2104,3 +2104,9 @@ html.dark .aud-industry { background: rgba(249, 115, 22, .2); color: #fed7aa; }
 .manage-lab-role { margin: 4px 0 16px; }
 .submit-menu { min-width: 260px; }
 .submit-menu [role="menuitem"] { text-decoration: none; }
+
+/* search + action button on one line (Labs → Projects) */
+.search-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 22px; }
+.search-row > :first-child { flex: 1 1 320px; min-width: 0; margin: 0; max-width: none; }
+.search-row > :not(:first-child) { flex-shrink: 0; }
+.search-row .submit-cta { height: 48px; }

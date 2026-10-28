@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { Link } from '@tanstack/react-router';
 import { BookOpen, ExternalLink, FlaskConical, GitBranch, Lightbulb, Rocket, Search, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -34,7 +34,7 @@ export function ProjectCard({ p }: { p: Project }) {
  * `source`: "lab" = projects of SDU labs, "community" = approved student / PhD submissions, "all" = both.
  * `status` limits to completed/ongoing; `kinds` limits the types; `limit` for previews.
  */
-export function ProjectsShowcase({ limit, status, source = 'lab', kinds }: { limit?: number; status?: ProjectStatus; source?: 'lab' | 'community' | 'all'; kinds?: ProjectKind[] }) {
+export function ProjectsShowcase({ limit, status, source = 'lab', kinds, action }: { limit?: number; status?: ProjectStatus; source?: 'lab' | 'community' | 'all'; kinds?: ProjectKind[]; action?: ReactNode }) {
   const [lab, setLab] = useState('all');
   const [query, setQuery] = useState('');
   const { data, isLoading, error } = useProjects();
@@ -67,7 +67,13 @@ export function ProjectsShowcase({ limit, status, source = 'lab', kinds }: { lim
 
   return (
     <>
-      {!limit && <SearchBar value={query} onChange={setQuery} placeholder="Search projects" />}
+      {!limit && (
+        // search and the "Submit your project" button on one line
+        <div className="search-row">
+          <SearchBar value={query} onChange={setQuery} placeholder="Search projects" />
+          {action}
+        </div>
+      )}
       {!limit && (
         <div className="lab-controls">
           <div className="filter-list" aria-label="Project type">
