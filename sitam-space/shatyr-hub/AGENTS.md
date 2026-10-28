@@ -84,4 +84,4 @@
 - Labs → Projects: one list (lab + student projects), search + "All labs" select only. No "New lab project" button: for lab heads "Submit your project" is a menu — "New lab project · {lab}" (opens `/labs/$slug?edit=1&section=projects`) or "My own project".
 - Research (`research-publications.tsx`): tab + search in the URL (`/research?tab=people&q=…`); the search works for the open tab (Researchers: name / topics / titles of their papers; Publications: papers; Find a supervisor: topics; Lab & student research: projects; Overview: numbers and charts of matching papers). No counts on tabs, no second search in Find a supervisor.
 - "Back" buttons (`back-button.tsx`) go to the previous page (history), with a fallback for direct links: lab form, Manage members, researcher page.
-- Footer logo = sidebar logo (SITAM SPACE + INNOVATION ECOSYSTEM). Side columns (`.lab-aside`) are not sticky — both columns scroll with the page.
+- Footer logo = emblem + "SITAM SPACE" only (no tagline); the sidebar logo keeps "INNOVATION ECOSYSTEM". Side columns (`.lab-aside`) are not sticky — both columns scroll with the page.
