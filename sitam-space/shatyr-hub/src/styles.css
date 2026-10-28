@@ -2126,3 +2126,6 @@ html.dark .aud-industry { background: rgba(249, 115, 22, .2); color: #fed7aa; }
   .lab-layout > .lab-main::-webkit-scrollbar, .lab-layout > .lab-aside::-webkit-scrollbar { width: 6px; }
   .lab-layout > .lab-main::-webkit-scrollbar-thumb, .lab-layout > .lab-aside::-webkit-scrollbar-thumb { border-radius: 999px; background: color-mix(in srgb, var(--muted-foreground) 35%, transparent); }
 }
+
+/* registration: air between the heading and the Student / Teacher / Industry partner switch */
+.auth-page > h1 + .role-switch { margin-top: 28px; }
