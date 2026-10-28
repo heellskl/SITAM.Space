@@ -73,7 +73,7 @@ const PLACEHOLDER: Record<ResearchTab, string> = {
   overview: 'Search papers — the numbers and charts follow',
   people: 'Search researchers by name or by the papers they wrote',
   search: 'Search papers by keywords, title, venue or author',
-  supervisor: 'Search a supervisor by research topic',
+  supervisor: 'Search a supervisor by name or research topic',
   community: 'Search lab and student research',
 };
 
@@ -174,13 +174,15 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
   const supervisors = useMemo(() => {
     return people
       .map((p) => {
-        const hay = `${p.keywords.join(' ')} ${p.topics.map((t) => `${t.topic_name} ${t.field ?? ''}`).join(' ')}`.toLowerCase();
-        return { p, score: terms.filter((t) => hay.includes(t)).length };
+        // a supervisor is found by name too (name matches rank first), then by topics and the papers they wrote
+        const name = `${p.full_name} ${p.first_name} ${p.last_name}`.toLowerCase();
+        const hay = `${p.keywords.join(' ')} ${p.topics.map((t) => `${t.topic_name} ${t.field ?? ''}`).join(' ')} ${papersOf.get(p.full_name) ?? ''}`.toLowerCase();
+        return { p, score: terms.filter((t) => name.includes(t)).length * 3 + terms.filter((t) => hay.includes(t)).length };
       })
       .filter((x) => !terms.length || x.score > 0)
       .sort((a, b) => b.score - a.score || b.p.h_index - a.p.h_index)
       .map((x) => x.p);
-  }, [people, terms]);
+  }, [people, terms, papersOf]);
   // keep "mine first" after the topic ranking too
   const supervisorsOrdered = useMemo(() => mineFirst(supervisors, (p) => isMyPerson(p.full_name)), [supervisors, my]);
 
