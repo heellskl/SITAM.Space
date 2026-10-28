@@ -2110,3 +2110,6 @@ html.dark .aud-industry { background: rgba(249, 115, 22, .2); color: #fed7aa; }
 .search-row > :first-child { flex: 1 1 320px; min-width: 0; margin: 0; max-width: none; }
 .search-row > :not(:first-child) { flex-shrink: 0; }
 .search-row .submit-cta { height: 48px; }
+
+/* registration: the form sits in the middle, under the Student / Teacher / Industry partner switch */
+.auth-page .role-switch + .auth-form, .auth-page .role-switch ~ .auth-form { margin-inline: auto; width: 100%; }

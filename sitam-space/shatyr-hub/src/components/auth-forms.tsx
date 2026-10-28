@@ -359,7 +359,7 @@ export function RegisterForm({ role }: { role: SignupKind }) {
       <Field label={role === 'partner' ? 'Company e-mail' : 'SDU e-mail'} error={errors['email']} hint={role === 'partner' ? undefined : 'Only …@sdu.edu.kz and …@stu.sdu.edu.kz addresses can register.'}>
         <input name="email" type="email" autoComplete="email" maxLength={255} placeholder={role === 'partner' ? 'name@company.kz' : role === 'student' ? '220103001@stu.sdu.edu.kz' : 'name.surname@sdu.edu.kz'} aria-invalid={!!errors['email']} />
       </Field>
-      <Field label="Password" error={errors['password']} hint="The confirmation code is sent to this e-mail.">
+      <Field label="Password" error={errors['password']}>
         <input name="password" type="password" autoComplete="new-password" maxLength={72} placeholder="At least 8 characters" aria-invalid={!!errors['password']} />
       </Field>
 
