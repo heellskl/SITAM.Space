@@ -1,7 +1,7 @@
 // Lab head editor — mirrors the lab form (labs.json fields). List answers: one item per line.
 
 import { useState, type ReactNode } from 'react';
-import { ArrowLeft, ImagePlus, Loader2, Lock, Plus, Save, Trash2, Upload } from 'lucide-react';
+import { ImagePlus, Loader2, Lock, Plus, Save, Trash2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import {
@@ -11,6 +11,7 @@ import {
 import { useAuth } from '@/lib/auth';
 import { LAB_DIRECTIONS, LAB_FOCUS } from '@/lib/sitam-data';
 import { TagInput } from '@/components/tag-input';
+import { BackButton } from '@/components/back-button';
 import { useTagCatalog } from '@/lib/lab-tags';
 import { splitItems } from '@/components/lab-page';
 
@@ -51,7 +52,7 @@ function F({ label, hint, children, required }: { label: string; hint?: string; 
   );
 }
 
-export function LabEditor({ lab, onDone }: { lab: Lab; onDone: () => void }) {
+export function LabEditor({ lab, onDone, section }: { lab: Lab; onDone: () => void; section?: string | undefined }) {
   const { user, caps } = useAuth();
   // Lead positions can be changed only by the lab lead / co-lead (the database enforces it too).
   const canEditHeads = caps.isAdmin; // heads are assigned by the coordinator only
@@ -63,6 +64,7 @@ export function LabEditor({ lab, onDone }: { lab: Lab; onDone: () => void }) {
   }
   return (
     <EditorForm
+      initialTab={SECTIONS.some((x) => x.id === section) ? (section as SectionId) : 'about'}
       key={lab.updated_at}
       lab={lab}
       internal={internalQ.data ?? null}
@@ -83,13 +85,14 @@ type Props = {
   userId: string;
   canEditHeads: boolean;
   onDone: () => void;
+  initialTab: SectionId;
 };
 
-function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, onDone }: Props) {
+function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, onDone, initialTab }: Props) {
   const contactOf = (id: string) => contacts.find((c) => c.member_id === id);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<SectionId>('about');
+  const [tab, setTab] = useState<SectionId>(initialTab);
   /** Show a problem on the section where it can be fixed. */
   const problem = (msg: string, at: SectionId) => { setTab(at); setError(msg); };
   const join = (a: string[] | undefined) => (a ?? []).join('\n');
@@ -250,7 +253,7 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
 
   return (
     <main className="container content-page lab-editor">
-      <button type="button" className="back-link" onClick={onDone}><ArrowLeft size={14} />Back to the lab page</button>
+      <BackButton fallback={`/labs/${lab.slug}`} />
       <span className="eyebrow">Edit lab · {lab.name}</span>
       <h1>Lab form</h1>
       <p className="page-intro">The same questions as the lab-head form, in 5 sections. Lists: one item per line. “Internal” (in Activities & partners) is visible only to lab heads and SITAM staff.</p>
@@ -335,7 +338,7 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
           <F label="Full archive link (optional)"><input value={f.photo_archive_link} onChange={set('photo_archive_link')} placeholder="https://drive.google.com/… — only for an extra archive" /></F>
         </Block>}
 
-        {tab === 'team' && <Block title="Team" wide note={`Heads are assigned by the SITAM coordinator. Add members with “Manage members” on the lab page. E-mails and phones are private.`}>
+        {tab === 'team' && <Block title="Team" wide note={`Add members with “Manage members” on the lab page. E-mails and phones are private.`}>
           <div className="team-editor">
             {members.map((m, i) => {
               const locked = !canEditHeads && !!m.id && isHeadRole(lab.lab_members.find((x) => x.id === m.id)?.role ?? m.role);

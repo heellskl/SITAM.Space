@@ -195,7 +195,7 @@ export function HubFooter() {
   return (
     <footer className="site-footer">
       <div className="container footer-inner">
-        <Link to="/" className="footer-brand"><img className="brand-emblem" src="/sitam-emblem.png" alt="" width={24} height={30} /><span className="footer-word">SITAM SPACE</span></Link>
+        <Link to="/" className="footer-brand brand" aria-label={`${BRAND.name} home`}><img className="brand-emblem" src="/sitam-emblem.png" alt="" width={28} height={34} /><span className="brand-name"><span className="brand-word">SITAM SPACE</span><small className="brand-tag">{BRAND.tagline}</small></span></Link>
         <p>{BRAND.contactLabel}: <a href={gmailCompose(BRAND.contactEmail)} target="_blank" rel="noopener noreferrer"><Mail size={12} className="inline" /> {BRAND.contactEmail}</a></p>
         <span>© 2026 SITAM SPACE · SDU University</span>
       </div>

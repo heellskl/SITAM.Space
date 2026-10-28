@@ -62,7 +62,6 @@ export function InboxPanel() {
   return (
     <section className="panel">
       <h3 className="panel-title"><Inbox size={15} />Applications</h3>
-      <p className="small-note mb-3">Only applications to opportunities you posted or host (your lab, company, project or your own name). Applicants see status changes in their profile.</p>
       <div className="lab-controls">
         <select className="filter-select" value={group} onChange={(e) => setGroup(e.target.value)} aria-label="Opportunity">
           <option value="all">All opportunities</option>

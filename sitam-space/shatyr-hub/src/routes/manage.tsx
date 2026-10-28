@@ -85,7 +85,7 @@ function Manage() {
               {caps.managedLabs.map((l) => (
                 <section key={l.id} className="panel">
                   <h3 className="panel-title"><FlaskConical size={16} />{l.name}</h3>
-                  <p className="small-note mb-3">Your position: {LAB_POSITION_LABEL[l.role as LabRole] ?? l.role}</p>
+                  <p className="small-note manage-lab-role">Your position: {LAB_POSITION_LABEL[l.role as LabRole] ?? l.role}</p>
                   <div className="dialog-actions wrap">
                     <Button asChild size="sm"><Link to="/labs/$slug" params={{ slug: l.slug }} search={{ edit: true }}><Pencil />Edit lab page</Link></Button>
                     <Button asChild size="sm" variant="outline"><Link to="/labs/$slug" params={{ slug: l.slug }} search={{ team: true }}><UserCog />Manage members</Link></Button>

@@ -3,7 +3,8 @@ import { gmailCompose } from '@/lib/utils';
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { VIZ, axisProps, tooltipProps } from '@/lib/chart-style';
-import { ArrowLeft, ArrowUpRight, ExternalLink, FlaskConical, Mail, Megaphone } from 'lucide-react';
+import { BackButton } from '@/components/back-button';
+import { ArrowUpRight, ExternalLink, FlaskConical, Mail, Megaphone } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { PublicationRow } from '@/components/research-publications';
 import { LAB_POSITION_LABEL, formatDate, humanError, opportunityLabel, usePersonOpportunities, useProfessor } from '@/lib/api';
@@ -35,7 +36,7 @@ function ProfessorPage() {
     return (
       <main className="container content-page">
         <p className="form-alert">Researcher not found.</p>
-        <Link to="/research" className="back-link"><ArrowLeft size={14} />Research Publications</Link>
+        <BackButton fallback="/research?tab=people" />
       </main>
     );
   }
@@ -48,7 +49,7 @@ function ProfessorPage() {
 
   return (
     <main className="container content-page">
-      <Link to="/research" className="back-link"><ArrowLeft size={14} />Research Publications</Link>
+      <BackButton fallback="/research?tab=people" />
       <header className="prof-hero">
         <span className="avatar avatar-lg">{prof.photo_url ? <img src={prof.photo_url} alt="" /> : `${prof.first_name[0] ?? ''}${prof.last_name[0] ?? ''}`}</span>
         <div>

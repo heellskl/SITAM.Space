@@ -1,8 +1,9 @@
 import { useState, type FormEvent } from 'react';
 import { Link } from '@tanstack/react-router';
-import { CheckCircle2, Clock3, Plus, Send } from 'lucide-react';
+import { CheckCircle2, ChevronDown, Clock3, FlaskConical, Plus, Send, UserRound } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { KIND_LABEL, humanError, useSubmitProject, type ProjectKind, type ProjectStatus } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
@@ -23,6 +24,27 @@ export function SubmitProjectButton({ kind = 'project', label }: { kind?: Projec
       <Button asChild className="submit-cta">
         <Link to="/login"><Plus />{text}</Link>
       </Button>
+    );
+  }
+  // lab heads: the same button also adds a project to their lab (opens the lab form on the Projects tab)
+  if (kind === 'project' && caps.managedLabs.length > 0) {
+    return (
+      <>
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button className="submit-cta"><Plus />{text}<ChevronDown /></Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" sideOffset={6} className="profile-menu submit-menu">
+            {caps.managedLabs.map((l) => (
+              <DropdownMenuItem key={l.id} asChild>
+                <Link to="/labs/$slug" params={{ slug: l.slug }} search={{ edit: true, section: 'projects' }}><FlaskConical size={15} />New lab project · {l.name}</Link>
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuItem onSelect={() => setOpen(true)}><UserRound size={15} />My own project</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        {open && <SubmitProjectDialog defaultKind={kind} onClose={() => setOpen(false)} />}
+      </>
     );
   }
   return (

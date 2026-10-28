@@ -2096,3 +2096,11 @@ html.dark .aud-industry { background: rgba(249, 115, 22, .2); color: #fed7aa; }
 .brand-name small.brand-tag { color: var(--navy); opacity: .72; }
 .on-hero .top-bar .brand-name small.brand-tag { color: #fff; }
 .brand-name small.brand-sub { display: none; }
+
+/* v14: footer logo = sidebar logo; columns scroll with the page (no sticky side column); spacing in Manage → My labs */
+.footer-brand.brand { gap: 10px; }
+.footer-brand .brand-name { font-family: var(--font-logo); }
+.lab-aside { position: static !important; top: auto; }
+.manage-lab-role { margin: 4px 0 16px; }
+.submit-menu { min-width: 260px; }
+.submit-menu [role="menuitem"] { text-decoration: none; }

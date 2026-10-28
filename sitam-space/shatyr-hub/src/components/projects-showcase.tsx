@@ -35,7 +35,6 @@ export function ProjectCard({ p }: { p: Project }) {
  * `status` limits to completed/ongoing; `kinds` limits the types; `limit` for previews.
  */
 export function ProjectsShowcase({ limit, status, source = 'lab', kinds }: { limit?: number; status?: ProjectStatus; source?: 'lab' | 'community' | 'all'; kinds?: ProjectKind[] }) {
-  const [kind, setKind] = useState<'all' | ProjectKind>('all');
   const [lab, setLab] = useState('all');
   const [query, setQuery] = useState('');
   const { data, isLoading, error } = useProjects();
@@ -52,13 +51,11 @@ export function ProjectsShowcase({ limit, status, source = 'lab', kinds }: { lim
       ),
     [data, status, source, kinds],
   );
-  const kindOptions: ('all' | ProjectKind)[] = ['all', 'research', 'project'];
   const labs = useMemo(() => Array.from(new Set(base.map((p) => p.labs?.name).filter((n): n is string => !!n))).sort(), [base]);
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
     const list = base.filter(
       (p) =>
-        (kind === 'all' || p.kind === kind) &&
         (lab === 'all' || p.labs?.name === lab) &&
         `${p.title} ${p.summary ?? ''} ${p.tags.join(' ')} ${p.labs?.name ?? ''} ${p.authors.join(' ')}`.toLowerCase().includes(q),
     );
@@ -66,7 +63,7 @@ export function ProjectsShowcase({ limit, status, source = 'lab', kinds }: { lim
     list.sort((a, b) => Number(!!b.demo_url) - Number(!!a.demo_url) || (b.year ?? 0) - (a.year ?? 0));
     const ordered = mineFirst(list, (p) => my.isMineLab(p.lab_id)); // projects of the head's own labs first
     return limit ? ordered.slice(0, limit) : ordered;
-  }, [base, kind, lab, query, limit, my]);
+  }, [base, lab, query, limit, my]);
 
   return (
     <>
@@ -74,11 +71,6 @@ export function ProjectsShowcase({ limit, status, source = 'lab', kinds }: { lim
       {!limit && (
         <div className="lab-controls">
           <div className="filter-list" aria-label="Project type">
-            {kindOptions.map((k) => (
-              <Button key={k} variant="ghost" className={kind === k ? 'filter active' : 'filter'} aria-pressed={kind === k} onClick={() => setKind(k)}>
-                {k === 'all' ? 'All' : k === 'startup' ? 'Startups' : k === 'project' ? 'Projects' : 'Research'}
-              </Button>
-            ))}
             {labs.length > 0 && (
               <select className="filter-select" value={lab} onChange={(e) => setLab(e.target.value)} aria-label="Lab">
                 <option value="all">All labs</option>

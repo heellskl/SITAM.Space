@@ -67,7 +67,22 @@ export function ProfessorCard({ p }: { p: Professor }) {
   );
 }
 
-export function ResearchPublications({ initialQuery = '' }: { initialQuery?: string }) {
+export const RESEARCH_TABS = ['overview', 'people', 'search', 'supervisor', 'community'] as const;
+export type ResearchTab = (typeof RESEARCH_TABS)[number];
+const PLACEHOLDER: Record<ResearchTab, string> = {
+  overview: 'Search papers — the numbers and charts follow',
+  people: 'Search researchers by name or by the papers they wrote',
+  search: 'Search papers by keywords, title, venue or author',
+  supervisor: 'Search a supervisor by research topic',
+  community: 'Search lab and student research',
+};
+
+/**
+ * Research: one search bar, five tabs. The search works for the open tab — Researchers finds people
+ * (by name, topics or the titles of their papers), Publications finds papers, Find a supervisor ranks
+ * researchers by topic, the last tab finds projects, and Overview recounts the numbers for the matching papers.
+ */
+export function ResearchPublications({ query, tab, onQuery, onTab }: { query: string; tab: ResearchTab; onQuery: (v: string) => void; onTab: (t: ResearchTab) => void }) {
   const profs = useProfessors();
   const pubs = usePublications();
   const projects = useProjects();
@@ -77,11 +92,8 @@ export function ResearchPublications({ initialQuery = '' }: { initialQuery?: str
     (projects.data ?? []).filter((p) => p.kind === 'research' && (!p.lab_id || my.isMineLab(p.lab_id))),
     (p) => my.isMineLab(p.lab_id),
   );
-  const [query, setQuery] = useState(initialQuery);
   const [year, setYear] = useState('all');
-  const [kind, setKind] = useState<'all' | 'article' | 'conference' | 'other'>('all');
-  const [topic, setTopic] = useState('');
-  const [tab, setTab] = useState(initialQuery ? 'search' : 'overview');
+  const kind = 'all' as 'all' | 'article' | 'conference' | 'other';
 
   const all = pubs.data ?? [];
   // researchers who are members of the head's labs first, and their papers first
@@ -89,9 +101,14 @@ export function ResearchPublications({ initialQuery = '' }: { initialQuery?: str
   const people = useMemo(() => mineFirst(profs.data ?? [], (p) => isMyPerson(p.full_name)), [profs.data, my]);
   const years = useMemo(() => Array.from(new Set(all.map((p) => p.year).filter((y): y is number => !!y))).sort((a, b) => b - a), [all]);
 
+  const terms = useMemo(() => query.toLowerCase().split(/[,;]+|\s+/).map((t) => t.trim()).filter((t) => t.length > 1), [query]);
+  const hayOf = (p: Publication) => `${p.title} ${p.venue ?? ''} ${p.keywords.join(' ')} ${p.publication_authors.map((a) => a.professors?.full_name ?? '').join(' ')}`.toLowerCase();
+  // Overview: the numbers and charts of the papers that match the search (all papers without a search)
+  const scope = useMemo(() => (terms.length ? all.filter((p) => terms.every((t) => hayOf(p).includes(t))) : all), [all, terms]);
+
   const byYear = useMemo(() => {
     const m = new Map<number, { year: string; article: number; conference: number; other: number; total: number; citations: number }>();
-    for (const p of all) {
+    for (const p of scope) {
       if (!p.year) continue;
       const r = m.get(p.year) ?? { year: String(p.year), article: 0, conference: 0, other: 0, total: 0, citations: 0 };
       r[kindOf(p.type)] += 1;
@@ -100,7 +117,7 @@ export function ResearchPublications({ initialQuery = '' }: { initialQuery?: str
       m.set(p.year, r);
     }
     return [...m.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
-  }, [all]);
+  }, [scope]);
 
   const venues = useMemo(() => {
     const m = new Map<string, { venue: string; count: number; citations: number }>();
@@ -114,12 +131,11 @@ export function ResearchPublications({ initialQuery = '' }: { initialQuery?: str
     return [...m.values()].sort((a, b) => b.count - a.count || b.citations - a.citations).slice(0, 10);
   }, [all]);
 
-  const terms = useMemo(() => query.toLowerCase().split(/[,;]+|\s+/).map((t) => t.trim()).filter((t) => t.length > 1), [query]);
   const found = useMemo(() => {
     const list = all
       .map((p) => {
         const kw = p.keywords.join(' ').toLowerCase();
-        const hay = `${p.title} ${p.venue ?? ''} ${kw} ${p.publication_authors.map((a) => a.professors?.full_name ?? '').join(' ')}`.toLowerCase();
+        const hay = hayOf(p);
         const ok = terms.every((t) => hay.includes(t));
         // papers whose keywords (not just the title) match rank first
         const score = terms.filter((t) => kw.includes(t)).length * 2 + terms.filter((t) => p.title.toLowerCase().includes(t)).length;
@@ -130,10 +146,32 @@ export function ResearchPublications({ initialQuery = '' }: { initialQuery?: str
       .map((x) => x.p);
     return mineFirst(list, (p) => p.publication_authors.some((a) => isMyPerson(a.professors?.full_name)));
   }, [all, terms, year, kind, my]);
-  const searchFor = (k: string) => { setQuery(k); setTab('search'); };
+  const searchFor = (k: string) => { onQuery(k); onTab('search'); };
+
+  // titles of each researcher's papers, so "Researchers" also finds a person by a paper they wrote
+  const papersOf = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const p of all) for (const a of p.publication_authors) {
+      const n = a.professors?.full_name;
+      if (n) m.set(n, `${m.get(n) ?? ''} ${p.title} ${p.keywords.join(' ')}`);
+    }
+    return m;
+  }, [all]);
+  const researchers = useMemo(() => {
+    if (!terms.length) return people;
+    return people
+      .map((p) => {
+        const name = `${p.full_name} ${p.job_title ?? ''}`.toLowerCase();
+        const about = `${p.keywords.join(' ')} ${p.topics.map((t) => `${t.topic_name} ${t.field ?? ''}`).join(' ')} ${papersOf.get(p.full_name) ?? ''}`.toLowerCase();
+        const ok = terms.every((t) => name.includes(t) || about.includes(t));
+        return { p, ok, score: terms.filter((t) => name.includes(t)).length * 3 + terms.filter((t) => about.includes(t)).length };
+      })
+      .filter((x) => x.ok)
+      .sort((a, b) => b.score - a.score)
+      .map((x) => x.p);
+  }, [people, terms, papersOf]);
 
   const supervisors = useMemo(() => {
-    const terms = topic.toLowerCase().split(/[\s,]+/).filter((t) => t.length > 1);
     return people
       .map((p) => {
         const hay = `${p.keywords.join(' ')} ${p.topics.map((t) => `${t.topic_name} ${t.field ?? ''}`).join(' ')}`.toLowerCase();
@@ -142,15 +180,20 @@ export function ResearchPublications({ initialQuery = '' }: { initialQuery?: str
       .filter((x) => !terms.length || x.score > 0)
       .sort((a, b) => b.score - a.score || b.p.h_index - a.p.h_index)
       .map((x) => x.p);
-  }, [people, topic]);
+  }, [people, terms]);
   // keep "mine first" after the topic ranking too
   const supervisorsOrdered = useMemo(() => mineFirst(supervisors, (p) => isMyPerson(p.full_name)), [supervisors, my]);
 
+  const communityFound = useMemo(() => (!terms.length ? community : community.filter((p) => {
+    const hay = `${p.title} ${p.summary ?? ''} ${p.tags.join(' ')} ${p.authors.join(' ')} ${p.labs?.name ?? ''}`.toLowerCase();
+    return terms.every((t) => hay.includes(t));
+  })), [community, terms]);
+
   const totals = {
-    pubs: all.length,
-    cites: all.reduce((s, p) => s + p.citations, 0),
-    oa: all.filter((p) => p.is_open_access).length,
-    profs: people.length,
+    pubs: scope.length,
+    cites: scope.reduce((s, p) => s + p.citations, 0),
+    oa: scope.filter((p) => p.is_open_access).length,
+    profs: terms.length ? new Set(scope.flatMap((p) => p.publication_authors.map((a) => a.professors?.full_name).filter(Boolean))).size : people.length,
   };
 
   const error = pubs.error ?? profs.error;
@@ -158,14 +201,14 @@ export function ResearchPublications({ initialQuery = '' }: { initialQuery?: str
 
   return (
     <>
-    <SearchBar value={query} onChange={(v) => { setQuery(v); if (v.trim()) setTab('search'); }} placeholder="Search papers by keywords" onSubmit={() => setTab('search')} />
-    <Tabs value={tab} onValueChange={setTab}>
+    <SearchBar value={query} onChange={onQuery} placeholder={PLACEHOLDER[tab]} />
+    <Tabs value={tab} onValueChange={(v) => onTab(v as ResearchTab)}>
       <TabsList className="manage-tabs">
         <TabsTrigger value="overview">Overview</TabsTrigger>
-        <TabsTrigger value="people">Researchers · {people.length}</TabsTrigger>
-        <TabsTrigger value="search">Publications · {all.length}</TabsTrigger>
+        <TabsTrigger value="people">Researchers</TabsTrigger>
+        <TabsTrigger value="search">Publications</TabsTrigger>
         <TabsTrigger value="supervisor">Find a supervisor</TabsTrigger>
-        <TabsTrigger value="community">{my.any ? 'Lab & student research' : 'Student research'} · {community.length}</TabsTrigger>
+        <TabsTrigger value="community">{my.any ? 'Lab & student research' : 'Student research'}</TabsTrigger>
       </TabsList>
 
       <TabsContent value="overview">
@@ -208,8 +251,8 @@ export function ResearchPublications({ initialQuery = '' }: { initialQuery?: str
       </TabsContent>
 
       <TabsContent value="people">
-        <div className="prof-grid">{people.map((p) => <ProfessorCard key={p.id} p={p} />)}</div>
-        {!profs.isLoading && people.length === 0 && <p className="small-note">No researchers imported yet.</p>}
+        <div className="prof-grid">{researchers.map((p) => <ProfessorCard key={p.id} p={p} />)}</div>
+        {!profs.isLoading && researchers.length === 0 && <p className="small-note">{terms.length ? 'Nobody found.' : 'No researchers imported yet.'}</p>}
       </TabsContent>
 
       <TabsContent value="search">
@@ -226,14 +269,11 @@ export function ResearchPublications({ initialQuery = '' }: { initialQuery?: str
       </TabsContent>
 
       <TabsContent value="community">
-        <div className="project-grid">{community.map((p) => <ProjectCard key={p.id} p={p} />)}</div>
-        {!projects.isLoading && community.length === 0 && <p className="small-note">Nothing yet — use “Submit your research” above.</p>}
+        <div className="project-grid">{communityFound.map((p) => <ProjectCard key={p.id} p={p} />)}</div>
+        {!projects.isLoading && communityFound.length === 0 && <p className="small-note">{terms.length ? 'Nothing found.' : 'Nothing yet — use “Submit your research” above.'}</p>}
       </TabsContent>
 
       <TabsContent value="supervisor">
-        <div className="finder-head">
-          <SearchBar value={topic} onChange={setTopic} placeholder="Search researchers by topic" />
-        </div>
         <div className="prof-grid">{supervisorsOrdered.map((p) => <ProfessorCard key={p.id} p={p} />)}</div>
         {supervisors.length === 0 && <p className="small-note">Nobody found.</p>}
       </TabsContent>

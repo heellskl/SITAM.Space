@@ -4,8 +4,9 @@
 
 import { useMemo, useState } from 'react';
 import { PeoplePicker } from '@/components/people-picker';
+import { BackButton } from '@/components/back-button';
 import { Link } from '@tanstack/react-router';
-import { ArrowLeft, CircleCheck, CircleDashed, Pencil, Trash2, UserPlus, Users } from 'lucide-react';
+import { CircleCheck, CircleDashed, Pencil, Trash2, UserPlus, Users } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import {
@@ -79,12 +80,11 @@ export function LabTeamManager({ lab, onEdit }: { lab: Lab; onEdit: () => void }
 
   return (
     <main className="container content-page team-manage">
-      <Link to="/labs/$slug" params={{ slug: lab.slug }} className="back-link"><ArrowLeft size={14} />Back to {lab.name}</Link>
+      <BackButton fallback={`/labs/${lab.slug}`} />
       <div className="page-head-row">
         <div>
           <span className="eyebrow">Manage members</span>
           <h1>{lab.name}</h1>
-          <p className="page-intro">Heads are assigned by the SITAM coordinator.</p>
         </div>
         <Button variant="outline" onClick={onEdit}><Pencil />Edit lab info</Button>
       </div>

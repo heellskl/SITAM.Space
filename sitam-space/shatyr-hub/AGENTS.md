@@ -79,3 +79,9 @@
 - Academic Plan: `/academic-plan` (sidebar). Tables `academic_plans` (one `is_current`, `pdf_url`) + `academic_plan_items` (kind, dates, audiences students/researchers/industry, lab). Coordinator adds dates and uploads the official PDF (bucket `documents`); events from the Events page are shown on the timeline automatically. No PDF → "Save as PDF" prints the page (print styles).
 - Forms: `.partner-form` checkboxes are small and inline (`label.check`); opportunity tags use `TagInput` with suggestions from other listings.
 - v13.1: Academic Plan removed from the sidebar (page `/academic-plan` and its tables stay, not linked). Logo = "SITAM SPACE" + "INNOVATION ECOSYSTEM" in one colour (no orange, no sub-line). Labs page: no Topic / Sort filters (only search, Focus, Direction); tag chips on the lab page are plain again. Tag suggestions in the lab form and Admin → Tags stay.
+
+## SITAM SPACE v14 — current rules (override older notes above)
+- Labs → Projects: one list (lab + student projects), search + "All labs" select only. No "New lab project" button: for lab heads "Submit your project" is a menu — "New lab project · {lab}" (opens `/labs/$slug?edit=1&section=projects`) or "My own project".
+- Research (`research-publications.tsx`): tab + search in the URL (`/research?tab=people&q=…`); the search works for the open tab (Researchers: name / topics / titles of their papers; Publications: papers; Find a supervisor: topics; Lab & student research: projects; Overview: numbers and charts of matching papers). No counts on tabs, no second search in Find a supervisor.
+- "Back" buttons (`back-button.tsx`) go to the previous page (history), with a fallback for direct links: lab form, Manage members, researcher page.
+- Footer logo = sidebar logo (SITAM SPACE + INNOVATION ECOSYSTEM). Side columns (`.lab-aside`) are not sticky — both columns scroll with the page.

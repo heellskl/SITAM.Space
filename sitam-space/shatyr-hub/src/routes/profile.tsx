@@ -360,7 +360,7 @@ function DetailsDialog({ onClose }: { onClose: () => void }) {
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="hub-dialog">
         <DialogTitle>Your details</DialogTitle>
-        <DialogDescription>Name, faculty, group / department and photo.</DialogDescription>
+        <DialogDescription className="sr-only">Your details</DialogDescription>
         <form className="partner-form auth-form" onSubmit={save} noValidate>
           <div className="auth-row">
             <label>First name<input name="first_name" defaultValue={profile.firstName} maxLength={60} /></label>

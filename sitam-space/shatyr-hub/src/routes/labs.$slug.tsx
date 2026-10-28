@@ -8,9 +8,9 @@ import { humanError, useLab } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 
 export const Route = createFileRoute('/labs/$slug')({
-  validateSearch: (s: Record<string, unknown>): { edit?: boolean; team?: boolean } => {
+  validateSearch: (s: Record<string, unknown>): { edit?: boolean; team?: boolean; section?: string } => {
     const on = (v: unknown) => v === true || v === '1' || v === 1 || v === 'true';
-    return { ...(on(s['edit']) ? { edit: true } : {}), ...(on(s['team']) ? { team: true } : {}) };
+    return { ...(on(s['edit']) ? { edit: true } : {}), ...(on(s['team']) ? { team: true } : {}), ...(typeof s['section'] === 'string' ? { section: s['section'].slice(0, 20) } : {}) };
   },
   head: () => ({ meta: [{ title: 'Lab — SITAM SPACE · SDU' }] }),
   component: LabRoute,
@@ -18,7 +18,7 @@ export const Route = createFileRoute('/labs/$slug')({
 
 function LabRoute() {
   const { slug } = Route.useParams();
-  const { edit, team } = Route.useSearch();
+  const { edit, team, section } = Route.useSearch();
   const navigate = useNavigate();
   const { caps, loading } = useAuth();
   const { data: lab, isLoading, error, refetch } = useLab(slug);
@@ -40,7 +40,7 @@ function LabRoute() {
   const close = () => navigate({ to: '/labs/$slug', params: { slug }, search: {} });
   const openEditor = () => navigate({ to: '/labs/$slug', params: { slug }, search: { edit: true } });
   const openTeam = () => navigate({ to: '/labs/$slug', params: { slug }, search: { team: true } });
-  if (edit && !loading && canEdit) return <LabEditor lab={lab} onDone={() => { void refetch(); void close(); }} />;
+  if (edit && !loading && canEdit) return <LabEditor lab={lab} section={section} onDone={() => { void refetch(); void close(); }} />;
   if (team && !loading && canEdit) return <LabTeamManager lab={lab} onEdit={openEditor} />;
   return <LabPage lab={lab} onEdit={openEditor} onTeam={openTeam} />;
 }

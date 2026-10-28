@@ -27,7 +27,7 @@ export const Route = createFileRoute('/labs/')({
 });
 
 function Labs() {
-  const { tab = 'labs', ptab = 'labs' } = Route.useSearch();
+  const { tab = 'labs' } = Route.useSearch();
   const navigate = Route.useNavigate();
   const go = (t: LabsTab) => navigate({ search: t === 'labs' ? {} : { tab: t }, replace: true });
   return (
@@ -46,7 +46,7 @@ function Labs() {
           <LabsFeed key={tab} kind={tab === 'communities' ? 'community' : 'lab'} />
         )}
         {tab === 'projects' && (
-          <ProjectsPanel tab={ptab} onTab={(t) => navigate({ search: { tab: 'projects', ...(t === 'community' ? { ptab: 'community' as const } : {}) }, replace: true })} />
+          <ProjectsPanel />
         )}
       </div>
     </main>
