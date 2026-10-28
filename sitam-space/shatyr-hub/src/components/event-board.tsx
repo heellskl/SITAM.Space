@@ -49,11 +49,11 @@ export function TicketBadge({ event, reg, holder }: { event: Pick<SitamEvent, 'k
           <div><dt>Room</dt><dd>{event.room}</dd></div>
           {holder && <div className="span-3"><dt>Guest</dt><dd>{holder}</dd></div>}
         </dl>
-        <p className="eticket-status">
-          {checked
-            ? `✓ Checked in${reg.checked_in_at ? ` at ${new Date(reg.checked_in_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}` : ''}`
-            : 'Show the QR at the door — the organizer scans it.'}
-        </p>
+        {checked && (
+          <p className="eticket-status">
+            {`✓ Checked in${reg.checked_in_at ? ` at ${new Date(reg.checked_in_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}` : ''}`}
+          </p>
+        )}
       </div>
       <div className="eticket-stub">
         <div className="eticket-qr">
