@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { QRCodeSVG } from 'qrcode.react';
 import { CalendarDays, ChevronLeft, ChevronRight, History, LayoutGrid, Trophy } from 'lucide-react';
@@ -91,8 +91,6 @@ const TYPE_LABEL: Record<FeedType, string> = { industry: 'Industry', research: '
 const LOCATION_LABEL: Record<FeedLocation, string> = { sdu: 'At SDU', outside: 'Outside SDU', online: 'Online' };
 const ORGANIZER_LABEL: Record<FeedOrganizer, string> = { sdu: 'SDU', external: 'External', cohosted: 'Co-hosted' };
 const ONLINE = /(^|\W)(online|zoom|google meet|meet\.google|teams|remote|webinar)(\W|$)/i;
-/** More than this many cards → the rest is behind "Show all". */
-const PAGE = 8;
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 
@@ -209,37 +207,41 @@ function CalendarView({ items, onOpen }: { items: FeedItem[]; onOpen: (i: FeedIt
   );
 }
 
-/** One filter row: label + "All" + options. */
+/** Compact filter: a small pill-shaped select ("Type: All ▾"). */
 function FilterRow<T extends string>({ label, options, labels, value, onChange }: {
   label: string; options: readonly T[]; labels: Record<T, string>; value: T | 'all'; onChange: (v: T | 'all') => void;
 }) {
   return (
-    <div className="chip-filter" role="group" aria-label={label}>
-      <span className="chip-filter-label">{label}</span>
-      {(['all', ...options] as (T | 'all')[]).map((o) => (
-        <button key={o} type="button" className={value === o ? 'chip is-on' : 'chip'} aria-pressed={value === o} onClick={() => onChange(o)}>{o === 'all' ? 'All' : labels[o as T]}</button>
-      ))}
-    </div>
+    <label className={value === 'all' ? 'ev-select' : 'ev-select is-set'}>
+      <span>{label}</span>
+      <select value={value} onChange={(e) => onChange(e.target.value as T | 'all')} aria-label={label}>
+        <option value="all">All</option>
+        {options.map((o) => <option key={o} value={o}>{labels[o]}</option>)}
+      </select>
+    </label>
   );
 }
 
-/** Poster grid that shows the first 8 cards and a "Show all" button for the rest. */
+/** Event posters in one row that scrolls to the right (carousel), with arrow buttons on a computer. */
 function PosterList({ items, onOpen, past }: { items: FeedItem[]; onOpen: (i: FeedItem) => void; past?: boolean }) {
-  const [all, setAll] = useState(false);
-  const shown = all ? items : items.slice(0, PAGE);
+  const ref = useRef<HTMLDivElement>(null);
+  const [edge, setEdge] = useState({ start: true, end: false });
+  const update = () => {
+    const el = ref.current;
+    if (!el) return;
+    setEdge({ start: el.scrollLeft < 8, end: el.scrollLeft + el.clientWidth >= el.scrollWidth - 8 });
+  };
+  useEffect(update, [items.length]);
+  const go = (dir: number) => ref.current?.scrollBy({ left: dir * Math.max(260, (ref.current?.clientWidth ?? 600) * 0.8), behavior: 'smooth' });
+  if (!items.length) return null;
   return (
-    <>
-      <div className={past ? 'poster-grid is-past' : 'poster-grid'}>
-        {shown.map((it) => <PosterCard key={it.key} item={it} onOpen={onOpen} />)}
+    <div className="ev-carousel">
+      <div ref={ref} className={past ? 'ev-track is-past' : 'ev-track'} onScroll={update} role="list">
+        {items.map((it) => <div key={it.key} role="listitem" className="ev-slide"><PosterCard item={it} onOpen={onOpen} /></div>)}
       </div>
-      {items.length > PAGE && (
-        <div className="show-more">
-          <Button variant="outline" size="sm" onClick={() => setAll((x) => !x)} aria-expanded={all}>
-            {all ? 'Show less' : `Show all · ${items.length}`}
-          </Button>
-        </div>
-      )}
-    </>
+      {!edge.start && <button type="button" className="ev-arrow prev" aria-label="Scroll left" onClick={() => go(-1)}><ChevronLeft /></button>}
+      {!edge.end && <button type="button" className="ev-arrow next" aria-label="Scroll right" onClick={() => go(1)}><ChevronRight /></button>}
+    </div>
   );
 }
 
@@ -283,24 +285,23 @@ export function EventBoard({ query = '', fixedType, allowAdd = true }: { query?:
   return (
     <>
       {(error || ext.error) && <p className="form-alert">{humanError(error ?? ext.error)}</p>}
-      <div className="view-switch ev-when" role="tablist" aria-label="Time">
-        {([['all', 'All Events'], ['upcoming', 'Upcoming'], ['past', 'Past Events']] as const).map(([k, label]) => (
-          <button key={k} type="button" role="tab" aria-selected={when === k} className={when === k ? 'is-on' : ''} onClick={() => setWhen(k)}>
-            {k === 'past' ? <History size={15} /> : <CalendarDays size={15} />}{label}{k === 'past' && past.length ? ` · ${past.length}` : k === 'upcoming' && upcoming.length ? ` · ${upcoming.length}` : ''}
-          </button>
-        ))}
-      </div>
-      <div className="ev-toolbar">
+      {/* one compact bar: time · filters · view */}
+      <div className="ev-toolbar ev-compact">
         <div className="ev-filters">
+          <div className="seg" role="tablist" aria-label="Time">
+            {([['all', 'All'], ['upcoming', 'Upcoming'], ['past', 'Past']] as const).map(([k, label]) => (
+              <button key={k} type="button" role="tab" aria-selected={when === k} className={when === k ? 'is-on' : ''} onClick={() => setWhen(k)}>{label}</button>
+            ))}
+          </div>
           {!fixedType && <FilterRow label="Type" options={['industry', 'research', 'competitions'] as const} labels={TYPE_LABEL} value={typeSel} onChange={setType} />}
           <FilterRow label="Location" options={['sdu', 'outside', 'online'] as const} labels={LOCATION_LABEL} value={location} onChange={setLocation} />
           <FilterRow label="Organized by" options={['sdu', 'external', 'cohosted'] as const} labels={ORGANIZER_LABEL} value={organizer} onChange={setOrganizer} />
         </div>
         <div className="ev-actions">
           {allowAdd && rights.canAdd && <Button size="sm" variant="outline" onClick={() => setAdding(true)}><Trophy />Add external event</Button>}
-          <div className="view-switch" role="group" aria-label="View">
-            <button type="button" className={view === 'list' ? 'is-on' : ''} aria-pressed={view === 'list'} onClick={() => setView('list')}><LayoutGrid size={15} />List</button>
-            <button type="button" className={view === 'calendar' ? 'is-on' : ''} aria-pressed={view === 'calendar'} onClick={() => setView('calendar')}><CalendarDays size={15} />Calendar</button>
+          <div className="seg" role="group" aria-label="View">
+            <button type="button" className={view === 'list' ? 'is-on' : ''} aria-pressed={view === 'list'} onClick={() => setView('list')} title="List"><LayoutGrid size={15} /><span className="sr-only">List</span></button>
+            <button type="button" className={view === 'calendar' ? 'is-on' : ''} aria-pressed={view === 'calendar'} onClick={() => setView('calendar')} title="Calendar"><CalendarDays size={15} /><span className="sr-only">Calendar</span></button>
           </div>
         </div>
       </div>
@@ -310,7 +311,7 @@ export function EventBoard({ query = '', fixedType, allowAdd = true }: { query?:
       ) : (
         <>
           {when !== 'past' && <section aria-label="Upcoming events">
-            {loading && <div className="poster-grid">{Array.from({ length: 4 }, (_, i) => <div key={i} className="poster-card skeleton-card" aria-hidden />)}</div>}
+            {loading && <div className="ev-track">{Array.from({ length: 4 }, (_, i) => <div key={i} className="ev-slide"><div className="poster-card skeleton-card" aria-hidden /></div>)}</div>}
             {!loading && <PosterList key={`u-${listKey}`} items={upcoming} onOpen={openItem} />}
             {!loading && upcoming.length === 0 && <div className="mini-empty"><CalendarDays size={20} /><p>No upcoming events for these filters.</p></div>}
           </section>}

@@ -318,3 +318,22 @@ select pg_temp.as_super();
 set role anon;
 select 'guests read the plan: ' || case when (select count(*) from academic_plan_items where title = 'Research Poster Day') = 1 then 'PASS' else 'FAIL' end;
 reset role;
+
+\echo '── v15: submission done with a lab or a researcher'
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d001');
+do $$ declare v uuid; begin
+  select (public.submit_project('research', 'Student study of Kazakh NER', 'A student study of named entity recognition for Kazakh texts.', '{}', '{}', 2026, 'ongoing', null, null, null, null)).id into v;
+  perform set_config('sitam.sub', v::text, false);
+end $$;
+select public.set_submission_affiliation(current_setting('sitam.sub')::uuid, (select id from labs where slug='ai-lab'), null);
+do $$ begin
+  perform public.set_submission_affiliation(current_setting('sitam.sub')::uuid, (select id from labs where slug='ai-lab'), (select id from professors limit 1));
+  raise notice 'FAIL a submission linked to a lab and a researcher at once';
+exception when others then raise notice 'PASS a lab or a researcher, not both (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d003');
+do $$ begin
+  perform public.set_submission_affiliation(current_setting('sitam.sub')::uuid, null, null);
+  raise notice 'FAIL someone else changed the submission';
+exception when others then raise notice 'PASS only the author links the submission (%)', sqlerrm; end $$;
+select pg_temp.as_super();
+select 'author links the submission to a lab: ' || case when (select related_lab_id = (select id from labs where slug='ai-lab') and lab_id is null from projects where id = current_setting('sitam.sub')::uuid) then 'PASS' else 'FAIL' end;

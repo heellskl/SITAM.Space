@@ -444,7 +444,7 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
       {error && <p className="form-alert mt-4" role="alert">{error}</p>}
       <div className="editor-actions">
         <Button variant="outline" onClick={onDone} disabled={busy}>Cancel</Button>
-        <Button onClick={save} disabled={busy} className={busy ? 'save-btn is-saving' : 'save-btn'} aria-busy={busy}>
+        <Button onClick={save} disabled={busy} className={busy ? 'editor-save is-saving' : 'editor-save'} aria-busy={busy}>
           {busy ? <Loader2 className="animate-spin" /> : <Save />}{busy ? 'Saving…' : 'Save lab'}
         </Button>
       </div>

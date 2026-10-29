@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
-import { KIND_LABEL, humanError, useSubmitProject, type ProjectKind, type ProjectStatus } from '@/lib/api';
+import { KIND_LABEL, humanError, setSubmissionAffiliation, useLabs, useProfessors, useSubmitProject, type ProjectKind, type ProjectStatus } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 
 const https = (v: string) => !v || /^https:\/\//i.test(v);
@@ -62,6 +62,11 @@ export function SubmitProjectDialog({ defaultKind, onClose }: { defaultKind: Pro
   const kind: ProjectKind = defaultKind;
   const [error, setError] = useState('');
   const [done, setDone] = useState<'pending' | 'approved' | null>(null);
+  // done with a lab OR with a researcher (one of the two, optional)
+  const [withKind, setWithKind] = useState<'none' | 'lab' | 'person'>('none');
+  const [withId, setWithId] = useState('');
+  const labs = useLabs();
+  const profs = useProfessors();
   const instant = (caps.isPhd && kind === 'research') || caps.isAdmin;
 
   async function send(e: FormEvent<HTMLFormElement>) {
@@ -73,6 +78,7 @@ export function SubmitProjectDialog({ defaultKind, onClose }: { defaultKind: Pro
     if (s('summary').length < 30) return setError('Describe it in a few sentences (30+ characters).');
     if (![s('github_url'), s('demo_url'), s('paper_url')].every(https)) return setError('Links must start with https://');
     const yr = Number(s('year'));
+    if (withKind !== 'none' && !withId) return setError(withKind === 'lab' ? 'Choose the lab, or pick “Neither”.' : 'Choose the researcher, or pick “Neither”.');
     try {
       const row = await submit.mutateAsync({
         kind,
@@ -87,6 +93,10 @@ export function SubmitProjectDialog({ defaultKind, onClose }: { defaultKind: Pro
         paper_url: s('paper_url'),
         contact_email: s('contact_email'),
       });
+      if (withKind !== 'none' && withId) {
+        try { await setSubmissionAffiliation(row.id, withKind === 'lab' ? withId : null, withKind === 'person' ? withId : null); }
+        catch (err) { toast.error('Sent, but the lab / researcher was not saved', { description: humanError(err) }); }
+      }
       setDone(row.moderation === 'approved' ? 'approved' : 'pending');
       toast.success(row.moderation === 'approved' ? 'Published' : 'Sent for review');
     } catch (err) {
@@ -126,6 +136,26 @@ export function SubmitProjectDialog({ defaultKind, onClose }: { defaultKind: Pro
                 <label>Status<select name="status" defaultValue="ongoing"><option value="ongoing">Ongoing</option><option value="completed">Completed</option></select></label>
                 <label>Year<input name="year" inputMode="numeric" maxLength={4} defaultValue={String(new Date().getFullYear())} /></label>
               </div>
+              <fieldset className="with-field">
+                <legend>Done with</legend>
+                <div className="seg" role="radiogroup" aria-label="Done with">
+                  {([['none', 'Neither'], ['lab', 'A lab'], ['person', 'A researcher']] as const).map(([k, label]) => (
+                    <button key={k} type="button" role="radio" aria-checked={withKind === k} className={withKind === k ? 'is-on' : ''} onClick={() => { setWithKind(k); setWithId(''); }}>{label}</button>
+                  ))}
+                </div>
+                {withKind === 'lab' && (
+                  <select value={withId} onChange={(e) => setWithId(e.target.value)} aria-label="Select lab">
+                    <option value="">Select lab</option>
+                    {(labs.data ?? []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                  </select>
+                )}
+                {withKind === 'person' && (
+                  <select value={withId} onChange={(e) => setWithId(e.target.value)} aria-label="Select researcher">
+                    <option value="">Select person / researcher</option>
+                    {[...(profs.data ?? [])].sort((a, b) => a.full_name.localeCompare(b.full_name)).map((p) => <option key={p.id} value={p.id}>{p.full_name}</option>)}
+                  </select>
+                )}
+              </fieldset>
               <label>Team (comma-separated)<input name="authors" defaultValue={me} maxLength={400} /></label>
               <label>Tags (comma-separated)<input name="tags" maxLength={200} placeholder="AI, EdTech" /></label>
               {kind !== 'research' && (

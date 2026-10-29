@@ -138,3 +138,6 @@ delete from companies where name = 'Demo Partner (sample)';
 - `academic_plans`, `academic_plan_items`: public read, coordinator (`is_admin()`) writes. Seeded: "Academic Year 2026–2027" (current, no dates — the coordinator adds them).
 - Storage bucket `documents` (public, PDF ≤ 20 MB), coordinator-only upload.
 - Tests: 77 checks.
+
+## v15 (2026-10-29)
+- Migration `20261029100000_sitam_v15_submission_affiliation.sql`: `projects.related_lab_id`, `projects.supervisor_id`, RPC `set_submission_affiliation`. Run `supabase/update-to-v15.sql` (contains v12 → v15, re-runnable). Tests: 80 checks.

@@ -3,8 +3,18 @@ import { Link } from '@tanstack/react-router';
 import { BookOpen, ExternalLink, FlaskConical, GitBranch, Lightbulb, Rocket, Search, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { SearchBar } from '@/components/search-bar';
-import { KIND_LABEL, humanError, useProjects, type Project, type ProjectKind, type ProjectStatus } from '@/lib/api';
+import { KIND_LABEL, humanError, useLabs, useProjects, type Project, type ProjectKind, type ProjectStatus } from '@/lib/api';
 import { mineFirst, useMyLabs } from '@/lib/my-labs';
+
+/** "With: Robotics Lab" or "With: Prof. Name" for a student's submission. */
+function WithLine({ p }: { p: Project }) {
+  const labs = useLabs();
+  if (p.labs) return null;
+  const lab = p.related_lab_id ? labs.data?.find((l) => l.id === p.related_lab_id) : undefined;
+  if (lab) return <p className="project-with">With <Link to="/labs/$slug" params={{ slug: lab.slug }}>{lab.name}</Link></p>;
+  if (p.professors) return <p className="project-with">With <Link to="/research/$username" params={{ username: p.professors.username }}>{p.professors.full_name}</Link></p>;
+  return null;
+}
 
 export function ProjectCard({ p }: { p: Project }) {
   const Icon = p.kind === 'startup' ? Rocket : p.kind === 'project' ? Lightbulb : FlaskConical;
@@ -17,6 +27,7 @@ export function ProjectCard({ p }: { p: Project }) {
       <span className="eyebrow">{KIND_LABEL[p.kind]}{p.labs ? <> · <Link to="/labs/$slug" params={{ slug: p.labs.slug }}>{p.labs.name}</Link></> : ' · Community'}</span>
       <h3>{p.title}</h3>
       {!p.labs && p.authors.length > 0 && <p className="project-authors"><Users size={13} /> {p.authors.join(', ')}</p>}
+      <WithLine p={p} />
       {p.summary && <p className="opp-desc">{p.summary}</p>}
       {p.tags.length > 0 && <div className="stack-list">{p.tags.map((t) => <span key={t}>{t}</span>)}</div>}
       {(p.github_url || p.demo_url || p.paper_url) && (

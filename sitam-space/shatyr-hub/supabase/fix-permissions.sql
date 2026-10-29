@@ -86,3 +86,5 @@ revoke execute on function public.set_event_photos(uuid, text[]) from anon, publ
 grant execute on function public.set_event_photos(uuid, text[]) to authenticated;
 grant select on public.academic_plans, public.academic_plan_items to anon, authenticated;
 grant insert, update, delete on public.academic_plans, public.academic_plan_items to authenticated;
+revoke execute on function public.set_submission_affiliation(uuid, uuid, uuid) from anon, public;
+grant execute on function public.set_submission_affiliation(uuid, uuid, uuid) to authenticated;

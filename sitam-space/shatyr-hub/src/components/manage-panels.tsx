@@ -1,14 +1,14 @@
 import { useMemo, useState, type FormEvent } from 'react';
 import { gmailCompose } from '@/lib/utils';
 import { Link } from '@tanstack/react-router';
-import { Building2, CalendarPlus, CheckCircle2, ClipboardCheck, ExternalLink, FileText, Inbox, Mail, Pencil, Phone, Plus, ShieldCheck, Star, Trash2, X } from 'lucide-react';
+import { ImagePlus, Building2, CalendarPlus, CheckCircle2, ClipboardCheck, ExternalLink, FileText, Inbox, Mail, Pencil, Phone, Plus, ShieldCheck, Star, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import {
   CATEGORY_LABEL, INDUSTRIAL_LABEL, KIND_LABEL, MODERATION_LABEL, STATUS_LABEL, STATUS_TONE, formatDate, hostNames, humanError, opportunityLabel, signedUrl,
   useAdminAction, useBriefs, useCompanies, useDeleteOpportunity, useInbox, useManagedOpportunities, useModerate, useModerationQueue, useOpportunities, usePendingTeachers, useProjects,
-  useReviewApplication, useSaveEvent, useSaveOpportunity, useUpdateBrief,
+  uploadLabImage, useReviewApplication, useSaveEvent, useSaveOpportunity, useSetPoster, useUpdateBrief,
   type ApplicationStatus, type InboxItem, type IndustrialType, type ModerationItem, type Opportunity, type OpportunityCategory, type PartnerRequest,
 } from '@/lib/api';
 import { ROLE_LABEL, useAuth, type Role } from '@/lib/auth';
@@ -356,8 +356,11 @@ export function ListingDialog({ opp, onClose, preset, defaultCategory }: { opp: 
 export function EventForm({ preset, onDone }: { preset?: HostSel; onDone?: () => void }) {
   const hosts = useMyHosts();
   const save = useSaveEvent();
+  const setPoster = useSetPoster();
+  const { user } = useAuth();
   const [hostSel, setHostSel] = useState<HostSel>(preset ?? { labs: hosts.labs.slice(0, 1).map((l) => l.id), companies: [], projects: [] });
   const [error, setError] = useState('');
+  const [poster, setPosterFile] = useState<File | null>(null);
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -365,8 +368,9 @@ export function EventForm({ preset, onDone }: { preset?: HostSel; onDone?: () =>
     const d = new FormData(form);
     const s = (k: string) => String(d.get(k) ?? '').trim();
     if (s('title').length < 3 || !s('date')) return setError('Title and date are required.');
+    if (poster && poster.size > 10 * 1024 * 1024) return setError('The poster must be 10 MB or smaller.');
     try {
-      await save.mutateAsync({
+      const id = await save.mutateAsync({
         kind: s('kind') as 'research' | 'industrial',
         title: s('title'),
         description: s('description'),
@@ -379,8 +383,18 @@ export function EventForm({ preset, onDone }: { preset?: HostSel; onDone?: () =>
         company_ids: hostSel.companies,
         project_ids: hostSel.projects,
       });
+      // optional poster: stored in the lab's folder (or the coordinator's), then attached to the event
+      if (poster && id) {
+        try {
+          const url = await uploadLabImage(hostSel.labs[0] ?? user?.id ?? '', poster, 'posters');
+          await setPoster.mutateAsync({ kind: 'sdu', id, url });
+        } catch (err) {
+          toast.error('The event is published, but the poster was not saved', { description: humanError(err) });
+        }
+      }
       toast.success('Event published', { description: 'It is on the Events page now.' });
       form.reset();
+      setPosterFile(null);
       setError('');
       onDone?.();
     } catch (err) {
@@ -406,8 +420,16 @@ export function EventForm({ preset, onDone }: { preset?: HostSel; onDone?: () =>
         <label>Room<input name="room" defaultValue="C1.2" maxLength={40} /></label>
         <label>Seats<input name="capacity" inputMode="numeric" defaultValue="60" /></label>
       </div>
+      <div className="form-field">
+        <span className="form-label">Poster image (if available)</span>
+        <label className="file-pick">
+          <ImagePlus size={14} />{poster ? poster.name : 'Upload a poster — PNG, JPG or WebP, up to 10 MB'}
+          <input type="file" accept="image/png,image/jpeg,image/webp" className="sr-only" onChange={(e) => setPosterFile(e.target.files?.[0] ?? null)} />
+        </label>
+        {poster && <button type="button" className="link-btn" onClick={() => setPosterFile(null)}>Remove</button>}
+      </div>
       {error && <p className="form-alert">{error}</p>}
-      <Button type="submit" disabled={save.isPending}>{save.isPending ? 'Publishing…' : 'Publish event'}</Button>
+      <Button type="submit" disabled={save.isPending || setPoster.isPending}>{save.isPending || setPoster.isPending ? 'Publishing…' : 'Publish event'}</Button>
     </form>
   );
 }

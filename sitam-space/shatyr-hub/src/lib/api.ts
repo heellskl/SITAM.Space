@@ -130,6 +130,10 @@ export type Project = {
   paper_url: string | null;
   sort_order: number;
   labs: { name: string; slug: string } | null;
+  /** v15: a student's submission done with a lab or with a researcher (one of the two) */
+  related_lab_id?: string | null;
+  supervisor_id?: string | null;
+  professors?: { full_name: string; username: string } | null;
 };
 
 export type OpportunityCategory = 'industrial' | 'lab' | 'research';
@@ -676,7 +680,7 @@ export function useToggleSavedLab(userId: string | undefined, saved: string[], o
 export function useProjects() {
   return useQuery({
     queryKey: qk.projects,
-    queryFn: () => rows<Project[]>(db.from('projects').select('*, labs(name, slug)').eq('moderation', 'approved').order('sort_order').order('year', { ascending: false, nullsFirst: false })),
+    queryFn: () => rows<Project[]>(db.from('projects').select('*, labs(name, slug), professors(full_name, username)').eq('moderation', 'approved').order('sort_order').order('year', { ascending: false, nullsFirst: false })),
   });
 }
 
@@ -704,11 +708,17 @@ export function useSubmitProject() {
   });
 }
 
+/** v15: link one's own submission to a lab OR a researcher (checked in SQL: set_submission_affiliation). */
+export async function setSubmissionAffiliation(projectId: string, labId: string | null, supervisorId: string | null) {
+  const { error } = await db.rpc('set_submission_affiliation', { p_project: projectId, p_lab: labId, p_supervisor: supervisorId });
+  if (error) fail(error);
+}
+
 export function useMySubmissions(userId: string | undefined) {
   return useQuery({
     queryKey: [...qk.mySubmissions, userId],
     enabled: !!userId,
-    queryFn: () => rows<Project[]>(db.from('projects').select('*, labs(name, slug)').eq('owner_id', userId).order('submitted_at', { ascending: false })),
+    queryFn: () => rows<Project[]>(db.from('projects').select('*, labs(name, slug), professors(full_name, username)').eq('owner_id', userId).order('submitted_at', { ascending: false })),
   });
 }
 
@@ -1000,12 +1010,13 @@ export function useSaveEvent() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (d: EventDraft) => {
-      const { error } = await db.rpc('save_event', {
+      const { data, error } = await db.rpc('save_event', {
         p_id: null, p_kind: d.kind, p_title: d.title, p_description: d.description, p_starts_at: d.starts_at, p_room: d.room,
         p_speaker: d.speaker || null, p_speaker_role: d.speaker_role || null, p_capacity: d.capacity,
         p_lab_ids: d.lab_ids, p_company_ids: d.company_ids, p_project_ids: d.project_ids,
       });
       if (error) fail(error);
+      return data as string; // the new event's id
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.events }),
   });

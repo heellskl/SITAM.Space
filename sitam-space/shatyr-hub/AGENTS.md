@@ -68,7 +68,7 @@
 - Two e-mails: `profiles.personal_email` (edited in Profile → Settings), shown with the SDU e-mail by `PersonEmails` (lab-page.tsx) on lab teams and /people.
 - Events (`event-board.tsx`): filters Type · Location (At SDU / Outside SDU / Online) · Organized by (SDU / External / Co-hosted). SDU events: Online when the room says online/zoom/meet/teams; co-hosted when a company is a host. External events: `external_events.location_type`, `cohosted` via `set_external_event_place`. 8 cards, then "Show all". Calendar: past days grey, today amber. Colours: Industry #B45309, Research #1D4ED8, Competitions #047857.
 - Industry page: no events. Under the heading two tabs — Opportunities (default, board) and Partners (`?view=partners`, `industry-partners.tsx`, table `industry_partners`, coordinator edits).
-- Database: existing → `supabase/update-to-v13.sql` (includes v12, v12.1, v13; re-runnable); empty → `supabase/setup-new-database.sql`.
+- Database: existing → `supabase/update-to-v15.sql` (includes v12, v12.1, v13, v15; re-runnable); empty → `supabase/setup-new-database.sql`.
 - Shared tags (v12.1): `src/lib/lab-tags.ts` builds one catalog of research areas / skills / equipment from all labs (most used first, spelling = most common). `TagInput` shows it as a dropdown ("Used by other labs", counts, "Add … as a new tag"). Labs page: Topic filter (`?topic=area:NLP`) + Sort (Name, Most projects, Largest team); chips on the lab page link to that filter. Admin → "Tags of all labs" (`tag-manager.tsx`): rename / merge / remove everywhere via `admin_rename_lab_tag`.
 
 ## SITAM SPACE v13 — current rules (override older notes above)
@@ -85,3 +85,11 @@
 - Research (`research-publications.tsx`): tab + search in the URL (`/research?tab=people&q=…`); the search works for the open tab (Researchers: name / topics / titles of their papers; Publications: papers; Find a supervisor: topics; Lab & student research: projects; Overview: numbers and charts of matching papers). No counts on tabs, no second search in Find a supervisor.
 - "Back" buttons (`back-button.tsx`) go to the previous page (history), with a fallback for direct links: lab form, Manage members, researcher page.
 - Footer logo = emblem + "SITAM SPACE" only (no tagline); the sidebar logo keeps "INNOVATION ECOSYSTEM". On a computer the two columns (`.lab-main`, `.lab-aside`) scroll independently (sticky + own scroll); one column below 1025px.
+
+## SITAM SPACE v15 — current rules (override older notes above)
+- Logo: new SITAM emblem `public/sitam-logo.png` (navy) and `public/sitam-logo-dark.png` (light, for the night theme) via `BrandMark` in hub-shell.tsx (sidebar, top bar, footer).
+- Majors (`MAJORS` in auth.tsx) = SITAM bachelor's programmes: Business Information Systems, Computer Science, Information Systems, Mathematical and Computer Modelling, Mathematics, Multimedia Sciences, Software Engineering, Statistics and Data Science, Other.
+- Events: one compact bar (All/Upcoming/Past segmented · Type / Location / Organized by pill selects · list/calendar icons). Posters scroll horizontally (`.ev-track` carousel with arrows). New event form has "Poster image (if available)" (upload → `set_event_poster`; `useSaveEvent` returns the new id).
+- Submit research / project: "Done with" Neither / A lab / A researcher → `projects.related_lab_id` (no FK, to keep `labs(...)` embeds unambiguous) or `projects.supervisor_id` → professors, via `set_submission_affiliation` (author only). Cards show "With …".
+- Lab form: Cancel + Save lab at the bottom right (`.editor-actions`, button class `editor-save` — never `save-btn`, that is the bookmark button).
+- Layout rhythm: v15 block at the end of styles.css (`--space-*`, page-head-row centred, equal-height cards, 12.5px small text).

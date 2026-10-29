@@ -7,16 +7,16 @@ import { takePendingCv } from '@/lib/pending-cv';
 /** Base account role, stored in profiles.role. "teacher" = Professor / Researcher, "phd" = PhD student. */
 export type Role = 'student' | 'phd' | 'teacher' | 'partner' | 'admin';
 
+/** SITAM bachelor's programmes (sdu.edu.kz → School of IT and Applied Mathematics → Bachelor's). */
 export const MAJORS = [
-  'Information Systems',
+  'Business Information Systems',
   'Computer Science',
-  'Software Engineering',
-  'Cyber Security',
-  'Data Science',
-  'Robotics & IoT',
-  'Business',
-  'Engineering',
+  'Information Systems',
+  'Mathematical and Computer Modelling',
   'Mathematics',
+  'Multimedia Sciences',
+  'Software Engineering',
+  'Statistics and Data Science',
   'Other (type your own)',
 ] as const;
 

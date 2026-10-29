@@ -25,10 +25,20 @@ export const navigation = [
 
 const COLLAPSE_KEY = 'sitam-sidebar-collapsed';
 
+/** SITAM emblem: navy wings for the day theme, light wings for the night theme (the orange mark stays). */
+function BrandMark() {
+  return (
+    <span className="brand-mark2" aria-hidden>
+      <img className="brand-emblem logo-day" src="/sitam-logo.png" alt="" width={28} height={34} />
+      <img className="brand-emblem logo-night" src="/sitam-logo-dark.png" alt="" width={28} height={34} />
+    </span>
+  );
+}
+
 function Logo({ compact }: { compact?: boolean }) {
   return (
     <Link to="/" className="brand side-brand" aria-label={`${BRAND.name} home`}>
-      <img className="brand-emblem" src="/sitam-emblem.png" alt="" width={28} height={34} />
+      <BrandMark />
       {!compact && (
         <span className="brand-name">
           <span className="brand-word">SITAM SPACE</span>
@@ -195,7 +205,7 @@ export function HubFooter() {
   return (
     <footer className="site-footer">
       <div className="container footer-inner">
-        <Link to="/" className="footer-brand brand" aria-label={`${BRAND.name} home`}><img className="brand-emblem" src="/sitam-emblem.png" alt="" width={28} height={34} /><span className="brand-name"><span className="brand-word">SITAM SPACE</span></span></Link>
+        <Link to="/" className="footer-brand brand" aria-label={`${BRAND.name} home`}><BrandMark /><span className="brand-name"><span className="brand-word">SITAM SPACE</span></span></Link>
         <p>{BRAND.contactLabel}: <a href={gmailCompose(BRAND.contactEmail)} target="_blank" rel="noopener noreferrer"><Mail size={12} className="inline" /> {BRAND.contactEmail}</a></p>
         <span>© 2026 SITAM SPACE · SDU University</span>
       </div>
