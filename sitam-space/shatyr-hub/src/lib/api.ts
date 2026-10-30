@@ -11,7 +11,7 @@ export const db = supabase as unknown as SupabaseClient;
 /* ───────────────────────────── Row types ───────────────────────────── */
 
 export type LabRole =
-  | 'lead' | 'co_lead' | 'student_lead' | 'deputy_student_lead'
+  | 'lead' | 'co_lead' | 'student_lead' | 'deputy_student_lead' | 'tech_lead'
   | 'member' | 'mentor' | 'research_assistant' | 'student_researcher' | 'project_coordinator' | 'former_lead';
 
 /** Positions inside a lab (not the platform role). Heads manage the head positions; managers manage the lab. */
@@ -19,15 +19,15 @@ export const HEAD_ROLES: LabRole[] = ['lead', 'co_lead'];
 export const MANAGER_ROLES: LabRole[] = ['lead', 'co_lead'];
 /** Display order of a lab team. */
 export const LAB_ROLE_ORDER: LabRole[] = [
-  'lead', 'co_lead', 'student_lead', 'deputy_student_lead', 'mentor', 'project_coordinator', 'research_assistant', 'student_researcher', 'member', 'former_lead',
+  'lead', 'co_lead', 'student_lead', 'deputy_student_lead', 'tech_lead', 'mentor', 'project_coordinator', 'research_assistant', 'student_researcher', 'member', 'former_lead',
 ];
 /** Positions for a select: "Head" is offered once (lead); co_lead / former_lead only when the row already has it. */
-export function positionOptions(list: readonly LabRole[], current?: LabRole): LabRole[] {
-  return list.filter((r) => (r !== 'co_lead' && r !== 'former_lead') || r === current);
+export function positionOptions(list: readonly LabRole[], current?: LabRole, allowCoHead = false): LabRole[] {
+  return list.filter((r) => (r === 'co_lead' ? allowCoHead : r !== 'former_lead') || r === current);
 }
 /** One person's position (singular), for selects and badges. */
 export const LAB_POSITION_LABEL: Record<LabRole, string> = {
-  lead: 'Head', co_lead: 'Head', student_lead: 'Student lead', deputy_student_lead: 'Deputy student lead',
+  lead: 'Head', co_lead: 'Co-Head', student_lead: 'Student lead', deputy_student_lead: 'Deputy student lead', tech_lead: 'Tech lead',
   mentor: 'Mentor', project_coordinator: 'Project coordinator', research_assistant: 'Research assistant', student_researcher: 'Student researcher',
   member: 'Member', former_lead: 'Former head',
 };
@@ -294,7 +294,9 @@ export type PartnerRequest = {
   company_name: string;
   contact_name: string;
   contact_email: string;
-  request_type: 'rnd' | 'mvp' | 'hiring' | 'sponsorship';
+  request_type: 'rnd' | 'mvp' | 'hiring' | 'sponsorship' | 'internship' | 'contact_lab';
+  /** v17: the lab a "Contact a lab" request is about */
+  requested_lab_id?: string | null;
   has_budget: boolean;
   budget_range: string | null;
   tech_stack: string;
@@ -454,6 +456,7 @@ export type Person = {
   id: string; first_name: string; last_name: string; role: string; email: string;
   course: number | null; major: string | null; department: string | null; position: string | null; bio: string | null;
   faculty?: string | null; group_name?: string | null; avatar_url?: string | null; personal_email?: string | null;
+  graduation_year?: number | null; company?: string | null;
 };
 
 export function usePeople(ids: string[], enabled = true) {
@@ -1246,7 +1249,7 @@ export function useProfessor(username: string) {
 
 /* ───────────────────────────── B2B ───────────────────────────── */
 
-export type BriefDraft = Pick<PartnerRequest, 'company_name' | 'contact_name' | 'contact_email' | 'request_type' | 'has_budget' | 'budget_range' | 'tech_stack' | 'description'>;
+export type BriefDraft = Pick<PartnerRequest, 'company_name' | 'contact_name' | 'contact_email' | 'request_type' | 'has_budget' | 'budget_range' | 'tech_stack' | 'description'> & { requested_lab_id?: string | null };
 
 export function useSubmitBrief() {
   const qc = useQueryClient();
@@ -1321,7 +1324,7 @@ export const MODERATION_LABEL: Record<Moderation, string> = { pending: 'Under re
 
 /** Group headings on the lab page (plural). For one person use LAB_POSITION_LABEL. */
 export const LAB_ROLE_LABEL: Record<LabRole, string> = {
-  lead: 'Lab head', co_lead: 'Co-head', student_lead: 'Student lead', deputy_student_lead: 'Deputy student lead',
+  lead: 'Lab head', co_lead: 'Co-heads', student_lead: 'Student lead', deputy_student_lead: 'Deputy student lead', tech_lead: 'Tech leads',
   mentor: 'Mentors', project_coordinator: 'Project coordinators', research_assistant: 'Research assistants', student_researcher: 'Student researchers',
   member: 'Members', former_lead: 'Former heads',
 };
@@ -1353,4 +1356,115 @@ export function currentWeekRange(now = new Date()) {
   const dow = (local.getUTCDay() + 6) % 7;
   const monday = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() - dow) - 5 * 3_600_000;
   return { start: monday, end: monday + 7 * 86_400_000 };
+}
+
+/* ───────────────────────────── v17: alumni offers, researcher profile requests, own researcher card ───────────────────────────── */
+// Each query here touches only the v17 tables / columns, so the rest of the site keeps working before the v17 SQL is run.
+
+export type HelpOffer = { id: string; user_id: string; lab_id: string; kind: 'mentor' | 'speaker' | 'advisor'; message: string; status: 'new' | 'accepted' | 'declined'; created_at: string };
+export const HELP_KIND_LABEL: Record<HelpOffer['kind'], string> = { mentor: 'Mentor for student projects', speaker: 'Guest speaker', advisor: 'External research advisor' };
+
+export function useHelpOffers(enabled: boolean) {
+  return useQuery({
+    queryKey: ['help-offers'], enabled,
+    queryFn: () => rows<HelpOffer[]>(db.from('help_offers').select('*').order('created_at', { ascending: false })),
+  });
+}
+export function useOfferHelp() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { labId: string; kind: HelpOffer['kind']; message: string }) => {
+      const { error } = await db.rpc('offer_help', { p_lab: v.labId, p_kind: v.kind, p_message: v.message });
+      if (error) fail(error);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['help-offers'] }),
+  });
+}
+export function useRespondOffer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { id: string; status: HelpOffer['status'] }) => {
+      const { error } = await db.rpc('respond_help_offer', { p_offer: v.id, p_status: v.status });
+      if (error) fail(error);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['help-offers'] }),
+  });
+}
+
+export type ResearcherRequest = {
+  id: string; user_id: string; professor_id: string | null; full_name: string; department: string | null; title: string | null; degree: string | null;
+  scopus_url: string | null; orcid_url: string | null; scholar_url: string | null; note: string | null;
+  status: 'pending' | 'approved' | 'rejected'; review_note: string | null; created_at: string;
+};
+export type ResearcherRequestDraft = Omit<ResearcherRequest, 'id' | 'user_id' | 'status' | 'review_note' | 'created_at'>;
+
+/** Own requests (a teacher) or all requests (the coordinator) — row-level security decides. */
+export function useResearcherRequests(enabled: boolean) {
+  return useQuery({
+    queryKey: ['researcher-requests'], enabled,
+    queryFn: () => rows<ResearcherRequest[]>(db.from('researcher_profile_requests').select('*').order('created_at', { ascending: false })),
+  });
+}
+export function useRequestResearcherProfile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (d: ResearcherRequestDraft) => {
+      const { error } = await db.rpc('request_researcher_profile', {
+        p_professor: d.professor_id, p_full_name: d.full_name, p_department: d.department, p_title: d.title, p_degree: d.degree,
+        p_scopus_url: d.scopus_url, p_orcid_url: d.orcid_url, p_scholar_url: d.scholar_url, p_note: d.note,
+      });
+      if (error) fail(error);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['researcher-requests'] }),
+  });
+}
+export function useReviewResearcherRequest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { id: string; approve: boolean; note?: string }) => {
+      const { error } = await db.rpc('review_researcher_request', { p_request: v.id, p_approve: v.approve, p_note: v.note ?? null });
+      if (error) fail(error);
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['researcher-requests'] });
+      void qc.invalidateQueries({ queryKey: qk.professors });
+    },
+  });
+}
+
+/** Researcher cards nobody has linked yet (for "This is me"). */
+export function useUnlinkedResearchers(enabled: boolean) {
+  return useQuery({
+    queryKey: ['professors-unlinked'], enabled, staleTime: 60_000,
+    queryFn: () => rows<{ id: string; full_name: string; job_title: string | null }[]>(db.from('professors').select('id, full_name, job_title').is('profile_id', null).order('last_name')),
+  });
+}
+
+export type ResearcherExtra = { profile_id: string | null; bio: string | null; office_hours: string | null; interests: string[] };
+/** v17 fields of a researcher card (bio, office hours, interests) and who owns it. */
+export function useResearcherExtra(id: string | undefined) {
+  return useQuery({
+    queryKey: ['professor-extra', id], enabled: !!id,
+    queryFn: async () => {
+      const { data, error } = await db.from('professors').select('profile_id, bio, office_hours, interests').eq('id', id!).maybeSingle();
+      if (error) return null; // v17 SQL not run yet
+      return data as ResearcherExtra | null;
+    },
+  });
+}
+export function useUpdateMyResearcher() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { bio: string; office_hours: string; interests: string[]; orcid_url: string; scholar_url: string; scopus_id: string }) => {
+      const { error } = await db.rpc('update_my_researcher_profile', {
+        p_bio: v.bio, p_office_hours: v.office_hours, p_interests: v.interests, p_orcid_url: v.orcid_url, p_scholar_url: v.scholar_url, p_scopus_id: v.scopus_id,
+      });
+      if (error) fail(error);
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['professor-extra'] });
+      void qc.invalidateQueries({ queryKey: ['professor'] });
+      void qc.invalidateQueries({ queryKey: qk.professors });
+    },
+  });
 }

@@ -145,3 +145,7 @@ delete from companies where name = 'Demo Partner (sample)';
 ## v16 (2026-10-30) — Ask SITAM
 - Migration `20261030100000_sitam_v16_ask_sitam.sql` (in `update-to-v16.sql`, which contains v12 → v16): pgvector, `ai_documents`, `ai_faq`, view `ai_sources`, `ai_pending_documents`, `ai_upsert_document`, `ai_remove_stale`, `ai_index_status`, `match_documents`, `ai_usage` + `ai_take_quota`. Service-role-only helpers; `match_documents` / `ai_index_status` for signed-in users.
 - Edge Functions `ask-sitam`, `ai-index`; setup in docs/ASK-SITAM.md.
+
+## v17 (2026-10-31) — roles & onboarding
+- Migration `20261031100000_sitam_v17_roles_onboarding.sql` (in `update-to-v17.sql` = v12 → v17): `lab_role` + tech_lead, `app_role` + alumni, `is_lab_lead`, new `lab_members_guard` / `add_lab_member` (Head appoints Co-Heads), profiles.graduation_year / company, `public_people` + those, `enforce_signup_email` / `handle_new_user` (alumni), `submit_project` (no alumni), `help_offers` + `offer_help` / `respond_help_offer`, professors.bio / office_hours / interests, `researcher_profile_requests` + `request_researcher_profile` / `review_researcher_request` / `update_my_researcher_profile`, partner_request_type + internship / contact_lab, partner_requests.requested_lab_id.
+- Tests: 98 checks (v16 needs pgvector, not in the local test database).

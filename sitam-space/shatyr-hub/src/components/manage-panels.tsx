@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import {
   CATEGORY_LABEL, INDUSTRIAL_LABEL, KIND_LABEL, MODERATION_LABEL, STATUS_LABEL, STATUS_TONE, formatDate, hostNames, humanError, opportunityLabel, signedUrl,
   useAdminAction, useBriefs, useCompanies, useDeleteOpportunity, useInbox, useManagedOpportunities, useModerate, useModerationQueue, useOpportunities, usePendingTeachers, useProjects,
-  uploadLabImage, useReviewApplication, useSaveEvent, useSaveOpportunity, useSetPoster, useUpdateBrief,
+  uploadLabImage, useLabs, useReviewApplication, useSaveEvent, useSaveOpportunity, useSetPoster, useUpdateBrief,
   type ApplicationStatus, type InboxItem, type IndustrialType, type ModerationItem, type Opportunity, type OpportunityCategory, type PartnerRequest,
 } from '@/lib/api';
 import { ROLE_LABEL, useAuth, type Role } from '@/lib/auth';
@@ -462,11 +462,13 @@ export function EventsPanel() {
 
 /* ═════════════════════ B2B ═════════════════════ */
 
-const BRIEF_TYPE: Record<PartnerRequest['request_type'], string> = { rnd: 'R&D', mvp: 'MVP outsourcing', hiring: 'Hiring', sponsorship: 'Sponsorship' };
+const BRIEF_TYPE: Record<PartnerRequest['request_type'], string> = { rnd: 'R&D challenge', mvp: 'MVP outsourcing', hiring: 'Hiring', sponsorship: 'Sponsorship', internship: 'Internship / vacancy', contact_lab: 'Contact a lab' };
 
 export function BriefsPanel({ staff }: { staff: boolean }) {
   const briefs = useBriefs(true);
   const update = useUpdateBrief();
+  const labs = useLabs();
+  const labName = (id?: string | null) => (id ? labs.data?.find((l) => l.id === id)?.name : undefined);
   return (
     <section className="panel">
       <h3 className="panel-title"><Building2 size={15} />{staff ? 'B2B requests' : 'Your B2B requests'}</h3>
@@ -477,7 +479,7 @@ export function BriefsPanel({ staff }: { staff: boolean }) {
           {(briefs.data ?? []).map((b) => (
             <li key={b.id} className="brief-row">
               <div>
-                <strong>{b.company_name} · {BRIEF_TYPE[b.request_type]}</strong>
+                <strong>{b.company_name} · {BRIEF_TYPE[b.request_type] ?? b.request_type}{labName(b.requested_lab_id) ? ` → ${labName(b.requested_lab_id)}` : ''}</strong>
                 <small>{b.contact_name} · <a href={gmailCompose(b.contact_email)} target="_blank" rel="noopener noreferrer">{b.contact_email}</a> · {b.has_budget ? `budget: ${b.budget_range ?? 'yes'}` : 'no budget yet'} · {b.tech_stack}</small>
                 <p className="lab-text">{b.description}</p>
               </div>

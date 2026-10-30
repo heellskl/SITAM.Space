@@ -16,6 +16,7 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 | Partner | `profiles.role = 'partner'`, member of a company. **Verified partner** = the company has `verified = true`. |
 | Lab member | has a `lab_members` row in a lab with a non-head position (member, mentor, project_coordinator, research_assistant, student_researcher, and legacy student_lead / deputy_student_lead). |
 | Lab head | `lab_members.role` in (`lead`, `co_lead`) for **that** lab → `can_edit = true` → `is_lab_manager(lab)`. A student or a teacher. Extra to the base role, never replaces it. |
+| Alumni | `profiles.role = 'alumni'` (v17): any e-mail; faculty, graduation year, job title, company. |
 | Coordinator | e-mail in `coordinator_emails` → `is_coordinator()`; `is_admin()` is true for them. |
 
 ## Matrix
@@ -34,7 +35,8 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 | 10 | Create / rename / delete a lab | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | `admin_create_lab`, RLS `labs` (admin) |
 | 11 | Edit lab information (about, logo, socials, photos, achievements, teaching, partners, alumni) | ❌ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | RLS `labs` update: `is_lab_manager` |
 | 12 | Read lab Internal section | ❌ | ❌ | ⚠️ verified teachers can read **all** labs' internals (`is_staff`) — confirm with the user if this is intended | ❌ | ❌ | 🔒 | ✅ | RLS `lab_internal` select |
-| 13 | Assign / remove a lab head | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | `assign_lab_head`, `remove_lab_head`, trigger `lab_members_guard` |
+| 13 | Assign / remove a lab Head (`lead`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | `assign_lab_head`, `remove_lab_head`, trigger `lab_members_guard` |
+| 13a | Appoint / remove a Co-Head (`co_lead`) in the lab (v17, approved by the user 2026-10-31) | ❌ | ❌ | ❌ | ❌ | ❌ | 🔒 only the Head (`lead`) of that lab, not themselves | ✅ | `add_lab_member`, `lab_members_guard`, `is_lab_lead` |
 | 14 | Add / remove members, change a member's position (non-head positions only) | ❌ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | `add_lab_member` (registered users only), RLS + `lab_members_guard` |
 | 15 | Create / edit / delete lab projects | ❌ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | RLS `projects` (`is_lab_manager(lab_id)`), column grants |
 | 16 | Submit own (non-lab) project / research | ❌ | ❌ (closed) | ❌ | ❌ | ❌ | ❌ | ❌ | `submit_project` raises NOT_ALLOWED |
@@ -65,3 +67,16 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 - Row 12: should verified teachers read the Internal section of **every** lab, or only heads + coordinator?
 - Row 8: should partners be able to register for events?
 - Row 26: should all verified teachers read all B2B briefs?
+
+## v17 additions (approved by the user on 2026-10-31)
+
+| # | Action | Who | Where enforced |
+|---|---|---|---|
+| 28 | Register as SDU Alumni with a personal e-mail | anyone | `enforce_signup_email`, `handle_new_user` |
+| 29 | "Offer help" to a lab (mentor / guest speaker / research advisor) | alumni only | `offer_help` |
+| 30 | See and answer offers of help | heads of that lab, coordinator; the author sees own | RLS `help_offers`, `respond_help_offer` |
+| 31 | Alumni apply to opportunities / submit student projects | ❌ never | `submit_application` (student/phd only), `submit_project` |
+| 32 | Request a researcher profile / claim an unlinked card | teachers (and legacy PhD) | `request_researcher_profile` |
+| 33 | Approve / reject researcher profile requests | coordinator | `review_researcher_request` |
+| 34 | Edit a researcher card (bio, interests, office hours, ORCID / Scholar / Scopus ID) | only the teacher linked to that card | `update_my_researcher_profile` |
+| 35 | B2B "Contact a lab" / "Offer an internship" | anyone; read by the SITAM office only (as row 26) | RLS `partner_requests` |

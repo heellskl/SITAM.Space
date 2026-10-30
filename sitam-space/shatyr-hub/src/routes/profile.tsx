@@ -15,6 +15,7 @@ import {
   type MyApplication, type Registration, type SitamEvent,
 } from '@/lib/api';
 import { MAJORS, ROLE_LABEL, useAuth } from '@/lib/auth';
+import { MyOffers } from '@/components/onboarding';
 import { DEPARTMENTS } from '@/lib/sitam-data';
 import { pageHead } from '@/lib/hub-data';
 
@@ -124,6 +125,7 @@ function Profile() {
       </div>
 
       <div className="profile-grid">
+        <MyOffers />
         <PasswordPanel />
 
         {(profile.role === 'student' || profile.role === 'phd') && (
@@ -339,14 +341,21 @@ function DetailsDialog({ onClose }: { onClose: () => void }) {
     e.preventDefault();
     const d = new FormData(e.currentTarget);
     const s = (k: string) => String(d.get(k) ?? '').trim();
-    const patch: Record<string, string | null> = {
+    const patch: Record<string, string | number | null> = {
       first_name: s('first_name'), last_name: s('last_name'), faculty: s('faculty') || null, group_name: s('group_name') || null,
       personal_email: s('personal_email') || null,
     };
     if (student) patch['major'] = (major === OTHER_MAJOR ? s('majorCustom') : major) || null;
     if (staff) patch['department'] = (dept === 'Other' ? s('deptCustom') : dept) || null;
-    if (patch['first_name']!.length < 2 || patch['last_name']!.length < 2) return setError('Enter your first and last name.');
-    if (patch['personal_email'] && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(patch['personal_email'])) return setError('Check the personal e-mail.');
+    if (profile.role === 'alumni') {
+      const y = s('graduation_year');
+      if (y && !/^(19|20)\d{2}$/.test(y)) return setError('Graduation year: four digits, e.g. 2019.');
+      patch['graduation_year'] = y ? Number(y) : null;
+      patch['position'] = s('position') || null;
+      patch['company'] = s('company') || null;
+    }
+    if (String(patch['first_name']).length < 2 || String(patch['last_name']).length < 2) return setError('Enter your first and last name.');
+    if (patch['personal_email'] && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(patch['personal_email']))) return setError('Check the personal e-mail.');
     setBusy(true);
     const { error: err } = await db.from('profiles').update(patch).eq('id', user!.id);
     setBusy(false);
@@ -381,6 +390,15 @@ function DetailsDialog({ onClose }: { onClose: () => void }) {
             <label>Faculty<input name="faculty" defaultValue={profile.faculty ?? ''} maxLength={120} placeholder="Engineering and Natural Sciences" /></label>
             <label>{profile.role === 'student' ? 'Group' : 'Department'}<input name="group_name" defaultValue={profile.groupName ?? ''} maxLength={120} placeholder={profile.role === 'student' ? 'IS-22-1' : 'Computer Science'} /></label>
           </div>
+          {profile.role === 'alumni' && (
+            <>
+              <label>Graduation year<input name="graduation_year" inputMode="numeric" maxLength={4} defaultValue={profile.graduationYear ?? ''} placeholder="2019" /></label>
+              <div className="auth-row">
+                <label>Current job title<input name="position" maxLength={100} defaultValue={profile.position ?? ''} /></label>
+                <label>Company<input name="company" maxLength={160} defaultValue={profile.company ?? ''} /></label>
+              </div>
+            </>
+          )}
           {student && (
             <>
               <label>Major

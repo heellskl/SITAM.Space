@@ -4,7 +4,7 @@ import { pageHead } from '@/lib/hub-data';
 
 export const Route = createFileRoute('/register')({
   validateSearch: (s: Record<string, unknown>): { role?: SignupKind } =>
-    s['role'] === 'teacher' || s['role'] === 'partner' || s['role'] === 'student' ? { role: s['role'] } : {},
+    s['role'] === 'teacher' || s['role'] === 'partner' || s['role'] === 'student' || s['role'] === 'alumni' ? { role: s['role'] } : {},
   head: () => pageHead('Sign up', 'Create a SITAM SPACE account.'),
   component: Register,
 });

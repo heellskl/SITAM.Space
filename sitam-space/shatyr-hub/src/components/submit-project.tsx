@@ -17,7 +17,7 @@ const https = (v: string) => !v || /^https:\/\//i.test(v);
 export function SubmitProjectButton({ kind = 'project', label }: { kind?: ProjectKind; label?: string }) {
   const { user, profile, caps } = useAuth();
   const [open, setOpen] = useState(false);
-  if (caps.isPartner) return null;
+  if (caps.isPartner || caps.isAlumni) return null;
   const text = label ?? (kind === 'research' ? 'Submit your research' : 'Submit your project');
   if (!user || !profile) {
     return (

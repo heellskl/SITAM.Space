@@ -4,6 +4,7 @@ import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContai
 import { ArrowUpRight, BookOpen, ExternalLink, GraduationCap, Quote, Search, Unlock, UserRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { SearchBar } from '@/components/search-bar';
+import { RequestResearcherCta } from '@/components/onboarding';
 import { VIZ, axisProps as axis, tooltipProps } from '@/lib/chart-style';
 import { mineFirst, personKey, useMyLabs } from '@/lib/my-labs';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -253,8 +254,10 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
       </TabsContent>
 
       <TabsContent value="people">
-        <div className="prof-grid">{researchers.map((p) => <ProfessorCard key={p.id} p={p} />)}</div>
         {!profs.isLoading && researchers.length === 0 && <p className="small-note">{terms.length ? 'Nobody found.' : 'No researchers imported yet.'}</p>}
+        {!profs.isLoading && researchers.length === 0 && <RequestResearcherCta empty />}
+        <div className="prof-grid">{researchers.map((p) => <ProfessorCard key={p.id} p={p} />)}</div>
+        {researchers.length > 0 && <RequestResearcherCta />}
       </TabsContent>
 
       <TabsContent value="search">

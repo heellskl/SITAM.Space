@@ -2306,3 +2306,21 @@ html.dark .ask-form input { background: #0b1222; border-color: #334155; }
   .ask-fab.has-chat::after { position: absolute; top: 8px; right: 8px; }
 }
 @media print { .ask-fab, .ask-panel { display: none !important; } }
+
+/* v17: offers of help, researcher requests, researcher about */
+.offer-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.offer-item { display: grid; gap: 6px; }
+.offer-list > .offer-item:not(.panel) { padding: 14px 0; border-bottom: 1px solid var(--border); }
+.offer-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.offer-head strong { font: 700 15px/1.3 var(--font-ui); }
+.offer-msg { margin: 0; font-size: 14px; line-height: 1.55; white-space: pre-wrap; }
+.offer-item.is-declined { opacity: .7; }
+.claim-cta { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; margin-top: 18px; padding: 16px 18px;
+  border: 1px dashed var(--border); border-radius: 14px; background: color-mix(in srgb, var(--card) 70%, transparent); }
+.claim-cta > div { display: grid; gap: 3px; min-width: 0; }
+.claim-cta strong { font: 700 15px/1.3 var(--font-ui); }
+.claim-cta span { font-size: 13px; color: var(--muted-foreground); }
+.claim-cta.is-empty { margin: 8px 0 18px; }
+.claim-link { margin-right: 10px; color: var(--ice-deep); font-weight: 600; }
+.prof-about { display: grid; gap: 10px; margin: 0 0 18px; }
+.prof-about .stack-list { margin-top: 0; }

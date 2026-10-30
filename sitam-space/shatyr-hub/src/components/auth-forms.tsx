@@ -1,14 +1,14 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { z } from 'zod';
-import { ArrowUpRight, Building2, GraduationCap, Presentation, RotateCw } from 'lucide-react';
+import { ArrowUpRight, Award, Building2, GraduationCap, Presentation, RotateCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { supabase } from '@/integrations/supabase/client';
 import { humanError } from '@/lib/api';
 import { MAJORS, isSduEmail, useAuth } from '@/lib/auth';
 import { DEPARTMENTS } from '@/lib/sitam-data';
 
-export type SignupKind = 'student' | 'teacher' | 'partner';
+export type SignupKind = 'student' | 'teacher' | 'partner' | 'alumni';
 
 type Errors = Record<string, string>;
 const collect = (error: z.ZodError): Errors => Object.fromEntries(error.issues.map((i) => [String(i.path[0]), i.message]));
@@ -22,10 +22,11 @@ export function RoleSwitch({ role, onChange }: { role: SignupKind; onChange: (r:
   const items = [
     { value: 'student' as const, label: 'Student', Icon: GraduationCap },
     { value: 'teacher' as const, label: 'Teacher', Icon: Presentation },
+    { value: 'alumni' as const, label: 'SDU Alumni', Icon: Award },
     { value: 'partner' as const, label: 'Industry partner', Icon: Building2 },
   ];
   return (
-    <div className="role-switch role-switch-3" role="group" aria-label="Primary role">
+    <div className="role-switch role-switch-4" role="group" aria-label="Primary role">
       {items.map(({ value, label, Icon }) => (
         <button key={value} type="button" className={role === value ? 'role-option role-active' : 'role-option'} aria-pressed={role === value} onClick={() => onChange(value)}>
           <Icon size={18} />
@@ -205,6 +206,15 @@ function useCountdown(sentAt: number | null) {
   return left;
 }
 
+const ALUMNI_FACULTIES = [
+  'School of Information Technologies and Applied Mathematics (SITAM)',
+  'Engineering and Natural Sciences',
+  'Business School',
+  'Law and Social Sciences',
+  'Education and Humanities',
+  'Other',
+];
+
 export function RegisterForm({ role }: { role: SignupKind }) {
   const navigate = useNavigate();
   const { refresh } = useAuth();
@@ -235,6 +245,16 @@ export function RegisterForm({ role }: { role: SignupKind }) {
         ? z.object({ ...base, email: sduEmail, course: z.enum(['1', '2', '3', '4', '5', '6'], { errorMap: () => ({ message: 'Choose your course.' }) }), major: majorField })
         : role === 'teacher'
           ? z.object({ ...base, email: sduEmail, department: deptField })
+          : role === 'alumni'
+            ? z.object({
+                ...base,
+                email: anyEmail,
+                faculty: z.string().trim().min(2, 'Choose your faculty.').max(120),
+                graduationYear: z.string().trim().regex(/^(19|20)\d{2}$/, 'Enter the year you graduated, e.g. 2019.')
+                  .refine((y) => Number(y) <= new Date().getFullYear(), 'The graduation year cannot be in the future.'),
+                position: z.string().trim().min(2, 'Enter your current job title.').max(100),
+                company: z.string().trim().min(2, 'Enter your company.').max(120),
+              })
           : z.object({
               ...base,
               email: anyEmail,
@@ -275,7 +295,9 @@ export function RegisterForm({ role }: { role: SignupKind }) {
             ? { course: v['course'], major: v['major'] }
             : role === 'teacher'
               ? { department: v['department'] ?? '' }
-              : { company: v['company'] ?? '', position: v['position'] ?? '', website: v['website'] ?? '' }),
+              : role === 'alumni'
+                ? { faculty: v['faculty'] ?? '', graduation_year: v['graduationYear'] ?? '', position: v['position'] ?? '', company: v['company'] ?? '' }
+                : { company: v['company'] ?? '', position: v['position'] ?? '', website: v['website'] ?? '' }),
         },
       },
     });
@@ -356,8 +378,9 @@ export function RegisterForm({ role }: { role: SignupKind }) {
           <input name="lastName" autoComplete="family-name" maxLength={60} placeholder="Sarsembayeva" aria-invalid={!!errors['lastName']} />
         </Field>
       </div>
-      <Field label={role === 'partner' ? 'Company e-mail' : 'SDU e-mail'} error={errors['email']} hint={role === 'partner' ? undefined : 'Only …@sdu.edu.kz and …@stu.sdu.edu.kz addresses can register.'}>
-        <input name="email" type="email" autoComplete="email" maxLength={255} placeholder={role === 'partner' ? 'name@company.kz' : role === 'student' ? '220103001@stu.sdu.edu.kz' : 'name.surname@sdu.edu.kz'} aria-invalid={!!errors['email']} />
+      <Field label={role === 'partner' ? 'Company e-mail' : role === 'alumni' ? 'Personal e-mail' : 'SDU e-mail'} error={errors['email']}
+        hint={role === 'partner' ? undefined : role === 'alumni' ? 'Gmail, Outlook or any e-mail you use now.' : 'Only …@sdu.edu.kz and …@stu.sdu.edu.kz addresses can register.'}>
+        <input name="email" type="email" autoComplete="email" maxLength={255} placeholder={role === 'partner' ? 'name@company.kz' : role === 'alumni' ? 'name@gmail.com' : role === 'student' ? '220103001@stu.sdu.edu.kz' : 'name.surname@sdu.edu.kz'} aria-invalid={!!errors['email']} />
       </Field>
       <Field label="Password" error={errors['password']}>
         <input name="password" type="password" autoComplete="new-password" maxLength={72} placeholder="At least 8 characters" aria-invalid={!!errors['password']} />
@@ -381,6 +404,29 @@ export function RegisterForm({ role }: { role: SignupKind }) {
         <>
           {departmentSelect}
           {customDepartment}
+        </>
+      )}
+      {role === 'alumni' && (
+        <>
+          <div className="auth-row">
+            <Field label="Faculty" error={errors['faculty']}>
+              <select name="faculty" defaultValue="" aria-invalid={!!errors['faculty']}>
+                <option value="" disabled>Select faculty</option>
+                {ALUMNI_FACULTIES.map((f) => <option key={f} value={f}>{f}</option>)}
+              </select>
+            </Field>
+            <Field label="Graduation year" error={errors['graduationYear']}>
+              <input name="graduationYear" inputMode="numeric" maxLength={4} placeholder="2019" aria-invalid={!!errors['graduationYear']} />
+            </Field>
+          </div>
+          <div className="auth-row">
+            <Field label="Current job title" error={errors['position']}>
+              <input name="position" maxLength={100} placeholder="ML Engineer" aria-invalid={!!errors['position']} />
+            </Field>
+            <Field label="Company" error={errors['company']}>
+              <input name="company" maxLength={120} placeholder="Kaspi.kz" aria-invalid={!!errors['company']} />
+            </Field>
+          </div>
         </>
       )}
       {role === 'partner' && (

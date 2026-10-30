@@ -10,6 +10,7 @@ import {
 import { PeoplePicker } from '@/components/people-picker';
 import { SearchBar } from '@/components/search-bar';
 import { TagManager } from '@/components/tag-manager';
+import { ResearcherRequestsAdmin } from '@/components/onboarding';
 import { AiIndexPanel } from '@/components/ai-index-panel';
 import { HEAD_ROLES, humanError, useAdminLabActions, useLabs, useSetLabKind, type Lab } from '@/lib/api';
 
@@ -125,6 +126,7 @@ function Admin() {
         })}
       </section>
 
+      <ResearcherRequestsAdmin />
       <TagManager />
       <AiIndexPanel />
 

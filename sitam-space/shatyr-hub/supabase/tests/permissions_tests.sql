@@ -337,3 +337,87 @@ do $$ begin
 exception when others then raise notice 'PASS only the author links the submission (%)', sqlerrm; end $$;
 select pg_temp.as_super();
 select 'author links the submission to a lab: ' || case when (select related_lab_id = (select id from labs where slug='ai-lab') and lab_id is null from projects where id = current_setting('sitam.sub')::uuid) then 'PASS' else 'FAIL' end;
+
+\echo '── v17: alumni, offers of help, Co-Heads by the Head, researcher profile requests, B2B to a lab'
+select pg_temp.as_super();
+insert into auth.users (id, email, raw_user_meta_data) values
+ ('00000000-0000-0000-0000-00000000a001', 'alum.dana@gmail.com', '{"role":"alumni","first_name":"Dana","last_name":"Alum","faculty":"SITAM","graduation_year":"2019","position":"ML Engineer","company":"Kaspi.kz"}');
+select 'alumni sign up with a personal e-mail and job details: ' || case when (select role::text = 'alumni' and graduation_year = 2019 and company = 'Kaspi.kz' and position = 'ML Engineer' and faculty = 'SITAM' from profiles where id = '00000000-0000-0000-0000-00000000a001') then 'PASS' else 'FAIL' end;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000a001');
+select set_config('sitam.offer', public.offer_help((select id from labs where slug='robotics-lab'), 'mentor', 'I can mentor a student robotics project on weekends.')::text, false);
+do $$ begin
+  perform public.submit_project('project', 'Alumni side project', 'An alumni project that should not be accepted as a student submission.', '{}', '{}', 2026, 'ongoing', null, null, null, null);
+  raise notice 'FAIL alumni submitted a student project';
+exception when others then raise notice 'PASS alumni do not submit student projects (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c005');
+do $$ begin
+  perform public.offer_help((select id from labs where slug='robotics-lab'), 'mentor', 'A student trying to offer mentoring.');
+  raise notice 'FAIL a student sent an alumni offer';
+exception when others then raise notice 'PASS only alumni offer help (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d001');
+do $$ begin
+  perform public.respond_help_offer(current_setting('sitam.offer')::uuid, 'accepted');
+  raise notice 'FAIL a head of another lab answered the offer';
+exception when others then raise notice 'PASS only the heads of that lab answer (%)', sqlerrm; end $$;
+select 'heads of other labs do not see the offer: ' || case when (select count(*) from help_offers) = 0 then 'PASS' else 'FAIL' end;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d003');
+select public.respond_help_offer(current_setting('sitam.offer')::uuid, 'accepted');
+select 'the lab head sees and accepts the offer: ' || case when (select status from help_offers where id = current_setting('sitam.offer')::uuid) = 'accepted' then 'PASS' else 'FAIL' end;
+
+-- Co-Heads: the Head appoints and removes them; nobody but the coordinator touches the Head
+select set_config('sitam.cohead', (public.add_lab_member((select id from labs where slug='robotics-lab'), null, '230101010@sdu.edu.kz', 'co_lead', null)->>'id'), false);
+select 'the Head appoints a Co-Head (who can manage): ' || case when (select role::text = 'co_lead' and can_edit from lab_members where id = current_setting('sitam.cohead')::uuid) then 'PASS' else 'FAIL' end;
+select (public.add_lab_member((select id from labs where slug='robotics-lab'), null, '220107012@sdu.edu.kz', 'tech_lead', null)->>'id') is not null as tech_lead_added;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c005');
+do $$ begin
+  update lab_members set role = 'lead' where id = current_setting('sitam.cohead')::uuid;
+  raise notice 'FAIL a Co-Head made themselves the Head';
+exception when others then raise notice 'PASS a Co-Head cannot become the Head (%)', sqlerrm; end $$;
+do $$ begin
+  perform public.add_lab_member((select id from labs where slug='robotics-lab'), null, 'aigerim.sarsen@sdu.edu.kz', 'co_lead', null);
+  raise notice 'FAIL a Co-Head appointed another Co-Head';
+exception when others then raise notice 'PASS only the Head appoints Co-Heads (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d003');
+do $$ declare n int; begin
+  update lab_members set role = 'member' where id = current_setting('sitam.cohead')::uuid; get diagnostics n = row_count;
+  raise notice '% the Head turns a Co-Head back into a member', case when n = 1 then 'PASS' else 'FAIL' end;
+end $$;
+select pg_temp.as_super();
+select 'tech lead position exists and has no rights: ' || case when exists (select 1 from lab_members where role::text = 'tech_lead' and not can_edit) then 'PASS' else 'FAIL' end;
+
+-- researcher profile: request → coordinator approves → the teacher edits only their card
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c005');
+do $$ begin
+  perform public.request_researcher_profile(null, 'Dana Stud', null, null, null, null, null, null, null);
+  raise notice 'FAIL a student asked for a researcher profile';
+exception when others then raise notice 'PASS researcher profiles are for teachers (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c002');
+select set_config('sitam.rreq', public.request_researcher_profile(null, 'Aigerim Sarsen', 'Computer Science', 'Senior Lecturer', 'PhD', 'https://www.scopus.com/authid/detail.uri?authorId=57190000001', 'https://orcid.org/0000-0001-2345-6789', null, null)::text, false);
+do $$ begin
+  perform public.review_researcher_request(current_setting('sitam.rreq')::uuid, true, null);
+  raise notice 'FAIL a teacher approved their own request';
+exception when others then raise notice 'PASS only the coordinator approves (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c001');
+select set_config('sitam.newprof', public.review_researcher_request(current_setting('sitam.rreq')::uuid, true, 'Welcome')::text, false);
+select pg_temp.as_super();
+select 'approved: a new researcher card linked to the teacher: ' || case when (select profile_id = '00000000-0000-0000-0000-00000000c002' and scopus_id = '57190000001' from professors where id = current_setting('sitam.newprof')::uuid) then 'PASS' else 'FAIL' end;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c002');
+select public.update_my_researcher_profile('I work on NLP for Kazakh.', 'Tue 14:00–16:00, room F305', array['NLP', 'Kazakh language'], 'https://orcid.org/0000-0001-2345-6789', null, '57190000001');
+select 'the teacher edits their own card: ' || case when (select bio like 'I work%' and 'NLP' = any(interests) from professors where id = current_setting('sitam.newprof')::uuid) then 'PASS' else 'FAIL' end;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c004');
+do $$ begin
+  perform public.update_my_researcher_profile('Not mine', null, null, null, null, null);
+  raise notice 'FAIL a teacher without a card edited one';
+exception when others then raise notice 'PASS teachers edit only their own card (%)', sqlerrm; end $$;
+select set_config('sitam.claim', public.request_researcher_profile((select id from professors where profile_id is null limit 1), 'Timur Ospan', null, null, null, null, null, null, 'This is me')::text, false);
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c001');
+select public.review_researcher_request(current_setting('sitam.claim')::uuid, true, null);
+select pg_temp.as_super();
+select '"This is me" links the existing card: ' || case when exists (select 1 from professors p join researcher_profile_requests r on r.professor_id = p.id where r.id = current_setting('sitam.claim')::uuid and p.profile_id = '00000000-0000-0000-0000-00000000c004') then 'PASS' else 'FAIL' end;
+
+-- B2B "Contact a lab"
+set role anon;
+insert into partner_requests (company_name, contact_name, contact_email, request_type, has_budget, tech_stack, description, requested_lab_id)
+values ('Acme', 'Pat', 'pat@acme.kz', 'contact_lab', false, 'Python', 'We would like to talk to the robotics lab about a joint drone project.', (select id from labs where slug='robotics-lab'));
+reset role;
+select 'B2B "Contact a lab" stored with the lab: ' || case when exists (select 1 from partner_requests where request_type::text = 'contact_lab' and requested_lab_id is not null) then 'PASS' else 'FAIL' end;
