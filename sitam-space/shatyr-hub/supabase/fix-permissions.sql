@@ -105,3 +105,18 @@ grant execute on function public.ai_index_status() to authenticated;
 grant execute on function public.ai_pending_documents(int), public.ai_upsert_document(text, text, text, text, text, text, extensions.vector), public.ai_remove_stale(), public.ai_take_quota(uuid, int), public.match_documents(extensions.vector, int, float, text[]), public.ai_index_status() to service_role;
 revoke execute on function public.match_documents(extensions.vector, int, float, text[]) from anon, public;
 grant execute on function public.match_documents(extensions.vector, int, float, text[]) to authenticated, service_role;
+-- v17: account safety (guarded: this file may run before v17 exists)
+do $$ begin
+  if to_regprocedure('public.ai_refund_quota(uuid)') is not null then
+    revoke execute on function public.ai_refund_quota(uuid) from anon, authenticated, public;
+    grant execute on function public.ai_refund_quota(uuid) to service_role;
+  end if;
+  if to_regclass('public.account_claims') is not null then
+    revoke insert, update, delete on public.account_claims from anon, authenticated;
+  end if;
+  if to_regprocedure('public.decide_account_claim(uuid, boolean)') is not null then
+    revoke execute on function public.account_claims_inbox(), public.decide_account_claim(uuid, boolean),
+      public.company_join_requests(), public.decide_company_member(uuid, uuid, boolean) from anon, public;
+  end if;
+end $$;
+revoke insert, update, delete on public.company_members from anon, authenticated;

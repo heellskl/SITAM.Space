@@ -35,7 +35,7 @@ Never indexed: CVs, phone numbers, e-mails, applications, registrations, lab "In
    `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` are provided by Supabase automatically.
    **No key yet?** Ask SITAM still works: it shows the most relevant pages without a written answer.
 4. **Index**: sign in as the coordinator → Admin → "Ask SITAM — AI index" → **Update AI index**. Repeat after big changes
-   (or schedule `ai-index` with pg_cron + pg_net and `x-cron-secret`).
+   Or run `supabase/schedule-ai-index.sql` once (pg_cron + pg_net, secret `AI_CRON_SECRET`): the database calls `ai-index` every 5 minutes.
 
 ## Costs and limits
 - Embeddings (`gte-small`) are free and run inside Supabase.

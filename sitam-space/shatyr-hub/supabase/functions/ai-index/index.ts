@@ -118,7 +118,8 @@ export async function generate(system: string, turns: ChatTurn[], maxTokens = 70
 
 
 // Small batches: an Edge Function has a short CPU budget per call (the embedding model is CPU-heavy).
-// The Admin page calls again until `remaining` is 0.
+// The Admin page calls again until `remaining` is 0; supabase/schedule-ai-index.sql makes the database call it
+// every 5 minutes, so new and changed pages are found without anyone pressing the button.
 const BATCH = Number(Deno.env.get('AI_INDEX_BATCH') ?? '4') || 4;
 const TIME_BUDGET_MS = 15_000;
 
@@ -155,11 +156,9 @@ Deno.serve(async (req) => {
     }
   }
 
+  // closed vacancies, deleted labs etc. leave the index on every run (not only after everything is indexed)
+  const { data: gone } = await db.rpc('ai_remove_stale');
+  const removed = Number(gone ?? 0);
   const { data: status } = await db.rpc('ai_index_status');
-  let removed = 0;
-  if ((status?.pending ?? 1) === 0) {
-    const { data } = await db.rpc('ai_remove_stale');
-    removed = Number(data ?? 0);
-  }
   return json({ indexed_now: done, failed, removed, remaining: status?.pending ?? null, total: status?.indexed ?? null });
 });

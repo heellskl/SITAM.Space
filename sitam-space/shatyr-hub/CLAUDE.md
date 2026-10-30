@@ -23,7 +23,8 @@ Conventions: @AGENTS.md
 
 ## Rules that never change without the user's explicit "yes"
 - Only the coordinator assigns / removes lab heads; heads manage only their own lab; members are read-only.
-- Account type comes from the SDU e-mail; sign-in is SDU Google (partners: e-mail).
+- Registration form: Student / Teacher / Industry partner. Students and teachers register **only with their SDU e-mail**; partners with any e-mail. Sign-in = e-mail + password. A student or teacher may add a personal e-mail in Profile → Settings and then sign in with it and the same password.
+- Nothing that gives rights (lab head seat, researcher page, coordinator, company membership) comes from an e-mail alone: registration does not prove the e-mail, so the coordinator (or a company owner) confirms it (v17).
 - Only students apply. CVs only to owner + reviewer of that application.
 - Rights are enforced in the database; the UI only reflects them.
 - Updating `docs/PERMISSIONS.md` = changing the rules → ask first.

@@ -1,13 +1,13 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { gmailCompose } from '@/lib/utils';
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { ArrowUpRight, BarChart3, Bookmark, Briefcase, FileText, Inbox, KeyRound, Lightbulb, LogIn, Mail, Megaphone, Pencil, Phone, Ticket as TicketIcon, Trash2, Upload } from 'lucide-react';
+import { ArrowUpRight, BarChart3, Bookmark, Briefcase, FileText, Hourglass, Inbox, KeyRound, Lightbulb, LogIn, Mail, Megaphone, Pencil, Phone, Ticket as TicketIcon, Trash2, Upload } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { TicketBadge } from '@/components/event-board';
-import { ListingDialog } from '@/components/manage-panels';
+import { CompanyRequestsPanel, ListingDialog } from '@/components/manage-panels';
 import { SubmitProjectButton } from '@/components/submit-project';
 import {
   KIND_LABEL, MODERATION_LABEL, STATUS_LABEL, STATUS_TONE, cvProblem, db, eventDate, formatDate, hostNames, humanError, opportunityLabel, signedUrl, uploadAvatar, uploadCv, useEvents, useLabs,
@@ -124,6 +124,17 @@ function Profile() {
       </div>
 
       <div className="profile-grid">
+        {(caps.pendingClaims.length > 0 || caps.pendingCompanies.length > 0) && (
+          <section className="panel">
+            <h3 className="panel-title"><Hourglass size={16} />Waiting for confirmation</h3>
+            {caps.pendingClaims.length > 0 && (
+              <p className="small-note">Your e-mail is listed in: {caps.pendingClaims.join(', ')}. The SITAM coordinator will confirm that this account is yours, then it is linked.</p>
+            )}
+            {caps.pendingCompanies.length > 0 && (
+              <p className="small-note">You asked to join {caps.pendingCompanies.join(', ')}. The SITAM coordinator or an owner of the company will approve it.</p>
+            )}
+          </section>
+        )}
         <PasswordPanel />
 
         {(profile.role === 'student' || profile.role === 'phd') && (
@@ -289,6 +300,7 @@ function Profile() {
             <Button asChild><Link to="/manage" search={{ tab: 'listings' }}>Open listings<ArrowUpRight /></Link></Button>
           </section>
         )}
+        {caps.isPartner && caps.companies.length > 0 && <CompanyRequestsPanel hideWhenEmpty />}
       </div>
 
       {posting && <ListingDialog opp={null} defaultCategory="research" preset={{ labs: [], companies: [], projects: [], me: true }} onClose={() => setPosting(false)} />}
@@ -376,7 +388,9 @@ function DetailsDialog({ onClose }: { onClose: () => void }) {
           <div className="auth-row">
             <div className="auth-row">
               <label>SDU e-mail<input value={profile.email} readOnly aria-readonly /></label>
-              <label>Personal e-mail<input name="personal_email" type="email" defaultValue={profile.personalEmail ?? ''} maxLength={160} placeholder="name@gmail.com" /></label>
+              <label>Personal e-mail<input name="personal_email" type="email" defaultValue={profile.personalEmail ?? ''} maxLength={160} placeholder="name@gmail.com" />
+                <small className="field-hint">You can also sign in with it, using the same password.</small>
+              </label>
             </div>
             <label>Faculty<input name="faculty" defaultValue={profile.faculty ?? ''} maxLength={120} placeholder="Engineering and Natural Sciences" /></label>
             <label>{profile.role === 'student' ? 'Group' : 'Department'}<input name="group_name" defaultValue={profile.groupName ?? ''} maxLength={120} placeholder={profile.role === 'student' ? 'IS-22-1' : 'Computer Science'} /></label>

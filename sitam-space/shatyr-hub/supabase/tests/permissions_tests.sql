@@ -32,8 +32,13 @@ do $$ begin
   raise notice 'FAIL non-SDU Google account was accepted';
 exception when others then raise notice 'PASS non-SDU Google account refused (%)', sqlerrm; end $$;
 
+-- v17: a listed e-mail alone is not enough (sign-up does not prove the e-mail); the project owner binds the account
 select pg_temp.as_user('00000000-0000-0000-0000-00000000c001');
-select 'listed e-mail is coordinator: ' || case when (public.my_context()->>'is_coordinator')::boolean and public.is_admin() then 'PASS' else 'FAIL' end;
+select 'v17 listed e-mail alone does not make a coordinator: ' || case when not public.is_coordinator() and not public.is_admin() then 'PASS' else 'FAIL' end;
+select pg_temp.as_super();
+update public.coordinator_emails c set user_id = u.id from auth.users u where lower(u.email) = c.email and c.email = '240183002@sdu.edu.kz';
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c001');
+select 'bound coordinator account is coordinator: ' || case when (public.my_context()->>'is_coordinator')::boolean and public.is_admin() then 'PASS' else 'FAIL' end;
 do $$ declare l public.labs; begin
   l := public.admin_create_lab('Quantum Computing Lab', array['Research']);
   raise notice '% coordinator creates a lab (slug %)', case when l.slug = 'quantum-computing-lab' then 'PASS' else 'FAIL' end, l.slug;
@@ -158,7 +163,13 @@ insert into auth.users (id, email, raw_user_meta_data) values
  ('00000000-0000-0000-0000-00000000d001', 's.manbay@sdu.edu.kz', '{"role":"teacher","first_name":"Shakhnazar-Sultan","last_name":"Manbay","department":"Computer Science"}'),
  ('00000000-0000-0000-0000-00000000d002', 'dilnaz.suleimenova@sdu.edu.kz', '{"role":"teacher","first_name":"Dilnaz","last_name":"Suleimenova","department":"Computer Science"}'),
  ('00000000-0000-0000-0000-00000000d003', '230000303@sdu.edu.kz', '{"role":"student","first_name":"Aru","last_name":"Student","course":"3","major":"Computer Science"}');
-select 'listed head registers → head of all 5 of their labs: ' || case when (select count(*) from lab_members where user_id='00000000-0000-0000-0000-00000000d001' and role='lead' and can_edit)=5 then 'PASS' else 'FAIL' end;
+-- v17: the registration only creates claims; the head rights come after the coordinator confirms them
+select 'v17 listed head registers → 5 claims, no rights yet: ' || case when (select count(*) from account_claims where user_id='00000000-0000-0000-0000-00000000d001' and status='pending' and kind='lab_seat')=5
+  and not exists (select 1 from lab_members where user_id='00000000-0000-0000-0000-00000000d001') then 'PASS' else 'FAIL' end;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c001');
+select count(public.decide_account_claim(id, true)) from account_claims where user_id='00000000-0000-0000-0000-00000000d001' and status='pending';
+select pg_temp.as_super();
+select 'listed head confirmed by the coordinator → head of all 5 of their labs: ' || case when (select count(*) from lab_members where user_id='00000000-0000-0000-0000-00000000d001' and role='lead' and can_edit)=5 then 'PASS' else 'FAIL' end;
 -- coordinator assigns a head who was imported by name: the same row is linked, no second head
 select pg_temp.as_user('00000000-0000-0000-0000-00000000c001');
 select public.assign_lab_head((select id from labs where slug='ai-lab'), '00000000-0000-0000-0000-00000000d002');

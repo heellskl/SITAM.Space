@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { ArrowUpRight, Building2, GraduationCap, Presentation, RotateCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { supabase } from '@/integrations/supabase/client';
-import { humanError } from '@/lib/api';
+import { db, humanError } from '@/lib/api';
 import { MAJORS, isSduEmail, useAuth } from '@/lib/auth';
 import { DEPARTMENTS } from '@/lib/sitam-data';
 
@@ -102,7 +102,20 @@ export function LoginForm() {
     setErrors({});
     setFormError('');
     setBusy(true);
-    const { error } = await supabase.auth.signInWithPassword(parsed.data);
+    let { error } = await supabase.auth.signInWithPassword(parsed.data);
+    if (error && !/confirm/i.test(error.message)) {
+      // Maybe the personal e-mail from Profile → Settings: the database returns the account's sign-in (SDU) e-mail,
+      // but only for the right password; then sign in with that e-mail and the same password.
+      const { data: signInEmail, error: lookupError } = await db.rpc('sign_in_email', { p_email: parsed.data.email, p_password: parsed.data.password });
+      if (lookupError && /TOO_MANY/.test(lookupError.message)) {
+        setBusy(false);
+        setFormError(humanError(lookupError));
+        return;
+      }
+      if (typeof signInEmail === 'string' && signInEmail && signInEmail !== parsed.data.email) {
+        ({ error } = await supabase.auth.signInWithPassword({ email: signInEmail, password: parsed.data.password }));
+      }
+    }
     setBusy(false);
     if (error) {
       if (/confirm/i.test(error.message)) {
@@ -159,6 +172,7 @@ export function LoginForm() {
     <form className="partner-form auth-form" onSubmit={submit} noValidate>
       <Field label="E-mail" error={errors['email']}>
         <input name="email" type="email" autoComplete="email" placeholder="name@sdu.edu.kz" maxLength={255} value={email} onChange={(e) => setEmail(e.target.value)} aria-invalid={!!errors['email']} />
+        {!errors['email'] && <small className="field-hint">Your SDU e-mail, or the personal e-mail you added in Profile → Settings.</small>}
       </Field>
       <Field label="Password" error={errors['password']}>
         <input name="password" type="password" autoComplete="current-password" placeholder="Your password" maxLength={72} aria-invalid={!!errors['password']} />

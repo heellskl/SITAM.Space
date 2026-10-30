@@ -306,6 +306,15 @@ export type PartnerRequest = {
 
 export type PendingTeacher = { id: string; first_name: string; last_name: string; email: string; department: string | null; created_at: string };
 export type CompanyRow = { id: string; name: string; website: string | null; verified: boolean; created_at: string };
+/** v17: a registration whose e-mail is listed in a lab team or on a researcher page, waiting for the coordinator. */
+export type AccountClaim = {
+  id: string; kind: 'lab_seat' | 'professor'; status: 'pending'; created_at: string; user_id: string; first_name: string; last_name: string;
+  email: string; role: string; target: string | null; target_detail: string | null; lab_slug: string | null; professor_username: string | null;
+};
+/** v17: a partner who typed the name of an existing company. */
+export type CompanyJoinRequest = {
+  company_id: string; company_name: string; company_verified: boolean; user_id: string; first_name: string; last_name: string; email: string; created_at: string;
+};
 
 /* ───────────────────────────── Errors ───────────────────────────── */
 
@@ -320,7 +329,7 @@ export function humanError(error: unknown): string {
   const e = error as PgError;
   const msg = e?.message ?? String(error);
   if (isMissingSchema(e)) return 'The database is not set up yet — apply the SITAM migrations.';
-  if (/Database error saving new user/i.test(msg)) return 'The account could not be saved. Students and teachers must use an @sdu.edu.kz e-mail; if yours is one, the database is not set up yet (run supabase/setup-new-database.sql).';
+  if (/Database error saving new user/i.test(msg)) return 'The account could not be saved. Students and teachers must use an @sdu.edu.kz e-mail, and an e-mail that another account uses as its personal e-mail cannot be registered again. If neither applies, the database is not set up yet (run supabase/setup-new-database.sql).';
   if (/row-level security|permission denied/i.test(msg)) return 'You do not have permission to do this.';
   if (/JWT|not authenticated|AUTH_REQUIRED/i.test(msg)) return 'Please sign in first.';
   const m = /^[A-Z_]+:\s*(.+)$/.exec(msg);
@@ -355,6 +364,8 @@ export const qk = {
   briefs: ['briefs'] as const,
   pendingTeachers: ['pending-teachers'] as const,
   companies: ['companies'] as const,
+  accountClaims: ['account-claims'] as const,
+  companyRequests: ['company-requests'] as const,
   professors: ['professors'] as const,
   professor: (u: string) => ['professor', u] as const,
   publications: ['publications'] as const,
@@ -1050,16 +1061,25 @@ export type ExternalEvent = {
   external_event_labs: ExternalEntry[];
 };
 
+/** Today's date (YYYY-MM-DD) in SDU's time zone. `toISOString()` gives the UTC date, which is still "yesterday"
+ *  in Almaty between 00:00 and 05:00. */
+export const SITAM_TIME_ZONE = 'Asia/Almaty';
+export function sitamDay(d = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: SITAM_TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+}
+const sitamYear = (d: Date) => Number(sitamDay(d).slice(0, 4));
+
 /** Upcoming = has not ended yet. Events with only a year (no dates) count as past once that year is over. */
 export function isUpcomingExternal(e: Pick<ExternalEvent, 'starts_on' | 'ends_on' | 'year'>, today = new Date()) {
-  const day = today.toISOString().slice(0, 10);
+  const day = sitamDay(today);
   if (e.ends_on) return e.ends_on >= day;
   if (e.starts_on) return e.starts_on >= day;
-  return e.year !== null && e.year > today.getFullYear();
+  return e.year !== null && e.year >= sitamYear(today);
 }
+/** Started = the first day has come. Events with only a year count as started from the start of that year. */
 export function hasStartedExternal(e: Pick<ExternalEvent, 'starts_on' | 'year'>, today = new Date()) {
-  if (e.starts_on) return e.starts_on <= today.toISOString().slice(0, 10);
-  return e.year === null || e.year <= today.getFullYear();
+  if (e.starts_on) return e.starts_on <= sitamDay(today);
+  return e.year === null || e.year <= sitamYear(today);
 }
 export function externalDates(e: Pick<ExternalEvent, 'starts_on' | 'ends_on' | 'year'>) {
   const f = (d: string) => new Date(`${d}T00:00:00`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -1286,6 +1306,39 @@ export function usePendingTeachers(enabled: boolean) {
 
 export function useCompanies(enabled: boolean) {
   return useQuery({ queryKey: qk.companies, enabled, queryFn: () => rows<CompanyRow[]>(db.from('companies').select('id, name, website, verified, created_at').order('verified').order('name')) });
+}
+
+/** v17: coordinator confirms that a new account really is the person listed in a lab team / on a researcher page. */
+export function useAccountClaims(enabled: boolean) {
+  return useQuery({ queryKey: qk.accountClaims, enabled, queryFn: () => rows<AccountClaim[]>(db.rpc('account_claims_inbox')) });
+}
+export function useDecideClaim() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { id: string; approve: boolean }) => {
+      const { error } = await db.rpc('decide_account_claim', { p_claim: v.id, p_approve: v.approve });
+      if (error) fail(error);
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.accountClaims });
+      void qc.invalidateQueries({ queryKey: qk.labs });
+    },
+  });
+}
+
+/** v17: partners asking to join an existing company (coordinator, or an owner of that company). */
+export function useCompanyRequests(enabled: boolean) {
+  return useQuery({ queryKey: qk.companyRequests, enabled, queryFn: () => rows<CompanyJoinRequest[]>(db.rpc('company_join_requests')) });
+}
+export function useDecideCompanyMember() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { companyId: string; userId: string; approve: boolean }) => {
+      const { error } = await db.rpc('decide_company_member', { p_company: v.companyId, p_user: v.userId, p_approve: v.approve });
+      if (error) fail(error);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.companyRequests }),
+  });
 }
 
 export function useAdminAction() {
