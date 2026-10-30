@@ -14311,5 +14311,190 @@
    ],
    "confidence": "high"
   }
+ },
+ {
+  "username": "amine.sbai",
+  "first_name": "Amine",
+  "last_name": "Sbai",
+  "full_name": "Amine Sbai",
+  "job_title": "Assistant Professor SDU",
+  "degree": "PhD",
+  "email": null,
+  "photo_url": null,
+  "external_identifiers": {
+   "orcid": null,
+   "scopus": "57223768105",
+   "google_scholar_search": "https://scholar.google.com/citations?user=Mr3jVPgAAAAJ&hl=en",
+   "researchgate": "https://www.researchgate.net/profile/Amine-Sbai/research"
+  },
+  "metrics": {
+   "h_index": 0,
+   "i10_index": 0,
+   "total_citations": 0,
+   "total_works": 7
+  },
+  "search_tags": {
+   "keywords": [
+    "control theory",
+    "controllability",
+    "degenerate/singular equations",
+    "parabolic equations",
+    "wave equations",
+    "stabilization",
+    "moment method",
+    "B-splines"
+   ],
+   "coauthors": []
+  },
+  "topics_hierarchy": [],
+  "publications": [
+   {
+    "title": "Boundary controllability for a coupled system of parabolic equations with singular potentials",
+    "publication_year": 2022,
+    "type": "Article",
+    "doi": "https://doi.org/10.1007/s00030-022-00792-1",
+    "journal_venue": "Nonlinear Differential Equations and Applications NoDEA",
+    "publisher": "Springer Nature",
+    "keywords": [
+     "controllability",
+     "singular parabolic systems",
+     "biorthogonal families",
+     "spectral analysis",
+     "moment method"
+    ],
+    "is_open_access": false,
+    "citations_count": 0,
+    "pdf_url": null,
+    "scopus_eid": null,
+    "_source": "web_lookup_2026_10_30"
+   },
+   {
+    "title": "Boundary controllability for a coupled system of degenerate/singular parabolic equations",
+    "publication_year": 2022,
+    "type": "Article",
+    "doi": "https://doi.org/10.3934/eect.2021055",
+    "journal_venue": "Evolution Equations and Control Theory",
+    "publisher": "American Institute of Mathematical Sciences (AIMS)",
+    "keywords": [
+     "boundary controllability",
+     "coupled systems",
+     "degenerate parabolic equations",
+     "singular potentials",
+     "moment method"
+    ],
+    "is_open_access": false,
+    "citations_count": 0,
+    "pdf_url": null,
+    "scopus_eid": null,
+    "_source": "web_lookup_2026_10_30"
+   },
+   {
+    "title": "Stabilization for degenerate equations with drift and small singular term",
+    "publication_year": 2025,
+    "type": "Article",
+    "doi": "https://doi.org/10.1002/mma.10593",
+    "journal_venue": "Mathematical Methods in the Applied Sciences",
+    "publisher": "Wiley",
+    "is_open_access": true,
+    "keywords": [
+     "degenerate wave equation",
+     "singular potentials",
+     "drift",
+     "stabilization",
+     "exponential decay"
+    ],
+    "citations_count": 0,
+    "pdf_url": null,
+    "scopus_eid": null,
+    "_source": "web_lookup_2026_10_30"
+   },
+   {
+    "title": "Boundary Controllability for Degenerate/Singular Hyperbolic Equations in Nondivergence Form with Drift",
+    "publication_year": 2025,
+    "type": "Article",
+    "doi": "https://doi.org/10.1007/s00245-025-10236-8",
+    "journal_venue": "Applied Mathematics and Optimization",
+    "publisher": "Springer Nature",
+    "is_open_access": true,
+    "keywords": [
+     "boundary controllability",
+     "degenerate hyperbolic equations",
+     "drift term",
+     "singular potentials"
+    ],
+    "citations_count": 0,
+    "pdf_url": null,
+    "scopus_eid": null,
+    "_source": "web_lookup_2026_10_30"
+   },
+   {
+    "title": "Controllability for a 2×2 nonlinear degenerate parabolic system via one boundary control force",
+    "publication_year": 2025,
+    "type": "Article",
+    "doi": "https://doi.org/10.48550/arXiv.2411.05773",
+    "journal_venue": "Evolution Equations and Control Theory",
+    "publisher": "American Institute of Mathematical Sciences (AIMS)",
+    "keywords": [
+     "boundary controllability",
+     "nonlinear systems",
+     "degenerate parabolic equations",
+     "moment method"
+    ],
+    "is_open_access": false,
+    "citations_count": 0,
+    "pdf_url": null,
+    "scopus_eid": null,
+    "_source": "web_lookup_2026_10_30"
+   },
+   {
+    "title": "Minimal time of the pointwise controllability for a degenerate/singular parabolic equation and related numerical results via B-splines",
+    "publication_year": 2026,
+    "type": "Article",
+    "doi": "https://doi.org/10.1016/j.cam.2025.116892",
+    "journal_venue": "Journal of Computational and Applied Mathematics",
+    "publisher": "Elsevier",
+    "is_open_access": true,
+    "keywords": [
+     "controllability",
+     "pointwise control",
+     "minimal null control time",
+     "moment method",
+     "B-splines"
+    ],
+    "citations_count": 0,
+    "pdf_url": null,
+    "scopus_eid": null,
+    "_source": "web_lookup_2026_10_30"
+   },
+   {
+    "title": "Degenerate/singular beam-type equations: a controllability result",
+    "publication_year": 2026,
+    "type": "Article",
+    "doi": null,
+    "journal_venue": "Mathematical Control and Related Fields",
+    "publisher": "American Institute of Mathematical Sciences (AIMS)",
+    "keywords": [
+     "beam equation",
+     "degenerate equations",
+     "singular potentials",
+     "controllability"
+    ],
+    "is_open_access": false,
+    "citations_count": 0,
+    "pdf_url": null,
+    "scopus_eid": null,
+    "_source": "web_lookup_2026_10_30"
+   }
+  ],
+  "_resolution_status": {
+   "status": "web_lookup",
+   "data_sources": [
+    "zbMATH/MaRDI",
+    "arXiv",
+    "publisher pages"
+   ],
+   "confidence": "medium",
+   "note": "PhD in Applied Mathematics (Hassan First University of Settat & University of Granada). Citations and h-index not filled: Scopus/Scholar could not be read automatically."
+  }
  }
 ]
