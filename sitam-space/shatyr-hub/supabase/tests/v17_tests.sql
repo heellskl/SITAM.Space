@@ -120,3 +120,19 @@ select 'failed question goes back to the limit: ' || case when (select questions
 select 'users cannot refund questions: ' || case when not has_function_privilege('authenticated', 'public.ai_refund_quota(uuid)', 'execute') then 'PASS' else 'FAIL' end;
 select 'FAQ has no duplicate "join a laboratory" and no weekday schedule: ' || case when not exists (select 1 from ai_faq where question = 'How do I join a laboratory?')
   and not exists (select 1 from ai_faq where answer ~* 'tuesday|thursday|registration is attached') then 'PASS' else 'FAIL' end;
+
+-- 7. v17.2: a personal e-mail that matches a researcher page creates a claim (not a link)
+insert into auth.users (id, email, raw_user_meta_data) values
+ ('00000000-0000-0000-0000-0000000e0007', 'amine.sbai.test@sdu.edu.kz', '{"role":"teacher","first_name":"Amine","last_name":"Sbai","department":"Mathematics"}');
+select 'registering with an unlisted SDU e-mail makes no claim: ' || case when not exists (select 1 from account_claims where user_id = '00000000-0000-0000-0000-0000000e0007') then 'PASS' else 'FAIL' end;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000e0007');
+update profiles set personal_email = 'A.Sbai@uhp.ac.ma' where id = auth.uid();
+select 'personal e-mail = old e-mail on the papers → claim, not linked: ' || case when exists (select 1 from account_claims where user_id = auth.uid() and kind = 'professor' and status = 'pending' and matched_email = 'a.sbai@uhp.ac.ma')
+  and (select profile_id from professors where username = 'amine.sbai') is null then 'PASS' else 'FAIL' end;
+select 'nobody but the coordinator reads the old e-mails: ' || case when not has_column_privilege('authenticated', 'public.professors', 'alt_emails', 'select') then 'PASS' else 'FAIL' end;
+select pg_temp.as_super();
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c001');
+select 'coordinator sees which e-mail matched: ' || case when exists (select 1 from public.account_claims_inbox() where matched_email = 'a.sbai@uhp.ac.ma' and professor_username = 'amine.sbai') then 'PASS' else 'FAIL' end;
+select count(public.decide_account_claim(id, true)) from account_claims where user_id = '00000000-0000-0000-0000-0000000e0007';
+select pg_temp.as_super();
+select 'confirmed: the SDU account owns the researcher page: ' || case when (select profile_id from professors where username = 'amine.sbai') = '00000000-0000-0000-0000-0000000e0007' then 'PASS' else 'FAIL' end;

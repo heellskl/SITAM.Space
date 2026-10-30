@@ -235,7 +235,8 @@ end;
 $$;
 
 /* ───────────── coordinator: confirm or reject claims ───────────── */
-create or replace function public.account_claims_inbox()
+drop function if exists public.account_claims_inbox();  -- v17.2 adds a column; dropping keeps both files re-runnable
+create function public.account_claims_inbox()
 returns table (id uuid, kind text, status text, created_at timestamptz, user_id uuid, first_name text, last_name text,
                email text, role text, target text, target_detail text, lab_slug text, professor_username text)
 language sql stable security definer set search_path = public as $$

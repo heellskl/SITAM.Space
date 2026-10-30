@@ -509,14 +509,14 @@ export function AccountClaimsPanel() {
   return (
     <section className="panel">
       <h3 className="panel-title"><ShieldCheck size={15} />Accounts to confirm · {list.length}</h3>
-      <p className="small-note mb-3">These people registered with an e-mail that is listed in a lab team or on a researcher page. Confirm only if you know the account is really theirs: a lab head gets the rights of that lab.</p>
+      <p className="small-note mb-3">These people registered (or added a personal e-mail) with an e-mail that is listed in a lab team or on a researcher page. E-mails are not proven, so confirm only if you know the account is really theirs: a lab head gets the rights of that lab.</p>
       {list.length === 0 ? <p className="small-note">Nothing to confirm.</p> : (
         <ul className="rows">
           {list.map((c) => (
             <li key={c.id}>
               <div>
                 <strong>{c.first_name} {c.last_name}</strong>
-                <small>{c.email} · registered {formatDate(c.created_at)} → {c.target ?? '—'} ({c.target_detail ?? ''})</small>
+                <small>{c.email}{c.matched_email && c.matched_email !== c.email.toLowerCase() ? ` · matched by personal e-mail ${c.matched_email}` : ''} · {formatDate(c.created_at)} → {c.target ?? '—'} ({c.target_detail ?? ''})</small>
               </div>
               <span className="inline-form">
                 <Button size="sm" disabled={decide.isPending} onClick={() => run(c.id, true, 'Account linked')}>Confirm</Button>

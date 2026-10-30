@@ -310,6 +310,8 @@ export type CompanyRow = { id: string; name: string; website: string | null; ver
 export type AccountClaim = {
   id: string; kind: 'lab_seat' | 'professor'; status: 'pending'; created_at: string; user_id: string; first_name: string; last_name: string;
   email: string; role: string; target: string | null; target_detail: string | null; lab_slug: string | null; professor_username: string | null;
+  /** v17.2: the e-mail that matched (sign-up or personal e-mail). */
+  matched_email: string | null;
 };
 /** v17: a partner who typed the name of an existing company. */
 export type CompanyJoinRequest = {

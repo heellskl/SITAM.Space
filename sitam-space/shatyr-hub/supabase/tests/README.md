@@ -14,4 +14,4 @@ psql -d sitam_test -X -f supabase/tests/v17_tests.sql              # after permi
 The v16 files need pgvector; without it, replace `extensions.vector(384)` / `extensions.vector` with `real[]`, drop the
 hnsw index and define a `<=>` operator on `real[]` (cosine distance) before running them.
 
-Every line should print `PASS` (82 checks in permissions_tests.sql, 28 in v17_tests.sql): registration, coordinator, head/member rights, projects, events, v10 heads list and competitions, v11, v12 (communities, personal e-mail, event place, industry partners, shared tags), v13 (event photos, Academic Plan), v15 (submission lab or researcher).
+Every line should print `PASS` (82 checks in permissions_tests.sql, 33 in v17_tests.sql): registration, coordinator, head/member rights, projects, events, v10 heads list and competitions, v11, v12 (communities, personal e-mail, event place, industry partners, shared tags), v13 (event photos, Academic Plan), v15 (submission lab or researcher).

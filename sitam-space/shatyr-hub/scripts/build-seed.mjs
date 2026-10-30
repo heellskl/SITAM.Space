@@ -183,6 +183,10 @@ on conflict (username) do update set first_name = excluded.first_name, last_name
   orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
   i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
   keywords = excluded.keywords, topics = excluded.topics, updated_at = now();`);
+  if ((p.other_emails ?? []).length) {
+    // v17.2: older e-mails (e.g. on papers from a previous university) — a personal e-mail matching one creates a claim
+    out.push(`update public.professors set alt_emails = ${arr(p.other_emails.map((e) => String(e).toLowerCase()))} where username = ${q(username)};`);
+  }
   const P = `(select id from public.professors where username = ${q(username)})`;
   for (const pub of p.publications ?? []) {
     // match an existing paper by Scopus EID, else DOI, else title (papers found outside Scopus may have neither)
