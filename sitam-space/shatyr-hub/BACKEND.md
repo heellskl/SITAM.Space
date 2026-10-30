@@ -141,3 +141,7 @@ delete from companies where name = 'Demo Partner (sample)';
 
 ## v15 (2026-10-29)
 - Migration `20261029100000_sitam_v15_submission_affiliation.sql`: `projects.related_lab_id`, `projects.supervisor_id`, RPC `set_submission_affiliation`. Run `supabase/update-to-v15.sql` (contains v12 → v15, re-runnable). Tests: 80 checks.
+
+## v16 (2026-10-30) — Ask SITAM
+- Migration `20261030100000_sitam_v16_ask_sitam.sql` (in `update-to-v16.sql`, which contains v12 → v16): pgvector, `ai_documents`, `ai_faq`, view `ai_sources`, `ai_pending_documents`, `ai_upsert_document`, `ai_remove_stale`, `ai_index_status`, `match_documents`, `ai_usage` + `ai_take_quota`. Service-role-only helpers; `match_documents` / `ai_index_status` for signed-in users.
+- Edge Functions `ask-sitam`, `ai-index`; setup in docs/ASK-SITAM.md.

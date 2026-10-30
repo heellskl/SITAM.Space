@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { AskSitam } from '@/components/ask-sitam';
 import {
   Outlet,
   Link,
@@ -137,6 +138,7 @@ function Shell({ isHome }: { isHome: boolean }) {
         <Outlet />
         <HubFooter />
       </div>
+      <AskSitam />
     </div>
   );
 }

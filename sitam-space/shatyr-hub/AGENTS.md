@@ -68,7 +68,7 @@
 - Two e-mails: `profiles.personal_email` (edited in Profile → Settings), shown with the SDU e-mail by `PersonEmails` (lab-page.tsx) on lab teams and /people.
 - Events (`event-board.tsx`): filters Type · Location (At SDU / Outside SDU / Online) · Organized by (SDU / External / Co-hosted). SDU events: Online when the room says online/zoom/meet/teams; co-hosted when a company is a host. External events: `external_events.location_type`, `cohosted` via `set_external_event_place`. 8 cards, then "Show all". Calendar: past days grey, today amber. Colours: Industry #B45309, Research #1D4ED8, Competitions #047857.
 - Industry page: no events. Under the heading two tabs — Opportunities (default, board) and Partners (`?view=partners`, `industry-partners.tsx`, table `industry_partners`, coordinator edits).
-- Database: existing → `supabase/update-to-v15.sql` (includes v12, v12.1, v13, v15; re-runnable); empty → `supabase/setup-new-database.sql`.
+- Database: existing → `supabase/update-to-v16.sql` (includes v12 → v16; re-runnable); empty → `supabase/setup-new-database.sql`.
 - Shared tags (v12.1): `src/lib/lab-tags.ts` builds one catalog of research areas / skills / equipment from all labs (most used first, spelling = most common). `TagInput` shows it as a dropdown ("Used by other labs", counts, "Add … as a new tag"). Labs page: Topic filter (`?topic=area:NLP`) + Sort (Name, Most projects, Largest team); chips on the lab page link to that filter. Admin → "Tags of all labs" (`tag-manager.tsx`): rename / merge / remove everywhere via `admin_rename_lab_tag`.
 
 ## SITAM SPACE v13 — current rules (override older notes above)
@@ -93,3 +93,9 @@
 - Submit research / project: "Done with" Neither / A lab / A researcher → `projects.related_lab_id` (no FK, to keep `labs(...)` embeds unambiguous) or `projects.supervisor_id` → professors, via `set_submission_affiliation` (author only). Cards show "With …".
 - Lab form: Cancel + Save lab at the bottom right (`.editor-actions`, button class `editor-save` — never `save-btn`, that is the bookmark button).
 - Layout rhythm: v15 block at the end of styles.css (`--space-*`, page-head-row centred, equal-height cards, 12.5px small text).
+
+## SITAM SPACE v16 — Ask SITAM (RAG MVP)
+- See docs/ASK-SITAM.md. Knowledge = `public.ai_documents` (one row per public page, `embedding vector(384)` from Supabase AI `gte-small`), built from the view `public.ai_sources` — only public text; never CVs, phones, e-mails, applications, lab Internal, B2B briefs. Add a new kind of content = add a `union all` branch to `ai_sources` (and the `source_type` check).
+- Edge Functions: `supabase/functions/ask-sitam` (signed-in, daily quota, `match_documents` top 8, answers only from sources, works without an AI key = sources only) and `supabase/functions/ai-index` (coordinator or `x-cron-secret`, batches of 15). Shared: `_shared/ai.ts` (provider by secret: ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY, `AI_MODEL`).
+- Site: `AskSitam` floating chat (root shell, signed-in only); Admin → `AiIndexPanel` ("Update AI index").
+- Local tests: pgvector is not installed in the sandbox Postgres; v16 SQL was checked with a stand-in vector type.

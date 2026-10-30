@@ -88,3 +88,18 @@ grant select on public.academic_plans, public.academic_plan_items to anon, authe
 grant insert, update, delete on public.academic_plans, public.academic_plan_items to authenticated;
 revoke execute on function public.set_submission_affiliation(uuid, uuid, uuid) from anon, public;
 grant execute on function public.set_submission_affiliation(uuid, uuid, uuid) to authenticated;
+revoke insert, update, delete on public.ai_documents from anon, authenticated;
+grant select on public.ai_documents to anon, authenticated;
+grant select on public.ai_faq to anon, authenticated;
+revoke insert, update, delete on public.ai_faq from anon, authenticated;
+revoke all on public.ai_sources from anon, authenticated, public;
+revoke insert, update, delete on public.ai_usage from anon, authenticated;
+grant select on public.ai_usage to authenticated;
+revoke execute on function public.ai_pending_documents(int) from anon, authenticated, public;
+revoke execute on function public.ai_upsert_document(text, text, text, text, text, text, extensions.vector) from anon, authenticated, public;
+revoke execute on function public.ai_remove_stale() from anon, authenticated, public;
+revoke execute on function public.ai_take_quota(uuid, int) from anon, authenticated, public;
+revoke execute on function public.match_documents(extensions.vector, int, float) from anon, public;
+grant execute on function public.match_documents(extensions.vector, int, float) to authenticated;
+grant execute on function public.ai_index_status() to authenticated;
+grant execute on function public.ai_pending_documents(int), public.ai_upsert_document(text, text, text, text, text, text, extensions.vector), public.ai_remove_stale(), public.ai_take_quota(uuid, int), public.match_documents(extensions.vector, int, float), public.ai_index_status() to service_role;

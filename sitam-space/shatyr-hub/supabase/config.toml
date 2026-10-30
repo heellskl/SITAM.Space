@@ -1,1 +1,7 @@
 project_id = "xcgxszlximwvqizwgphd"
+# "Ask SITAM" Edge Functions: both check the caller themselves (sign-in / coordinator / cron secret)
+[functions.ask-sitam]
+verify_jwt = true
+
+[functions.ai-index]
+verify_jwt = false
