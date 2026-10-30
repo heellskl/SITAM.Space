@@ -1,7 +1,7 @@
 /* SITAM SPACE v17 — roles & onboarding (decided with the user on 2026-10-31)
    ──────────────────────────────────────────────────────────────────────────
-   1. Lab positions: new "Tech Lead"; heads can add Student Lead / Tech Lead. A lab's Head (lead) can now also
-      appoint and remove Co-Heads in their own lab; only the coordinator appoints or removes the Head.
+   1. Co-Heads: a lab's Head (lead) — and the coordinator — appoint and remove Co-Heads in that lab;
+      only the coordinator appoints or removes the Head. Member positions stay as before.
    2. Alumni: new account type "alumni" (personal e-mail allowed) with faculty, graduation year, job title, company.
       They read everything and can "Offer help" to a lab (mentor / guest speaker / research advisor);
       the lab's heads see and answer the offers. Alumni do not apply to vacancies and do not submit projects.
@@ -14,8 +14,6 @@
    Re-runnable. */
 
 /* ───────────── 1. lab positions ───────────── */
-alter type public.lab_role add value if not exists 'tech_lead';
-
 create or replace function public.is_lab_lead(p_lab uuid)
 returns boolean language sql stable security definer set search_path = public as $$
   select exists (select 1 from public.lab_members m where m.lab_id = p_lab and m.user_id = auth.uid() and m.role::text = 'lead')
@@ -68,7 +66,7 @@ begin
   if not public.is_lab_manager(p_lab) then raise exception 'NOT_ALLOWED: only the head of this lab can add members'; end if;
   if v_role = 'co_lead' then
     if not (public.is_lab_lead(p_lab) or public.is_admin()) then raise exception 'NOT_ALLOWED: only the Head of the lab appoints Co-Heads'; end if;
-  elsif v_role not in ('member', 'mentor', 'research_assistant', 'student_researcher', 'project_coordinator', 'student_lead', 'tech_lead') then
+  elsif v_role not in ('member', 'mentor', 'research_assistant', 'student_researcher', 'project_coordinator') then
     raise exception 'BAD_ROLE: the Head is appointed by the coordinator';
   end if;
   if v_email is null then raise exception 'EMAIL_REQUIRED: choose a registered user'; end if;

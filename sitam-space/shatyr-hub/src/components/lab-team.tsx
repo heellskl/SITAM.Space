@@ -36,7 +36,7 @@ export function LabTeamManager({ lab, onEdit }: { lab: Lab; onEdit: () => void }
   const [confirm, setConfirm] = useState<LabMember | null>(null);
 
   // Member-level positions (rights = member). Old student-lead labels stay visible on existing rows only.
-  const MEMBER_POSITIONS: LabRole[] = ['student_lead', 'tech_lead', 'member', 'mentor', 'project_coordinator', 'research_assistant', 'student_researcher'];
+  const MEMBER_POSITIONS: LabRole[] = ['member', 'mentor', 'project_coordinator', 'research_assistant', 'student_researcher'];
   const positions: LabRole[] = canEditHeads ? LAB_ROLE_ORDER : isLead ? ['co_lead', ...MEMBER_POSITIONS] : MEMBER_POSITIONS;
   const addable: LabRole[] = canEditHeads || isLead ? ['co_lead', ...MEMBER_POSITIONS] : MEMBER_POSITIONS;
   const coHeadOk = canEditHeads || isLead;

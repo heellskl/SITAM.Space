@@ -367,7 +367,10 @@ select 'the lab head sees and accepts the offer: ' || case when (select status f
 -- Co-Heads: the Head appoints and removes them; nobody but the coordinator touches the Head
 select set_config('sitam.cohead', (public.add_lab_member((select id from labs where slug='robotics-lab'), null, '230101010@sdu.edu.kz', 'co_lead', null)->>'id'), false);
 select 'the Head appoints a Co-Head (who can manage): ' || case when (select role::text = 'co_lead' and can_edit from lab_members where id = current_setting('sitam.cohead')::uuid) then 'PASS' else 'FAIL' end;
-select (public.add_lab_member((select id from labs where slug='robotics-lab'), null, '220107012@sdu.edu.kz', 'tech_lead', null)->>'id') is not null as tech_lead_added;
+do $$ begin
+  perform public.add_lab_member((select id from labs where slug='robotics-lab'), null, '220107012@sdu.edu.kz', 'tech_lead', null);
+  raise notice 'FAIL a head added a Tech lead';
+exception when others then raise notice 'PASS member positions stay as before (%)', sqlerrm; end $$;
 select pg_temp.as_user('00000000-0000-0000-0000-00000000c005');
 do $$ begin
   update lab_members set role = 'lead' where id = current_setting('sitam.cohead')::uuid;
@@ -383,7 +386,6 @@ do $$ declare n int; begin
   raise notice '% the Head turns a Co-Head back into a member', case when n = 1 then 'PASS' else 'FAIL' end;
 end $$;
 select pg_temp.as_super();
-select 'tech lead position exists and has no rights: ' || case when exists (select 1 from lab_members where role::text = 'tech_lead' and not can_edit) then 'PASS' else 'FAIL' end;
 
 -- researcher profile: request → coordinator approves → the teacher edits only their card
 select pg_temp.as_user('00000000-0000-0000-0000-00000000c005');

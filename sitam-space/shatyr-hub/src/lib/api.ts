@@ -11,7 +11,7 @@ export const db = supabase as unknown as SupabaseClient;
 /* ───────────────────────────── Row types ───────────────────────────── */
 
 export type LabRole =
-  | 'lead' | 'co_lead' | 'student_lead' | 'deputy_student_lead' | 'tech_lead'
+  | 'lead' | 'co_lead' | 'student_lead' | 'deputy_student_lead'
   | 'member' | 'mentor' | 'research_assistant' | 'student_researcher' | 'project_coordinator' | 'former_lead';
 
 /** Positions inside a lab (not the platform role). Heads manage the head positions; managers manage the lab. */
@@ -19,7 +19,7 @@ export const HEAD_ROLES: LabRole[] = ['lead', 'co_lead'];
 export const MANAGER_ROLES: LabRole[] = ['lead', 'co_lead'];
 /** Display order of a lab team. */
 export const LAB_ROLE_ORDER: LabRole[] = [
-  'lead', 'co_lead', 'student_lead', 'deputy_student_lead', 'tech_lead', 'mentor', 'project_coordinator', 'research_assistant', 'student_researcher', 'member', 'former_lead',
+  'lead', 'co_lead', 'student_lead', 'deputy_student_lead', 'mentor', 'project_coordinator', 'research_assistant', 'student_researcher', 'member', 'former_lead',
 ];
 /** Positions for a select: "Head" is offered once (lead); co_lead / former_lead only when the row already has it. */
 export function positionOptions(list: readonly LabRole[], current?: LabRole, allowCoHead = false): LabRole[] {
@@ -27,7 +27,7 @@ export function positionOptions(list: readonly LabRole[], current?: LabRole, all
 }
 /** One person's position (singular), for selects and badges. */
 export const LAB_POSITION_LABEL: Record<LabRole, string> = {
-  lead: 'Head', co_lead: 'Co-Head', student_lead: 'Student lead', deputy_student_lead: 'Deputy student lead', tech_lead: 'Tech lead',
+  lead: 'Head', co_lead: 'Co-Head', student_lead: 'Student lead', deputy_student_lead: 'Deputy student lead',
   mentor: 'Mentor', project_coordinator: 'Project coordinator', research_assistant: 'Research assistant', student_researcher: 'Student researcher',
   member: 'Member', former_lead: 'Former head',
 };
@@ -1324,7 +1324,7 @@ export const MODERATION_LABEL: Record<Moderation, string> = { pending: 'Under re
 
 /** Group headings on the lab page (plural). For one person use LAB_POSITION_LABEL. */
 export const LAB_ROLE_LABEL: Record<LabRole, string> = {
-  lead: 'Lab head', co_lead: 'Co-heads', student_lead: 'Student lead', deputy_student_lead: 'Deputy student lead', tech_lead: 'Tech leads',
+  lead: 'Lab head', co_lead: 'Co-heads', student_lead: 'Student lead', deputy_student_lead: 'Deputy student lead',
   mentor: 'Mentors', project_coordinator: 'Project coordinators', research_assistant: 'Research assistants', student_researcher: 'Student researchers',
   member: 'Members', former_lead: 'Former heads',
 };
