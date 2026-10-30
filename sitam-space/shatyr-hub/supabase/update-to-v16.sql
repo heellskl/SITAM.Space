@@ -528,12 +528,15 @@ returns jsonb language sql stable security definer set search_path = public as $
 $$;
 
 /* ───────────── vector search ───────────── */
-create or replace function public.match_documents(query_embedding extensions.vector(384), match_count int default 8, min_similarity float default 0.2)
+create or replace function public.match_documents(query_embedding extensions.vector(384), match_count int default 8,
+                                                  min_similarity float default 0.2, filter_types text[] default null)
 returns table (id bigint, source_type text, source_id text, title text, url text, content text, similarity float)
 language sql stable security definer set search_path = public, extensions as $$
   select d.id, d.source_type, d.source_id, d.title, d.url, d.content, 1 - (d.embedding <=> query_embedding) as similarity
     from public.ai_documents d
-   where d.embedding is not null and 1 - (d.embedding <=> query_embedding) >= min_similarity
+   where d.embedding is not null
+     and (filter_types is null or cardinality(filter_types) = 0 or d.source_type = any(filter_types))
+     and 1 - (d.embedding <=> query_embedding) >= min_similarity
    order by d.embedding <=> query_embedding
    limit greatest(1, least(match_count, 20))
 $$;
@@ -568,11 +571,11 @@ revoke execute on function public.ai_pending_documents(int) from anon, authentic
 revoke execute on function public.ai_upsert_document(text, text, text, text, text, text, extensions.vector) from anon, authenticated, public;
 revoke execute on function public.ai_remove_stale() from anon, authenticated, public;
 revoke execute on function public.ai_take_quota(uuid, int) from anon, authenticated, public;
-revoke execute on function public.match_documents(extensions.vector, int, float) from anon, public;
-grant execute on function public.match_documents(extensions.vector, int, float) to authenticated;
+revoke execute on function public.match_documents(extensions.vector, int, float, text[]) from anon, public;
+grant execute on function public.match_documents(extensions.vector, int, float, text[]) to authenticated;
 grant execute on function public.ai_index_status() to authenticated;
 grant execute on function public.ai_pending_documents(int), public.ai_upsert_document(text, text, text, text, text, text, extensions.vector),
-  public.ai_remove_stale(), public.ai_take_quota(uuid, int), public.match_documents(extensions.vector, int, float), public.ai_index_status() to service_role;
+  public.ai_remove_stale(), public.ai_take_quota(uuid, int), public.match_documents(extensions.vector, int, float, text[]), public.ai_index_status() to service_role;
 
 insert into sitam_meta.applied_migrations (version, name) values ('20261030100000', 'sitam_v16_ask_sitam') on conflict do nothing;
 
@@ -701,9 +704,9 @@ revoke execute on function public.ai_pending_documents(int) from anon, authentic
 revoke execute on function public.ai_upsert_document(text, text, text, text, text, text, extensions.vector) from anon, authenticated, public;
 revoke execute on function public.ai_remove_stale() from anon, authenticated, public;
 revoke execute on function public.ai_take_quota(uuid, int) from anon, authenticated, public;
-revoke execute on function public.match_documents(extensions.vector, int, float) from anon, public;
-grant execute on function public.match_documents(extensions.vector, int, float) to authenticated;
+revoke execute on function public.match_documents(extensions.vector, int, float, text[]) from anon, public;
+grant execute on function public.match_documents(extensions.vector, int, float, text[]) to authenticated;
 grant execute on function public.ai_index_status() to authenticated;
-grant execute on function public.ai_pending_documents(int), public.ai_upsert_document(text, text, text, text, text, text, extensions.vector), public.ai_remove_stale(), public.ai_take_quota(uuid, int), public.match_documents(extensions.vector, int, float), public.ai_index_status() to service_role;
+grant execute on function public.ai_pending_documents(int), public.ai_upsert_document(text, text, text, text, text, text, extensions.vector), public.ai_remove_stale(), public.ai_take_quota(uuid, int), public.match_documents(extensions.vector, int, float, text[]), public.ai_index_status() to service_role;
 revoke execute on function public.match_documents(extensions.vector, int, float, text[]) from anon, public;
 grant execute on function public.match_documents(extensions.vector, int, float, text[]) to authenticated, service_role;
