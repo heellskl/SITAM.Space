@@ -24,10 +24,11 @@ Never indexed: CVs, phone numbers, e-mails, applications, registrations, lab "In
    the same thing as `process.env.NAME` in Node:
    | Secret | Needed | Meaning |
    |---|---|---|
-   | `ANTHROPIC_API_KEY` | one of the three | Claude (console.anthropic.com) |
-   | `OPENAI_API_KEY` | one of the three | OpenAI |
-   | `GEMINI_API_KEY` | one of the three | Google Gemini (aistudio.google.com) |
-   | `AI_PROVIDER` | optional | `anthropic` / `openai` / `gemini` when several keys are set |
+   | `ANTHROPIC_API_KEY` | one of the four | Claude (console.anthropic.com) |
+   | `OPENAI_API_KEY` | one of the four | OpenAI |
+   | `GEMINI_API_KEY` | one of the four | Google Gemini (aistudio.google.com) |
+   | `DEEPSEEK_API_KEY` | one of the four | DeepSeek (platform.deepseek.com), model `deepseek-chat` |
+   | `AI_PROVIDER` | optional | `anthropic` / `openai` / `gemini` / `deepseek` when several keys are set |
    | `AI_MODEL` | optional | model name; defaults: `claude-haiku-4-5`, `gpt-4o-mini`, `gemini-2.0-flash` — check the provider's current list |
    | `AI_DAILY_LIMIT` | optional | questions per person per day (default 30) |
    | `AI_CRON_SECRET` | optional | lets a scheduled job call `ai-index` with header `x-cron-secret` |

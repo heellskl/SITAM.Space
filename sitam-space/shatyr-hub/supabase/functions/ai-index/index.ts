@@ -45,15 +45,17 @@ export async function embed(text: string): Promise<number[]> {
   return Array.from(out);
 }
 
-/* ───────────── answer generation: Anthropic (Claude), OpenAI or Gemini — whichever key is set ───────────── */
+/* ───────────── answer generation: Anthropic (Claude), OpenAI, Gemini or DeepSeek — whichever key is set ───────────── */
 export type ChatTurn = { role: 'user' | 'assistant'; content: string };
-export type Provider = 'anthropic' | 'openai' | 'gemini';
+export type Provider = 'anthropic' | 'openai' | 'gemini' | 'deepseek';
 
 export function provider(): Provider | null {
   const forced = env('AI_PROVIDER').toLowerCase();
   if (forced === 'anthropic' && env('ANTHROPIC_API_KEY')) return 'anthropic';
   if (forced === 'openai' && env('OPENAI_API_KEY')) return 'openai';
   if (forced === 'gemini' && env('GEMINI_API_KEY')) return 'gemini';
+  if (forced === 'deepseek' && env('DEEPSEEK_API_KEY')) return 'deepseek';
+  if (env('DEEPSEEK_API_KEY')) return 'deepseek';
   if (env('ANTHROPIC_API_KEY')) return 'anthropic';
   if (env('OPENAI_API_KEY')) return 'openai';
   if (env('GEMINI_API_KEY')) return 'gemini';
@@ -65,6 +67,7 @@ const DEFAULT_MODEL: Record<Provider, string> = {
   anthropic: 'claude-haiku-4-5',
   openai: 'gpt-4o-mini',
   gemini: 'gemini-2.0-flash',
+  deepseek: 'deepseek-chat',
 };
 
 export async function generate(system: string, turns: ChatTurn[], maxTokens = 700): Promise<string> {
@@ -83,13 +86,16 @@ export async function generate(system: string, turns: ChatTurn[], maxTokens = 70
     return (d.content ?? []).filter((c: { type: string }) => c.type === 'text').map((c: { text: string }) => c.text).join('\n').trim();
   }
 
-  if (p === 'openai') {
-    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+  if (p === 'openai' || p === 'deepseek') {
+    // DeepSeek uses the same request format as OpenAI
+    const url = p === 'deepseek' ? 'https://api.deepseek.com/chat/completions' : 'https://api.openai.com/v1/chat/completions';
+    const key = p === 'deepseek' ? env('DEEPSEEK_API_KEY') : env('OPENAI_API_KEY');
+    const r = await fetch(url, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${env('OPENAI_API_KEY')}`, 'content-type': 'application/json' },
+      headers: { Authorization: `Bearer ${key}`, 'content-type': 'application/json' },
       body: JSON.stringify({ model, max_tokens: maxTokens, messages: [{ role: 'system', content: system }, ...turns] }),
     });
-    if (!r.ok) throw new Error(`OpenAI ${r.status}: ${(await r.text()).slice(0, 300)}`);
+    if (!r.ok) throw new Error(`${p === 'deepseek' ? 'DeepSeek' : 'OpenAI'} ${r.status}: ${(await r.text()).slice(0, 300)}`);
     const d = await r.json();
     return (d.choices?.[0]?.message?.content ?? '').trim();
   }

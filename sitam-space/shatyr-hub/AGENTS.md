@@ -96,6 +96,6 @@
 
 ## SITAM SPACE v16 — Ask SITAM (RAG MVP)
 - See docs/ASK-SITAM.md. Knowledge = `public.ai_documents` (one row per public page, `embedding vector(384)` from Supabase AI `gte-small`), built from the view `public.ai_sources` — only public text; never CVs, phones, e-mails, applications, lab Internal, B2B briefs. Add a new kind of content = add a `union all` branch to `ai_sources` (and the `source_type` check).
-- Edge Functions: `supabase/functions/ask-sitam` (signed-in, daily quota, `match_documents` top 8, answers only from sources, works without an AI key = sources only) and `supabase/functions/ai-index` (coordinator or `x-cron-secret`, batches of 15). Each function is one self-contained file (the helpers are copied into both, so they can be pasted into the dashboard editor); provider by secret: ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY, `AI_MODEL`.
+- Edge Functions: `supabase/functions/ask-sitam` (signed-in, daily quota, `match_documents` top 8, answers only from sources, works without an AI key = sources only) and `supabase/functions/ai-index` (coordinator or `x-cron-secret`, batches of 15). Each function is one self-contained file (the helpers are copied into both, so they can be pasted into the dashboard editor); provider by secret: DEEPSEEK_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY, `AI_MODEL`.
 - Site: `AskSitam` floating chat (root shell, signed-in only); Admin → `AiIndexPanel` ("Update AI index").
 - Local tests: pgvector is not installed in the sandbox Postgres; v16 SQL was checked with a stand-in vector type.
