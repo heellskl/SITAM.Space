@@ -111,7 +111,10 @@ export async function generate(system: string, turns: ChatTurn[], maxTokens = 70
 /* ───────────── the function ───────────── */
 
 
-const BATCH = Number(Deno.env.get('AI_INDEX_BATCH') ?? '15') || 15;
+// Small batches: an Edge Function has a short CPU budget per call (the embedding model is CPU-heavy).
+// The Admin page calls again until `remaining` is 0.
+const BATCH = Number(Deno.env.get('AI_INDEX_BATCH') ?? '4') || 4;
+const TIME_BUDGET_MS = 15_000;
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
@@ -130,7 +133,9 @@ Deno.serve(async (req) => {
 
   let done = 0;
   const failed: string[] = [];
+  const started = Date.now();
   for (const d of (pending ?? []) as { source_type: string; source_id: string; title: string; url: string; content: string; content_hash: string }[]) {
+    if (Date.now() - started > TIME_BUDGET_MS) break;
     try {
       const vector = await embed(`${d.title}\n${d.content}`);
       const { error } = await db.rpc('ai_upsert_document', {

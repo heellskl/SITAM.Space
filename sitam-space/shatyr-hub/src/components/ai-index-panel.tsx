@@ -19,16 +19,36 @@ export function AiIndexPanel() {
   };
   useEffect(() => { void load(); }, []);
 
+  // one call of the Edge Function; its own error text when it fails (not just "non-2xx status code")
+  async function callOnce(): Promise<{ indexed_now?: number; remaining?: number | null }> {
+    const { data, error } = await supabase.functions.invoke('ai-index', { body: {} });
+    if (!error && !data?.error) return data;
+    let msg = data?.error as string | undefined;
+    try { msg ??= (await (error as { context?: Response })?.context?.json())?.error; } catch { /* not JSON */ }
+    try { msg ??= `HTTP ${(error as { context?: Response })?.context?.status}`; } catch { /* no status */ }
+    throw new Error(msg ?? error?.message ?? 'Indexing failed');
+  }
+
   async function run() {
     setBusy(true);
     setDone(0);
+    let fails = 0;
     try {
-      for (let i = 0; i < 200; i++) {
-        const { data, error } = await supabase.functions.invoke('ai-index', { body: {} });
-        if (error || data?.error) throw new Error(data?.error ?? error?.message ?? 'Indexing failed');
+      for (let i = 0; i < 400; i++) {
+        let data: { indexed_now?: number; remaining?: number | null };
+        try {
+          data = await callOnce();
+          fails = 0;
+        } catch (e) {
+          // a busy or cold function: wait and try again (3 times in a row at most)
+          fails += 1;
+          if (fails > 3) throw e;
+          await new Promise((r) => setTimeout(r, 2000 * fails));
+          continue;
+        }
         setDone((n) => n + (data.indexed_now ?? 0));
-        await load();
-        if (!data.remaining || data.indexed_now === 0) break;
+        if (i % 3 === 0) await load();
+        if (!data.remaining) break;
       }
       toast.success('Ask SITAM is up to date');
     } catch (e) {
