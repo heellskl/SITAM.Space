@@ -5,13 +5,14 @@
 // • The conversation is kept while the person browses (sessionStorage): open a page from the chat, then come
 //   back to the chat with the "Ask SITAM" button — everything is still there. "New chat" starts over.
 
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useRouter } from '@tanstack/react-router';
 import {
-  ArrowUp, BookOpen, Briefcase, CalendarDays, ChevronDown, CircleHelp, FlaskConical, Loader2, Minus, RotateCcw, Rocket, Sparkles, UserRound,
+  ArrowUp, BookOpen, Briefcase, CalendarDays, ChevronDown, CircleHelp, FlaskConical, Loader2, Maximize2, Minimize2, Minus, PanelRight, RotateCcw, Rocket, Sparkles, UserRound,
 } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/lib/auth';
+import { Markdown } from '@/components/ask-markdown';
 
 type Source = { n: number; title: string; url: string; type: string; cited?: boolean };
 type Msg = { role: 'user' | 'assistant'; content: string; sources?: Source[]; error?: boolean };
@@ -33,47 +34,21 @@ const EXAMPLES: { q: string; scope: Scope }[] = [
   { q: 'Where can I find an internship?', scope: 'opportunities' },
 ];
 const STORE = 'sitam-ask-v1';
+const VIEW_KEY = 'sitam-ask-view-v1';
+type View = 'float' | 'dock' | 'full';
+const readView = (): { view: View; width: number } => {
+  try {
+    const v = JSON.parse(localStorage.getItem(VIEW_KEY) ?? '');
+    return { view: v.view === 'dock' || v.view === 'full' ? v.view : 'float', width: Number(v.width) || 440 };
+  } catch { return { view: 'float', width: 440 }; }
+};
+const clampWidth = (w: number) => Math.round(Math.min(Math.max(w, 360), Math.min(window.innerWidth * 0.7, 980)));
 
 function load(): { msgs: Msg[]; open: boolean; scope: Scope } {
   try {
     const v = JSON.parse(sessionStorage.getItem(STORE) ?? '');
     return { msgs: Array.isArray(v.msgs) ? v.msgs.slice(-30) : [], open: !!v.open, scope: v.scope ?? 'auto' };
   } catch { return { msgs: [], open: false, scope: 'auto' }; }
-}
-
-/** Tiny formatter: paragraphs, "- " / "1. " lists, **bold**, and [n] as clickable citation chips. */
-function Rich({ text, onCite, known }: { text: string; onCite: (n: number) => void; known: Set<number> }) {
-  const inline = (line: string, key: string): ReactNode[] =>
-    line.split(/(\*\*[^*]+\*\*|\[\d{1,2}\])/g).filter(Boolean).map((part, i) => {
-      const b = /^\*\*(.+)\*\*$/.exec(part);
-      if (b) return <strong key={`${key}-${i}`}>{b[1]}</strong>;
-      const c = /^\[(\d{1,2})\]$/.exec(part);
-      if (c && known.has(Number(c[1]))) return <button key={`${key}-${i}`} type="button" className="ask-cite" onClick={() => onCite(Number(c[1]))} aria-label={`Open source ${c[1]}`}>{c[1]}</button>;
-      return <span key={`${key}-${i}`}>{part}</span>;
-    });
-  const blocks: ReactNode[] = [];
-  let list: { ordered: boolean; items: string[] } | null = null;
-  const flush = () => {
-    if (!list) return;
-    const Tag = list.ordered ? 'ol' : 'ul';
-    blocks.push(<Tag key={`l${blocks.length}`} className="ask-list">{list.items.map((it, i) => <li key={i}>{inline(it, `li${blocks.length}-${i}`)}</li>)}</Tag>);
-    list = null;
-  };
-  for (const raw of text.split('\n')) {
-    const line = raw.trim();
-    const bullet = /^[-*•]\s+(.*)$/.exec(line);
-    const num = /^\d+[.)]\s+(.*)$/.exec(line);
-    if (bullet || num) {
-      const ordered = !!num;
-      if (!list || list.ordered !== ordered) { flush(); list = { ordered, items: [] }; }
-      list.items.push((bullet ?? num)![1]!);
-      continue;
-    }
-    flush();
-    if (line) blocks.push(<p key={`p${blocks.length}`}>{inline(line.replace(/^#+\s*/, ''), `p${blocks.length}`)}</p>);
-  }
-  flush();
-  return <>{blocks}</>;
 }
 
 function SourceCards({ sources, onOpen }: { sources: Source[]; onOpen: (s: Source) => void }) {
@@ -120,6 +95,33 @@ export function AskSitam() {
   const [busy, setBusy] = useState(false);
   const end = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
+  // size: floating window, docked side panel (page shifts left — split screen) or full screen; width by dragging the edge
+  const [{ view, width }, setLayout] = useState(readView);
+  const setView = (v: View) => setLayout((l) => ({ ...l, view: v }));
+  useEffect(() => { try { localStorage.setItem(VIEW_KEY, JSON.stringify({ view, width })); } catch { /* storage blocked */ } }, [view, width]);
+  useEffect(() => {
+    const root = document.documentElement;
+    const docked = open && view === 'dock' && window.innerWidth > 900;
+    root.classList.toggle('ask-docked', docked);
+    root.style.setProperty('--ask-dock-w', `${width}px`);
+    return () => root.classList.remove('ask-docked');
+  }, [open, view, width]);
+  useEffect(() => {
+    if (!open || view !== 'full') return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setView('float'); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, view]);
+  const startResize = useCallback((e: { preventDefault(): void }) => {
+    e.preventDefault();
+    const right = view === 'dock' ? window.innerWidth : window.innerWidth - 20;
+    const move = (ev: PointerEvent) => setLayout((l) => ({ ...l, width: clampWidth(right - ev.clientX) }));
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); document.body.classList.remove('ask-resizing'); };
+    document.body.classList.add('ask-resizing');
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  }, [view]);
+  const nudge = (d: number) => setLayout((l) => ({ ...l, width: clampWidth(l.width + d) }));
 
   useEffect(() => { try { sessionStorage.setItem(STORE, JSON.stringify({ msgs: msgs.slice(-30), open, scope })); } catch { /* storage blocked */ } }, [msgs, open, scope]);
   useEffect(() => { if (open) end.current?.scrollIntoView({ block: 'end' }); }, [msgs, busy, open]);
@@ -146,10 +148,12 @@ export function AskSitam() {
   }
 
   // open a page and keep the chat: on a computer the panel stays open, on a phone it folds into the button
-  const openPage = (s: Source) => {
+  const openUrl = (url: string) => {
     if (window.matchMedia('(max-width: 760px)').matches) setOpen(false);
-    router.history.push(s.url);
+    else if (view === 'full') setView('dock'); // keep the chat next to the page that opens
+    router.history.push(url);
   };
+  const openPage = (s: Source) => openUrl(s.url);
   const submit = (e: FormEvent) => { e.preventDefault(); void ask(q); };
   const reset = () => { setMsgs([]); setQ(''); input.current?.focus(); };
   const asked = msgs.filter((m) => m.role === 'user').length;
@@ -162,11 +166,21 @@ export function AskSitam() {
         </button>
       )}
       {open && (
-        <section className="ask-panel" role="dialog" aria-label="Ask SITAM">
+        <section className={`ask-panel is-${view}`} role="dialog" aria-label="Ask SITAM" style={view === 'full' ? undefined : { width: `min(${width}px, calc(100vw - ${view === 'dock' ? 0 : 32}px))` }}>
+          {view !== 'full' && (
+            <div className="ask-resize" role="separator" aria-orientation="vertical" aria-label="Resize the chat" tabIndex={0}
+              onPointerDown={startResize} onKeyDown={(e) => { if (e.key === 'ArrowLeft') nudge(24); if (e.key === 'ArrowRight') nudge(-24); }} />
+          )}
           <header className="ask-head">
             <span className="ask-logo"><Sparkles size={16} /></span>
             <div className="ask-title"><strong>Ask SITAM</strong><small>Answers from SITAM SPACE pages</small></div>
             {msgs.length > 0 && <button type="button" className="ask-icon" onClick={reset} title="New chat" aria-label="New chat"><RotateCcw size={16} /></button>}
+            <button type="button" className={view === 'dock' ? 'ask-icon is-on hide-sm' : 'ask-icon hide-sm'} onClick={() => setView(view === 'dock' ? 'float' : 'dock')}
+              title={view === 'dock' ? 'Back to a small window' : 'Side panel — the page stays visible'} aria-pressed={view === 'dock'} aria-label="Side panel"><PanelRight size={16} /></button>
+            <button type="button" className="ask-icon" onClick={() => setView(view === 'full' ? 'float' : 'full')}
+              title={view === 'full' ? 'Exit full screen (Esc)' : 'Expand to full screen'} aria-label={view === 'full' ? 'Exit full screen' : 'Expand'}>
+              {view === 'full' ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+            </button>
             <button type="button" className="ask-icon" onClick={() => setOpen(false)} title="Minimise — the chat is kept" aria-label="Minimise"><Minus size={18} /></button>
           </header>
 
@@ -192,7 +206,7 @@ export function AskSitam() {
               const cite = (n: number) => { const s = m.sources?.find((x) => x.n === n); if (s) openPage(s); };
               return (
                 <div key={i} className={`ask-msg ${m.role}${m.error ? ' is-error' : ''}`}>
-                  {m.role === 'assistant' && !m.error ? <div className="ask-rich"><Rich text={m.content} onCite={cite} known={known} /></div> : <p>{m.content}</p>}
+                  {m.role === 'assistant' && !m.error ? <div className="ask-rich"><Markdown text={m.content} onCite={cite} known={known} onLink={openUrl} /></div> : <p>{m.content}</p>}
                   {!!m.sources?.length && <SourceCards sources={m.sources} onOpen={openPage} />}
                 </div>
               );
