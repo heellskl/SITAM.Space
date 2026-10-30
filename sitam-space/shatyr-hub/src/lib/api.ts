@@ -1468,3 +1468,66 @@ export function useUpdateMyResearcher() {
     },
   });
 }
+
+/* ───────────── v18: researchers keep their publications up to date ───────────── */
+export type PubInput = {
+  title: string; year: number | null; type: string; venue: string; doi: string; url: string; citations: number; open_access: boolean;
+};
+export type PubImportItem = {
+  title: string; year: string; type?: string; venue?: string; publisher?: string; doi?: string; url?: string;
+  citations?: string; open_access?: boolean; eid?: string; keywords?: string[];
+};
+const invalidatePubs = (qc: ReturnType<typeof useQueryClient>) => {
+  void qc.invalidateQueries({ queryKey: ['professor'] });
+  void qc.invalidateQueries({ queryKey: ['pubs-updated'] });
+  void qc.invalidateQueries({ queryKey: qk.professors });
+  void qc.invalidateQueries({ queryKey: qk.publications });
+};
+/** When the papers of a card were last updated (null before the v18 SQL is run). */
+export function usePublicationsUpdated(id: string | undefined) {
+  return useQuery({
+    queryKey: ['pubs-updated', id ?? 'all'],
+    queryFn: async () => {
+      let q = db.from('professors').select('id, full_name, username, scopus_id, publications_updated_at');
+      if (id) q = q.eq('id', id);
+      const { data, error } = await q;
+      if (error) return null; // v18 SQL not run yet
+      return data as { id: string; full_name: string; username: string; scopus_id: string | null; publications_updated_at: string | null }[];
+    },
+  });
+}
+export function useSavePublication() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { prof: string; id: string | null } & PubInput) => {
+      const { data, error } = await db.rpc('save_publication', {
+        p_prof: v.prof, p_id: v.id, p_title: v.title, p_year: v.year, p_type: v.type, p_venue: v.venue, p_doi: v.doi, p_url: v.url,
+        p_citations: v.citations, p_open_access: v.open_access,
+      });
+      if (error) fail(error);
+      return data as string;
+    },
+    onSuccess: () => invalidatePubs(qc),
+  });
+}
+export function useRemovePublication() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { prof: string; id: string }) => {
+      const { error } = await db.rpc('remove_publication', { p_prof: v.prof, p_id: v.id });
+      if (error) fail(error);
+    },
+    onSuccess: () => invalidatePubs(qc),
+  });
+}
+export function useImportPublications() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { prof: string; items: PubImportItem[] }) => {
+      const { data, error } = await db.rpc('import_publications', { p_prof: v.prof, p_items: v.items });
+      if (error) fail(error);
+      return data as { added: number; updated: number };
+    },
+    onSuccess: () => invalidatePubs(qc),
+  });
+}

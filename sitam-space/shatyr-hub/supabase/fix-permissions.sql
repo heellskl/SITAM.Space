@@ -124,3 +124,12 @@ grant execute on function public.respond_help_offer(uuid, text) to authenticated
 grant execute on function public.request_researcher_profile(uuid, text, text, text, text, text, text, text, text) to authenticated;
 grant execute on function public.review_researcher_request(uuid, boolean, text) to authenticated;
 grant execute on function public.update_my_researcher_profile(text, text, text[], text, text, text) to authenticated;
+grant select (publications_updated_at) on public.professors to anon, authenticated;
+revoke execute on function public.can_edit_professor(uuid) from anon, public;
+grant execute on function public.can_edit_professor(uuid) to authenticated;
+revoke execute on function public.save_publication(uuid, uuid, text, int, text, text, text, text, int, boolean) from anon, public;
+revoke execute on function public.remove_publication(uuid, uuid) from anon, public;
+revoke execute on function public.import_publications(uuid, jsonb) from anon, public;
+grant execute on function public.save_publication(uuid, uuid, text, int, text, text, text, text, int, boolean) to authenticated;
+grant execute on function public.remove_publication(uuid, uuid) to authenticated;
+grant execute on function public.import_publications(uuid, jsonb) to authenticated;

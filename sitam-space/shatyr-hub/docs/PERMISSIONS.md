@@ -80,3 +80,10 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 | 33 | Approve / reject researcher profile requests | coordinator | `review_researcher_request` |
 | 34 | Edit a researcher card (bio, interests, office hours, ORCID / Scholar / Scopus ID) | only the teacher linked to that card | `update_my_researcher_profile` |
 | 35 | B2B "Contact a lab" / "Offer an internship" | anyone; read by the SITAM office only (as row 26) | RLS `partner_requests` |
+
+## v18 additions (approved by the user on 2026-10-31)
+
+| # | Action | Who | Where enforced |
+|---|---|---|---|
+| 36 | Add / edit / remove papers on a researcher card, import an own Scopus CSV | the teacher linked to that card; the coordinator for every card | `save_publication`, `remove_publication`, `import_publications` (`can_edit_professor`) |
+| 37 | Import one Scopus export for many researchers (matched by Scopus Author ID) | coordinator | `import_publications` per card |

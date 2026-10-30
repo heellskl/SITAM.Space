@@ -6,6 +6,7 @@ import { VIZ, axisProps, tooltipProps } from '@/lib/chart-style';
 import { BackButton } from '@/components/back-button';
 import { useAuth } from '@/lib/auth';
 import { EditMyResearcher } from '@/components/onboarding';
+import { ManagePublications, PublicationsUpdated } from '@/components/publications-editor';
 import { ArrowUpRight, ExternalLink, FlaskConical, Mail, Megaphone } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { PublicationRow } from '@/components/research-publications';
@@ -20,7 +21,7 @@ function ProfessorPage() {
   const { username } = Route.useParams();
   const { data, isLoading, error } = useProfessor(username);
   const extra = useResearcherExtra(data?.prof.id);
-  const { user: me } = useAuth();
+  const { user: me, caps } = useAuth();
   const offers = usePersonOpportunities(username);
   const [sort, setSort] = useState<'year' | 'citations'>('year');
 
@@ -64,6 +65,7 @@ function ProfessorPage() {
             {links.map((l) => <Button key={l.label} asChild size="sm" variant="outline"><a href={l.url} target="_blank" rel="noopener noreferrer"><ExternalLink />{l.label}</a></Button>)}
             {/* only the teacher this card belongs to (the database checks it too) */}
             {me && extra.data && extra.data.profile_id === me.id && <EditMyResearcher prof={prof} extra={extra.data} />}
+            {me && ((extra.data && extra.data.profile_id === me.id) || caps.isCoordinator || caps.isAdmin) && <ManagePublications prof={prof} pubs={data.pubs} />}
           </div>
         </div>
       </header>
@@ -92,6 +94,7 @@ function ProfessorPage() {
                 <Button size="sm" variant="ghost" className={sort === 'citations' ? 'filter active' : 'filter'} onClick={() => setSort('citations')}>Most cited</Button>
               </div>
             </div>
+            <PublicationsUpdated profId={prof.id} />
             <ul className="pub-list">{pubs.map((p) => <PublicationRow key={p.id} p={p} showAuthors={false} />)}</ul>
           </section>
         </div>

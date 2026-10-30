@@ -423,3 +423,32 @@ insert into partner_requests (company_name, contact_name, contact_email, request
 values ('Acme', 'Pat', 'pat@acme.kz', 'contact_lab', false, 'Python', 'We would like to talk to the robotics lab about a joint drone project.', (select id from labs where slug='robotics-lab'));
 reset role;
 select 'B2B "Contact a lab" stored with the lab: ' || case when exists (select 1 from partner_requests where request_type::text = 'contact_lab' and requested_lab_id is not null) then 'PASS' else 'FAIL' end;
+
+\echo '── v18: researchers keep their own publications up to date'
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c002');
+select set_config('sitam.pub', public.save_publication(current_setting('sitam.newprof')::uuid, null, 'Kazakh NER with small data', 2026, 'Article', 'Journal of NLP', 'https://doi.org/10.1000/KAZ.1', null, 7, true)::text, false);
+select 'the teacher adds a paper to their card: ' || case when exists (select 1 from publication_authors where publication_id = current_setting('sitam.pub')::uuid and professor_id = current_setting('sitam.newprof')::uuid) and (select doi from publications where id = current_setting('sitam.pub')::uuid) = '10.1000/kaz.1' then 'PASS' else 'FAIL' end;
+select 'the card totals and "updated" date follow: ' || case when (select total_citations >= 7 and publications_updated_at is not null from professors where id = current_setting('sitam.newprof')::uuid) then 'PASS' else 'FAIL' end;
+select public.import_publications(current_setting('sitam.newprof')::uuid, '[{"title":"Kazakh NER with small data","year":"2026","doi":"10.1000/kaz.1","citations":"12"},{"title":"Speech corpus for Kazakh","year":"2025","citations":"3","eid":"2-s2.0-1"}]'::jsonb);
+select 'import adds new papers and refreshes citations: ' || case when (select citations from publications where id = current_setting('sitam.pub')::uuid) = 12 and exists (select 1 from publications where scopus_eid = '2-s2.0-1') then 'PASS' else 'FAIL' end;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c004');
+do $$ begin
+  perform public.save_publication(current_setting('sitam.newprof')::uuid, null, 'Not my card', 2026, null, null, null, null, 0, false);
+  raise notice 'FAIL a teacher changed another researcher''s papers';
+exception when others then raise notice 'PASS teachers change only their own card (%)', sqlerrm; end $$;
+do $$ begin
+  perform public.remove_publication(current_setting('sitam.newprof')::uuid, current_setting('sitam.pub')::uuid);
+  raise notice 'FAIL a teacher removed another researcher''s paper';
+exception when others then raise notice 'PASS teachers remove only from their own card (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c005');
+do $$ begin
+  perform public.import_publications(current_setting('sitam.newprof')::uuid, '[]'::jsonb);
+  raise notice 'FAIL a student imported papers';
+exception when others then raise notice 'PASS students cannot change publications (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c001');
+select public.save_publication(current_setting('sitam.newprof')::uuid, current_setting('sitam.pub')::uuid, 'Kazakh NER with small data', 2026, 'Article', 'Journal of NLP', null, null, 15, true);
+select 'the coordinator updates any card: ' || case when (select citations from publications where id = current_setting('sitam.pub')::uuid) = 15 then 'PASS' else 'FAIL' end;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c002');
+select public.remove_publication(current_setting('sitam.newprof')::uuid, current_setting('sitam.pub')::uuid);
+select pg_temp.as_super();
+select 'the teacher removes a paper (deleted when nobody else has it): ' || case when not exists (select 1 from publications where id = current_setting('sitam.pub')::uuid) then 'PASS' else 'FAIL' end;
