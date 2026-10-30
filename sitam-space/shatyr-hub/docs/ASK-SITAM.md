@@ -8,21 +8,18 @@ and lists the pages it used.
 | Part | File | What it does |
 |---|---|---|
 | Database | `supabase/migrations/20261030100000_sitam_v16_ask_sitam.sql` (in `supabase/update-to-v16.sql`) | pgvector, `ai_documents` (one row per page + embedding), view `ai_sources` (public text only), `match_documents`, daily limit `ai_take_quota` |
-| Indexing | `supabase/functions/ai-index` | embeds new / changed pages with the free Supabase AI model `gte-small` (384 numbers) |
-| Answering | `supabase/functions/ask-sitam` | question → embedding → `match_documents` (top 8) → LLM answers only from those pages, with [1] [2] citations |
+| Indexing | `supabase/functions/ai-index/index.ts` (one file) | embeds new / changed pages with the free Supabase AI model `gte-small` (384 numbers) |
+| Answering | `supabase/functions/ask-sitam/index.ts` (one file) | question → embedding → `match_documents` (top 8) → LLM answers only from those pages, with [1] [2] citations |
 | Site | `src/components/ask-sitam.tsx`, `src/components/ai-index-panel.tsx` (Admin) | chat panel; "Update AI index" button for the coordinator |
 
 Never indexed: CVs, phone numbers, e-mails, applications, registrations, lab "Internal" answers, B2B briefs.
 
 ## Set up (once)
 1. **SQL**: Supabase → SQL Editor → run `supabase/update-to-v16.sql` (contains v12 → v16, safe to run again).
-2. **Edge Functions** (Supabase → Edge Functions → Deploy a new function → via editor), or with the CLI:
-   ```bash
-   supabase functions deploy ask-sitam
-   supabase functions deploy ai-index
-   ```
-   With the editor: create `ask-sitam` and `ai-index`, paste each `index.ts`, and add the shared file `_shared/ai.ts`
-   (or paste its content above the function code and remove the `import … from '../_shared/ai.ts'` line).
+2. **Edge Functions** — each function is ONE file, nothing else to add. In Supabase → Edge Functions → **Deploy a new function** → **Via editor**:
+   - name `ask-sitam` → delete the sample code → paste all of `supabase/functions/ask-sitam/index.ts` → **Deploy function**;
+   - name `ai-index` → paste all of `supabase/functions/ai-index/index.ts` → **Deploy function**.
+   Or with the CLI: `supabase functions deploy ask-sitam` and `supabase functions deploy ai-index`.
 3. **Secrets** (Supabase → Edge Functions → Secrets). In Edge Functions they are read with `Deno.env.get('NAME')` —
    the same thing as `process.env.NAME` in Node:
    | Secret | Needed | Meaning |
