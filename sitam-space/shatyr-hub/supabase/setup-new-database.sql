@@ -9527,7 +9527,9 @@ alter table public.profiles add column if not exists personal_email text
   check (personal_email is null or personal_email ~* '^[^@\s]+@[^@\s]+\.[^@\s]+$');
 grant update (personal_email) on public.profiles to authenticated;
 
-create or replace view public.public_people as
+-- drop first: an older version of this view may have other columns ("cannot drop columns from view")
+drop view if exists public.public_people;
+create view public.public_people as
   select p.id, p.first_name, p.last_name, p.role::text as role, p.email, p.course, p.major, p.department, p.position, p.bio,
          p.faculty, p.group_name, p.avatar_url, p.personal_email
     from public.profiles p;
@@ -9845,7 +9847,9 @@ insert into public.ai_faq (question, answer) values
 on conflict (question) do update set answer = excluded.answer;
 
 /* ───────────── what the assistant may know (public data only) ───────────── */
-create or replace view public.ai_sources with (security_invoker = false) as
+-- drop first: an older version of this view may have other columns ("cannot drop columns from view")
+drop view if exists public.ai_sources;
+create view public.ai_sources with (security_invoker = false) as
   -- laboratories and student communities
   select 'lab'::text as source_type, l.id::text as source_id, l.name as title, '/labs/' || l.slug as url,
          concat_ws(E'\n',
@@ -10171,7 +10175,9 @@ alter table public.profiles add column if not exists graduation_year int check (
 alter table public.profiles add column if not exists company text check (company is null or char_length(company) <= 160);
 grant update (graduation_year, company) on public.profiles to authenticated;
 
-create or replace view public.public_people as
+-- drop first: an older version of this view may have other columns ("cannot drop columns from view")
+drop view if exists public.public_people;
+create view public.public_people as
   select p.id, p.first_name, p.last_name, p.role::text as role, p.email, p.course, p.major, p.department, p.position, p.bio,
          p.faculty, p.group_name, p.avatar_url, p.personal_email, p.graduation_year, p.company
     from public.profiles p;

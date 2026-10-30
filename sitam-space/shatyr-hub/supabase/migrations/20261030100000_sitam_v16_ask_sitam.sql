@@ -66,7 +66,9 @@ insert into public.ai_faq (question, answer) values
 on conflict (question) do update set answer = excluded.answer;
 
 /* ───────────── what the assistant may know (public data only) ───────────── */
-create or replace view public.ai_sources with (security_invoker = false) as
+-- drop first: an older version of this view may have other columns ("cannot drop columns from view")
+drop view if exists public.ai_sources;
+create view public.ai_sources with (security_invoker = false) as
   -- laboratories and student communities
   select 'lab'::text as source_type, l.id::text as source_id, l.name as title, '/labs/' || l.slug as url,
          concat_ws(E'\n',

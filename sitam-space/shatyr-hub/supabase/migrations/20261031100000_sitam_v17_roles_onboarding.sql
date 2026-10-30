@@ -94,7 +94,9 @@ alter table public.profiles add column if not exists graduation_year int check (
 alter table public.profiles add column if not exists company text check (company is null or char_length(company) <= 160);
 grant update (graduation_year, company) on public.profiles to authenticated;
 
-create or replace view public.public_people as
+-- drop first: an older version of this view may have other columns ("cannot drop columns from view")
+drop view if exists public.public_people;
+create view public.public_people as
   select p.id, p.first_name, p.last_name, p.role::text as role, p.email, p.course, p.major, p.department, p.position, p.bio,
          p.faculty, p.group_name, p.avatar_url, p.personal_email, p.graduation_year, p.company
     from public.profiles p;
