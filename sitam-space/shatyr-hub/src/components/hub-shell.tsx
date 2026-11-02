@@ -15,7 +15,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 
 // Sidebar order requested for the leader-first platform.
 export const navigation = [
-  { to: '/', label: 'Home', icon: House, hint: 'About SITAM SPACE and the school in numbers' },
+  { to: '/home', label: 'Home', icon: House, hint: 'Your research, labs, events and industry experience' },
   { to: '/labs', label: 'Labs', icon: FlaskConical, hint: 'Laboratories, student communities and projects' },
   { to: '/events', label: 'Events', icon: CalendarDays, hint: 'Industry and research events, competitions and hackathons' },
   { to: '/opportunities', label: 'Industry', icon: Briefcase, hint: 'Vacancies, internships, lab cases and partner companies' },
@@ -117,7 +117,7 @@ function SidebarBody({ collapsed, onNavigate }: { collapsed: boolean; onNavigate
     <TooltipProvider delayDuration={250} skipDelayDuration={100}>
       <nav className="side-nav" aria-label="Main navigation">
         {navigation.map((n) => (
-          <SideLink key={n.to} to={n.to} label={n.label} icon={n.icon} hint={n.hint} exact={n.to === '/'} onNavigate={onNavigate} />
+          <SideLink key={n.to} to={n.to} label={n.label} icon={n.icon} hint={n.hint} exact={n.to === '/home'} onNavigate={onNavigate} />
         ))}
       </nav>
 

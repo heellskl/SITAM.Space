@@ -114,6 +114,6 @@
 - Database: existing → `supabase/update-to-v19.sql` (v18 is included).
 
 ## SITAM SPACE v19 — personal Home (PERMISSIONS row 38)
-- `/` for signed-in users = `MyHome` (`components/my-home.tsx`); guests keep the video hero + About us. The "Home" sidebar item and the logo both go to `/`.
+- v19.1: the logo opens the landing page `/` (video hero + About us) for everyone; the sidebar "Home" opens `/home` = `MyHome` (`components/my-home.tsx`, guests get a sign-in prompt).
 - Sections: KPI row (h-index / citations / publications from the linked researcher card, else applications; labs; events attended) · Research (card metrics, latest papers, keywords; CTA when no card) · My labs (`caps.labMemberships`) · My events (upcoming with ticket, "Took part") · Industry: Work & internships (`profiles.experience`, edited in a dialog; accepted industrial applications are added automatically "via SITAM SPACE"), My applications, Industry events (kind industrial or a company host), Partner companies of my labs (`labs.current_partners`).
 - `/people/$id` shows "Work & internships". `useExperience` reads `public_people.experience` and returns null before the v19 SQL is run.

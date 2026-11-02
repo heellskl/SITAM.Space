@@ -133,8 +133,7 @@ function Shell({ isHome }: { isHome: boolean }) {
   return (
     <div className={guest ? (loading ? "app-shell is-guest is-pending" : "app-shell is-guest") : "app-shell"}>
       {!guest && <AppSidebar />}
-      {/* the transparent top bar over the video is only for the guest hero; signed-in people get their own Home */}
-      <div className={isHome && guest ? "app-main on-hero" : "app-main"}>
+      <div className={isHome ? "app-main on-hero" : "app-main"}>
         <TopBar />
         <Outlet />
         <HubFooter />
