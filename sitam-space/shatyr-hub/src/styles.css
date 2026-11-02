@@ -2545,7 +2545,19 @@ html.dark .md-table th { background: #111a2e; }
 .top-faq ~ .guest-actions, .top-faq ~ .top-bar-theme { margin-left: 0 !important; }
 html.dark .on-hero .top-faq:not(.is-on) { color: #fff; }
 html:not(.dark) .on-hero .top-faq:not(.is-on) { color: #0a1830; }
-@media (max-width: 480px) { .top-faq svg { display: none; } .top-faq { padding-inline: 10px; } }
+/* phones: the top bar must not overlap the logo — FAQ becomes a "?" icon, the logo gets a little smaller */
+.top-bar-logo { min-width: 0; }
+.top-faq, .guest-actions, .top-bar-theme { flex-shrink: 0; }
+@media (max-width: 560px) {
+  .top-faq { width: 36px; padding: 0 !important; justify-content: center; }
+  .top-faq .top-faq-label { display: none; }
+  .top-faq svg { display: block !important; }
+}
+@media (max-width: 420px) {
+  .top-bar-logo .brand-name .brand-word { font-size: 12.5px; letter-spacing: 0.01em; }
+  .top-faq { width: 32px; }
+  .top-bar-logo .brand-emblem { height: 26px; width: auto; }
+}
 
 /* FAQ page: tabs on top, then the content of the tab */
 .faq-page .faq-menu { margin-bottom: 24px; }

@@ -181,7 +181,7 @@ export function TopBar() {
         <span className="top-bar-logo"><Logo /></span>
         {/* FAQ in the top menu: for everyone, guests included (they have no sidebar) */}
         <Button asChild size="sm" variant="ghost" className="top-faq">
-          <Link to="/faq" activeProps={{ className: 'is-on' }}><CircleHelp />FAQ</Link>
+          <Link to="/faq" activeProps={{ className: 'is-on' }} aria-label="FAQ"><CircleHelp /><span className="top-faq-label">FAQ</span></Link>
         </Button>
         {guest && !loading && (
           // Guests: no sidebar — only the way in.
