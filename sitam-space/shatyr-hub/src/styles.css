@@ -2612,3 +2612,11 @@ html:not(.dark) .on-hero .top-faq:not(.is-on) { color: #0a1830; }
 .ev-next-slide { flex: 0 0 min(560px, 86%); scroll-snap-align: start; display: flex; }
 .ev-next-slide .ev-next-card { flex: 1; }
 .ev-next-carousel .ev-arrow { top: calc(50% - 23px); }
+
+/* Labs: Focus and Direction as two small menu buttons in one row */
+.menu-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.menu-trigger { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.menu-pop { width: 280px; }
+.period-pop-label.is-top { margin: 0 0 2px; padding: 0 4px; border: 0; }
+.menu-reset { height: 40px; padding: 0 10px; border: 0; background: none; color: var(--muted-foreground); font: 500 14px/1 var(--font-ui); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.menu-reset:hover { color: var(--navy); }

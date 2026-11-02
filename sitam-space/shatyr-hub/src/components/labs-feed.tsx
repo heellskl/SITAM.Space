@@ -5,8 +5,9 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { Link } from '@tanstack/react-router';
 import {
   ArrowUpRight, Bot, BookOpen, Boxes, BrainCircuit, ChartColumn, Eye, Globe, HeartPulse, MessagesSquare, Palette, ServerCog, ShieldCheck, Wallet,
-  CalendarPlus, FlaskConical, Pencil, Plus, UserCog } from 'lucide-react';
+  CalendarPlus, ChevronDown, FlaskConical, Pencil, Plus, UserCog } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { LabLogo } from '@/components/lab-browser';
 import { EventDialog } from '@/components/manage-panels';
 import { SearchBar } from '@/components/search-bar';
@@ -20,17 +21,26 @@ const ICONS: Record<LabIconKey, typeof FlaskConical> = {
   wallet: Wallet, heart: HeartPulse, book: BookOpen, boxes: Boxes, flask: FlaskConical, eye: Eye, chat: MessagesSquare,
 };
 
-/** One row of filter chips ("All" + options). */
-function ChipFilter<T extends string>({ label, options, value, onChange }: { label: string; options: readonly T[]; value: T | 'all'; onChange: (v: T | 'all') => void }) {
+/** One small filter button ("Focus ▾"); the choices open under it. The button shows the choice once one is made. */
+function MenuFilter<T extends string>({ label, options, value, onChange }: { label: string; options: readonly T[]; value: T | 'all'; onChange: (v: T | 'all') => void }) {
+  const [open, setOpen] = useState(false);
+  const pick = (o: T | 'all') => { onChange(o); setOpen(false); };
   return (
-    <div className="chip-filter" role="group" aria-label={label}>
-      <span className="chip-filter-label">{label}</span>
-      {(['all', ...options] as (T | 'all')[]).map((o) => (
-        <button key={o} type="button" className={value === o ? 'chip is-on' : 'chip'} aria-pressed={value === o} onClick={() => onChange(o)}>
-          {o === 'all' ? 'All' : o}
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button type="button" className={value === 'all' ? 'filter menu-trigger' : 'filter active menu-trigger'} aria-label={`${label}: ${value === 'all' ? 'All' : value}`}>
+          {value === 'all' ? label : value}<ChevronDown size={14} />
         </button>
-      ))}
-    </div>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="period-pop menu-pop">
+        <p className="period-pop-label is-top">{label}</p>
+        <div className="period-quick" role="group" aria-label={label}>
+          {(['all', ...options] as (T | 'all')[]).map((o) => (
+            <button key={o} type="button" className={value === o ? 'is-on' : ''} aria-pressed={value === o} onClick={() => pick(o)}>{o === 'all' ? 'All' : o}</button>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -90,10 +100,13 @@ export function LabsFeed({ kind = 'lab' }: { kind?: 'lab' | 'community' }) {
   return (
     <>
       <SearchBar value={q} onChange={setQ} placeholder={kind === 'community' ? 'Search communities, people, topics' : 'Search labs, people, topics'} />
-      <div className="lab-filters">
-        {kind === 'lab' && <ChipFilter label="Focus" options={LAB_FOCUS} value={focus} onChange={setFocus} />}
-        {kind === 'lab' && <ChipFilter label="Direction" options={LAB_DIRECTIONS} value={direction} onChange={setDirection} />}
-      </div>
+      {kind === 'lab' && (
+        <div className="lab-filters menu-filters">
+          <MenuFilter label="Focus" options={LAB_FOCUS} value={focus} onChange={setFocus} />
+          <MenuFilter label="Direction" options={LAB_DIRECTIONS} value={direction} onChange={setDirection} />
+          {(focus !== 'all' || direction !== 'all') && <button type="button" className="menu-reset" onClick={() => { setFocus('all'); setDirection('all'); }}>Reset</button>}
+        </div>
+      )}
 
       {error && <p className="form-alert">{humanError(error)}</p>}
 
