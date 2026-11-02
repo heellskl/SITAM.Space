@@ -2538,3 +2538,7 @@ html.dark .md-table th { background: #111a2e; }
 html.dark .on-hero .top-faq:not(.is-on) { color: #fff; }
 html:not(.dark) .on-hero .top-faq:not(.is-on) { color: #0a1830; }
 @media (max-width: 480px) { .top-faq svg { display: none; } .top-faq { padding-inline: 10px; } }
+
+/* FAQ page: tabs on top, then the content of the tab */
+.faq-page .faq-menu { margin-bottom: 24px; }
+.faq-page .faq-tab > h1 { font-family: var(--font-head); font-weight: 500; font-size: clamp(40px, 5.2vw, 68px); line-height: 1; letter-spacing: -0.01em; text-transform: none; margin: 0; }
