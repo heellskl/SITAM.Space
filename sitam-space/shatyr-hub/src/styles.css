@@ -2722,12 +2722,12 @@ button.kpi.is-link:hover { border-color: color-mix(in srgb, var(--foreground) 25
 .head-tools > [data-slot=button], .head-tools > a[data-slot=button], .head-tools > button { height: 40px; padding: 0 16px; font-size: 14px !important; font-weight: 600; border-radius: 10px; gap: 8px; }
 .head-tools > [data-slot=button] svg { width: 16px; height: 16px; }
 /* v24: clearer logo (darker, crisper emblem and name), warm orange tagline, darker sidebar text */
-.brand-mark2 .logo-day { filter: brightness(.72) contrast(1.25) saturate(1.3); }
-.brand-name > span.brand-word { color: #14213D; font-weight: 800; font-size: 16px; letter-spacing: 0.06em; }
-html.dark .brand-name > span.brand-word { color: #F4F7FC; }
+.brand-mark2 .logo-day { filter: brightness(.9) contrast(1.1); }
+.brand-name > span.brand-word { color: oklch(0.45 0.035 255); } /* same font as before, about 10% clearer */
+html.dark .brand-name > span.brand-word { color: var(--muted-foreground); filter: brightness(1.12); }
 .on-hero .top-bar .brand-name > span.brand-word { color: #fff; }
 html:not(.dark) .on-hero .top-bar .brand-name > span.brand-word { color: #0a1830; }
-.brand-name small.brand-tag { color: #D9701E; opacity: 1; font-weight: 700; }
+.brand-name small.brand-tag { color: #D9701E; opacity: 1; }
 html.dark .brand-name small.brand-tag { color: #F5A04E; }
 .on-hero .top-bar .brand-name small.brand-tag { color: #F5A04E; }
 .side-link { color: #334155; font-weight: 550; }
@@ -2736,4 +2736,3 @@ html.dark .brand-name small.brand-tag { color: #F5A04E; }
 .side-link.side-active, .side-link.side-active svg { color: #0F172A; }
 html.dark .side-link, html.dark .side-link svg { color: #D6E4F5; }
 html.dark .side-link:hover, html.dark .side-link.side-active, html.dark .side-link:hover svg, html.dark .side-link.side-active svg { color: #FFFFFF; }
-@media (max-width: 420px) { .top-bar-logo .brand-name > span.brand-word { font-size: 12.5px; letter-spacing: 0.01em; } }
