@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { ArrowUpRight, BookOpen, ExternalLink, GraduationCap, Quote, Search, Unlock, UserRound } from 'lucide-react';
+import { ArrowUpRight, BookOpen, ExternalLink, GraduationCap, Quote, Search, UserRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { SearchBar } from '@/components/search-bar';
 import { RequestResearcherCta } from '@/components/onboarding';
@@ -10,6 +10,7 @@ import { mineFirst, personKey, useMyLabs } from '@/lib/my-labs';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { humanError, useProfessors, useProjects, usePublications, type Professor, type Publication } from '@/lib/api';
 import { ProjectCard } from '@/components/projects-showcase';
+import { SubmitProjectButton } from '@/components/submit-project';
 
 
 const kindOf = (t: string | null) => (/article/i.test(t ?? '') ? 'article' : /conference/i.test(t ?? '') ? 'conference' : 'other');
@@ -68,20 +69,19 @@ export function ProfessorCard({ p }: { p: Professor }) {
   );
 }
 
-export const RESEARCH_TABS = ['overview', 'people', 'search', 'supervisor', 'community'] as const;
+export const RESEARCH_TABS = ['overview', 'people', 'search', 'community'] as const;
 export type ResearchTab = (typeof RESEARCH_TABS)[number];
 const PLACEHOLDER: Record<ResearchTab, string> = {
   overview: 'Search papers — the numbers and charts follow',
   people: 'Search researchers by name or by the papers they wrote',
   search: 'Search papers by keywords, title, venue or author',
-  supervisor: 'Search a supervisor by name or research topic',
   community: 'Search lab and student research',
 };
 
 /**
- * Research: one search bar, five tabs. The search works for the open tab — Researchers finds people
- * (by name, topics or the titles of their papers), Publications finds papers, Find a supervisor ranks
- * researchers by topic, the last tab finds projects, and Overview recounts the numbers for the matching papers.
+ * Research: one search bar, four tabs. The search works for the open tab — Researchers finds people
+ * (by name, topics or the titles of their papers), Publications finds papers (with a period of years),
+ * the last tab finds projects, and Overview recounts the numbers for the matching papers.
  */
 export function ResearchPublications({ query, tab, onQuery, onTab }: { query: string; tab: ResearchTab; onQuery: (v: string) => void; onTab: (t: ResearchTab) => void }) {
   const profs = useProfessors();
@@ -93,7 +93,9 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
     (projects.data ?? []).filter((p) => p.kind === 'research' && (!p.lab_id || my.isMineLab(p.lab_id))),
     (p) => my.isMineLab(p.lab_id),
   );
-  const [year, setYear] = useState('all');
+  // period of years for Publications: from … to … (empty = open end)
+  const [yearFrom, setYearFrom] = useState('');
+  const [yearTo, setYearTo] = useState('');
   const kind = 'all' as 'all' | 'article' | 'conference' | 'other';
 
   const all = pubs.data ?? [];
@@ -132,6 +134,22 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
     return [...m.values()].sort((a, b) => b.count - a.count || b.citations - a.citations).slice(0, 10);
   }, [all]);
 
+  const lo = yearFrom ? Number(yearFrom) : null;
+  const hi = yearTo ? Number(yearTo) : null;
+  const inPeriod = (y: number | null) => (lo === null && hi === null) || (!!y && (lo === null || y >= lo) && (hi === null || y <= hi));
+  const newest = years[0] ?? new Date().getFullYear();
+  const setPeriod = (from: number | null, to: number | null) => {
+    // keep "from" not later than "to"
+    const f = from !== null && to !== null && from > to ? to : from;
+    setYearFrom(f === null ? '' : String(f));
+    setYearTo(to === null ? '' : String(to));
+  };
+  const quick = [
+    { label: 'All time', from: null, to: null },
+    { label: 'Last 3 years', from: newest - 2, to: null },
+    { label: 'Last 5 years', from: newest - 4, to: null },
+  ] as const;
+
   const found = useMemo(() => {
     const list = all
       .map((p) => {
@@ -142,11 +160,11 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
         const score = terms.filter((t) => kw.includes(t)).length * 2 + terms.filter((t) => p.title.toLowerCase().includes(t)).length;
         return { p, ok, score };
       })
-      .filter(({ p, ok }) => ok && (year === 'all' || String(p.year) === year) && (kind === 'all' || kindOf(p.type) === kind))
+      .filter(({ p, ok }) => ok && inPeriod(p.year) && (kind === 'all' || kindOf(p.type) === kind))
       .sort((a, b) => b.score - a.score || (b.p.year ?? 0) - (a.p.year ?? 0))
       .map((x) => x.p);
     return mineFirst(list, (p) => p.publication_authors.some((a) => isMyPerson(a.professors?.full_name)));
-  }, [all, terms, year, kind, my]);
+  }, [all, terms, yearFrom, yearTo, kind, my]);
   const searchFor = (k: string) => { onQuery(k); onTab('search'); };
 
   // titles of each researcher's papers, so "Researchers" also finds a person by a paper they wrote
@@ -172,21 +190,6 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
       .map((x) => x.p);
   }, [people, terms, papersOf]);
 
-  const supervisors = useMemo(() => {
-    return people
-      .map((p) => {
-        // a supervisor is found by name too (name matches rank first), then by topics and the papers they wrote
-        const name = `${p.full_name} ${p.first_name} ${p.last_name}`.toLowerCase();
-        const hay = `${p.keywords.join(' ')} ${p.topics.map((t) => `${t.topic_name} ${t.field ?? ''}`).join(' ')} ${papersOf.get(p.full_name) ?? ''}`.toLowerCase();
-        return { p, score: terms.filter((t) => name.includes(t)).length * 3 + terms.filter((t) => hay.includes(t)).length };
-      })
-      .filter((x) => !terms.length || x.score > 0)
-      .sort((a, b) => b.score - a.score || b.p.h_index - a.p.h_index)
-      .map((x) => x.p);
-  }, [people, terms, papersOf]);
-  // keep "mine first" after the topic ranking too
-  const supervisorsOrdered = useMemo(() => mineFirst(supervisors, (p) => isMyPerson(p.full_name)), [supervisors, my]);
-
   const communityFound = useMemo(() => (!terms.length ? community : community.filter((p) => {
     const hay = `${p.title} ${p.summary ?? ''} ${p.tags.join(' ')} ${p.authors.join(' ')} ${p.labs?.name ?? ''}`.toLowerCase();
     return terms.every((t) => hay.includes(t));
@@ -195,7 +198,6 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
   const totals = {
     pubs: scope.length,
     cites: scope.reduce((s, p) => s + p.citations, 0),
-    oa: scope.filter((p) => p.is_open_access).length,
     profs: terms.length ? new Set(scope.flatMap((p) => p.publication_authors.map((a) => a.professors?.full_name).filter(Boolean))).size : people.length,
   };
 
@@ -206,11 +208,10 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
     <>
     <SearchBar value={query} onChange={onQuery} placeholder={PLACEHOLDER[tab]} />
     <Tabs value={tab} onValueChange={(v) => onTab(v as ResearchTab)}>
-      <TabsList className="manage-tabs">
+      <TabsList className="manage-tabs pill-tabs">
         <TabsTrigger value="overview">Overview</TabsTrigger>
         <TabsTrigger value="people">Researchers</TabsTrigger>
         <TabsTrigger value="search">Publications</TabsTrigger>
-        <TabsTrigger value="supervisor">Find a supervisor</TabsTrigger>
         <TabsTrigger value="community">{my.any ? 'Lab & student research' : 'Student research'}</TabsTrigger>
       </TabsList>
 
@@ -219,7 +220,6 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
           <div className="kpi"><BookOpen size={16} /><strong>{totals.pubs}</strong><span>Publications</span></div>
           <div className="kpi"><Quote size={16} /><strong>{totals.cites}</strong><span>Citations</span></div>
           <div className="kpi"><UserRound size={16} /><strong>{totals.profs}</strong><span>Researchers</span></div>
-          <div className="kpi"><Unlock size={16} /><strong>{totals.pubs ? Math.round((totals.oa / totals.pubs) * 100) : 0}%</strong><span>Open access</span></div>
         </div>
         <div className="chart-grid two">
           <section className="panel">
@@ -261,12 +261,31 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
       </TabsContent>
 
       <TabsContent value="search">
-        <div className="lab-controls">
+        {/* period: quick choices, or any range "from … to …" */}
+        <div className="period-bar" role="group" aria-label="Publication period">
           <div className="filter-list">
-            <select className="filter-select" value={year} onChange={(e) => setYear(e.target.value)} aria-label="Year">
-              <option value="all">All years</option>
-              {years.map((y) => <option key={y} value={y}>{y}</option>)}
-            </select>
+            {quick.map((q) => {
+              const on = (q.from === null ? !yearFrom : yearFrom === String(q.from)) && !yearTo;
+              return <button key={q.label} type="button" className={on ? 'filter active' : 'filter'} aria-pressed={on} onClick={() => setPeriod(q.from, q.to)}>{q.label}</button>;
+            })}
+          </div>
+          <div className="period-range">
+            <label className={yearFrom ? 'ev-select is-set' : 'ev-select'}>
+              <span>From</span>
+              <select value={yearFrom} onChange={(e) => setPeriod(e.target.value ? Number(e.target.value) : null, yearTo ? Number(yearTo) : null)} aria-label="From year">
+                <option value="">Any</option>
+                {[...years].reverse().map((y) => <option key={y} value={y}>{y}</option>)}
+              </select>
+            </label>
+            <span className="period-dash" aria-hidden>–</span>
+            <label className={yearTo ? 'ev-select is-set' : 'ev-select'}>
+              <span>To</span>
+              <select value={yearTo} onChange={(e) => setPeriod(yearFrom ? Number(yearFrom) : null, e.target.value ? Number(e.target.value) : null)} aria-label="To year">
+                <option value="">Any</option>
+                {years.map((y) => <option key={y} value={y}>{y}</option>)}
+              </select>
+            </label>
+            <span className="small-note period-count">{found.length} {found.length === 1 ? 'paper' : 'papers'}</span>
           </div>
         </div>
         <ul className="pub-list">{found.map((p) => <PublicationRow key={p.id} p={p} terms={terms} onKeyword={searchFor} />)}</ul>
@@ -274,14 +293,11 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
       </TabsContent>
 
       <TabsContent value="community">
+        <div className="tab-actions"><SubmitProjectButton kind="research" label="Submit your research" /></div>
         <div className="project-grid">{communityFound.map((p) => <ProjectCard key={p.id} p={p} />)}</div>
-        {!projects.isLoading && communityFound.length === 0 && <p className="small-note">{terms.length ? 'Nothing found.' : 'Nothing yet — use “Submit your research” above.'}</p>}
+        {!projects.isLoading && communityFound.length === 0 && <p className="small-note">{terms.length ? 'Nothing found.' : 'Nothing yet — use “Submit your research”.'}</p>}
       </TabsContent>
 
-      <TabsContent value="supervisor">
-        <div className="prof-grid">{supervisorsOrdered.map((p) => <ProfessorCard key={p.id} p={p} />)}</div>
-        {supervisors.length === 0 && <p className="small-note">Nobody found.</p>}
-      </TabsContent>
     </Tabs>
     </>
   );

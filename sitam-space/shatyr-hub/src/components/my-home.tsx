@@ -153,7 +153,6 @@ export function MyHome() {
             <div><dt>{isSduEmail(profile.email) ? 'SDU mail' : 'E-mail'}</dt><dd>{profile.email}</dd></div>
             <div><dt>{speciality.label}</dt><dd>{speciality.value || '—'}</dd></div>
             <div><dt>Joined</dt><dd>{joined}</dd></div>
-            <div><dt>Labs &amp; clubs</dt><dd>{caps.labMemberships.length} enrollments <span className="idcard-dot" aria-hidden>·</span> {caps.savedLabs.length} subscriptions</dd></div>
           </dl>
         </div>
         <Button asChild variant="outline" size="sm" className="idcard-edit"><Link to="/profile" search={{ settings: true }}><Pencil />Edit details</Link></Button>
@@ -216,7 +215,7 @@ export function MyHome() {
             ) : caps.isTeacher ? (
               <Empty>Your researcher card is not linked yet. <Link to="/research" search={{ tab: 'people' }}>Find yourself in Research</Link> and request your profile.</Empty>
             ) : (
-              <Empty>No research profile. Join a lab or <Link to="/research" search={{ tab: 'supervisor' }}>find a supervisor</Link> to start.</Empty>
+              <Empty>No research profile. Join a lab or browse <Link to="/research" search={{ tab: 'people' }}>researchers</Link> to start.</Empty>
             )}
           </section>
 
