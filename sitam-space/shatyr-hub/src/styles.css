@@ -2386,3 +2386,4 @@ html.dark .md-table th { background: #111a2e; }
 .pubs-stale { margin-top: 10px; }
 .pubs-stale summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 .pubs-form .editor-actions { position: static; background: none; padding: 4px 0 0; margin-top: 4px; }
+.mini-empty { padding: 22px 24px; }
