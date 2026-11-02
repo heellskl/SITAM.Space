@@ -482,3 +482,33 @@ do $$ declare n int; begin
 end $$;
 select 'signed-in users see the history: ' || case when (select experience->0->>'company' from public_people where id = '00000000-0000-0000-0000-00000000c005') = 'Kaspi.kz' then 'PASS' else 'FAIL' end;
 select pg_temp.as_super();
+
+\echo '── v23: Startup Hub (moderated) and no made-up events'
+select 'made-up [sample] events are removed: ' || case when not exists (select 1 from events where description like '%[sample]%') then 'PASS' else 'FAIL' end;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c003');
+select set_config('sitam.startup', (public.submit_startup('CampusEats', 'Order food from SDU cafes ahead of the break and skip the queue.', 'https://campuseats.kz', 'mvp', array['React', 'Supabase'])).id::text, false);
+select 'a student proposes a startup (waits for review): ' || case when (select moderation = 'pending' and kind::text = 'startup' and stage = 'mvp' from projects where id = current_setting('sitam.startup')::uuid) then 'PASS' else 'FAIL' end;
+do $$ begin
+  perform public.submit_startup('Bad', 'This one has a stage that does not exist.', null, 'unicorn', null);
+  raise notice 'FAIL a startup with an unknown stage was saved';
+exception when others then raise notice 'PASS the stage is checked (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c006');
+do $$ begin
+  perform public.submit_startup('Partner idea', 'Partners should not submit student startups here.', null, 'idea', null);
+  raise notice 'FAIL a partner proposed a student startup';
+exception when others then raise notice 'PASS only SDU accounts propose startups (%)', sqlerrm; end $$;
+set role anon;
+select 'guests do not see a startup before review: ' || case when not exists (select 1 from projects where id = current_setting('sitam.startup')::uuid) then 'PASS' else 'FAIL' end;
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c003');
+do $$ begin
+  perform public.moderate_project(current_setting('sitam.startup')::uuid, 'approved', null);
+  raise notice 'FAIL the author approved their own startup';
+exception when others then raise notice 'PASS only the coordinator approves (%)', sqlerrm; end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c001');
+select (public.moderate_project(current_setting('sitam.startup')::uuid, 'approved', null)).moderation;
+reset role;
+set role anon;
+select 'after approval everybody sees the startup: ' || case when exists (select 1 from projects where id = current_setting('sitam.startup')::uuid) then 'PASS' else 'FAIL' end;
+reset role;
+select pg_temp.as_super();

@@ -134,6 +134,8 @@ export type Project = {
   related_lab_id?: string | null;
   supervisor_id?: string | null;
   professors?: { full_name: string; username: string } | null;
+  /** v23: startup stage (kind = 'startup') */
+  stage?: StartupStage | null;
 };
 
 export type OpportunityCategory = 'industrial' | 'lab' | 'research';
@@ -1375,7 +1377,7 @@ export const STATUS_LABEL: Record<ApplicationStatus, string> = {
 export const STATUS_TONE: Record<ApplicationStatus, 'live' | 'wip' | 'done'> = {
   submitted: 'wip', in_review: 'wip', shortlisted: 'live', accepted: 'live', rejected: 'done', withdrawn: 'done',
 };
-export const KIND_LABEL: Record<ProjectKind, string> = { research: 'Research', startup: 'Project', project: 'Project' };
+export const KIND_LABEL: Record<ProjectKind, string> = { research: 'Research', startup: 'Startup', project: 'Project' };
 export const MODERATION_LABEL: Record<Moderation, string> = { pending: 'Under review', approved: 'Published', rejected: 'Not approved' };
 
 /** Group headings on the lab page (plural). For one person use LAB_POSITION_LABEL. */
@@ -1608,5 +1610,25 @@ export function useSaveExperience() {
       if (error) fail(error);
     },
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['experience'] }),
+  });
+}
+
+/* ───────────── v23: Startup Hub ───────────── */
+export type StartupStage = 'idea' | 'prototype' | 'mvp';
+export const STARTUP_STAGE_LABEL: Record<StartupStage, string> = { idea: 'Idea', prototype: 'Prototype', mvp: 'MVP' };
+/** Propose a student startup: goes to SITAM moderation (the coordinator publishes it). */
+export function useSubmitStartup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (d: { title: string; summary: string; demo_url: string; stage: StartupStage; tags: string[] }) => {
+      const { data, error } = await db.rpc('submit_startup', { p_title: d.title, p_summary: d.summary, p_demo_url: d.demo_url, p_stage: d.stage, p_tags: d.tags });
+      if (error) fail(error);
+      return data as Project;
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.mySubmissions });
+      void qc.invalidateQueries({ queryKey: qk.projects });
+      void qc.invalidateQueries({ queryKey: qk.moderation });
+    },
   });
 }

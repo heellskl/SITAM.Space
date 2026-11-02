@@ -2,7 +2,7 @@ import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
 import { gmailCompose } from '@/lib/utils';
 import { useEffect, useState } from 'react';
 import {
-  BookOpen, Briefcase, CalendarDays, ChevronsLeft, ChevronsRight, CircleHelp, FlaskConical, House, LayoutDashboard,
+  BookOpen, Briefcase, Rocket, CalendarDays, ChevronsLeft, ChevronsRight, CircleHelp, FlaskConical, House, LayoutDashboard,
   ChevronsUpDown, LogIn, LogOut, Mail, Menu, Settings, ShieldCheck, UserPlus, UserRound,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
@@ -17,6 +17,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 export const navigation = [
   { to: '/home', label: 'Home', icon: House, hint: 'Your research, labs, events and industry experience' },
   { to: '/labs', label: 'Labs', icon: FlaskConical, hint: 'Laboratories, student communities and projects' },
+  { to: '/startups', label: 'Startups', icon: Rocket, hint: 'Student startups: ideas, prototypes and MVPs' },
   { to: '/events', label: 'Events', icon: CalendarDays, hint: 'Industry and research events, competitions and hackathons' },
   { to: '/opportunities', label: 'Industry', icon: Briefcase, hint: 'Vacancies, internships, lab cases and partner companies' },
   { to: '/research', label: 'Research', icon: BookOpen, hint: 'Publications and researchers of SITAM (Scopus)' },

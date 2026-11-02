@@ -154,3 +154,11 @@ do $$ begin
   end if;
 end $$;
 revoke insert, update, delete on public.company_members from anon, authenticated;
+
+-- v23: Startup Hub
+do $$ begin
+  if to_regprocedure('public.submit_startup(text, text, text, text, text[])') is not null then
+    revoke execute on function public.submit_startup(text, text, text, text, text[]) from anon, public;
+    grant execute on function public.submit_startup(text, text, text, text, text[]) to authenticated;
+  end if;
+end $$;

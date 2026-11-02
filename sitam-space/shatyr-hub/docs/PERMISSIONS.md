@@ -40,7 +40,7 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 | 13a | Appoint / remove a Co-Head (`co_lead`) in the lab (v17, approved by the user 2026-10-31) | ❌ | ❌ | ❌ | ❌ | ❌ | 🔒 only the Head (`lead`) of that lab, not themselves | ✅ | `add_lab_member`, `lab_members_guard`, `is_lab_lead` |
 | 14 | Add / remove members, change a member's position (non-head positions only) | ❌ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | `add_lab_member` (registered users only), RLS + `lab_members_guard` |
 | 15 | Create / edit / delete lab projects | ❌ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | RLS `projects` (`is_lab_manager(lab_id)`), column grants |
-| 16 | Submit own (non-lab) project / research | ❌ | ❌ (closed) | ❌ | ❌ | ❌ | ❌ | ❌ | `submit_project` raises NOT_ALLOWED |
+| 16 | Submit own (non-lab) project / research / startup — goes to moderation, published after the coordinator approves | ❌ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ (published at once) | `submit_project`, `submit_startup` (pending), `moderate_project` (admin only); alumni ❌ (row 31) |
 | 17 | Create / edit an event | ❌ | ❌ | ❌ | ❌ | ❌ | 🔒 hosted by own lab | ✅ | `save_event`, `can_manage_event` |
 | 18 | See attendees, check-in by QR | ❌ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | `event_attendees`, `check_in` (`can_manage_event`) |
 | 19 | Post a Lab / Research case for a lab | ❌ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | `save_opportunity` (`is_lab_manager` per lab host) |
@@ -105,3 +105,8 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 | 41 | Approve a request to join an existing company | coordinator; owner of that company | `company_join_requests`, `decide_company_member` |
 | 42 | Sign in with the personal e-mail from Profile → Settings and the same password | the account owner (one account per personal e-mail) | `sign_in_email`, `profiles_personal_email_guard` |
 
+## v23 additions (approved by the user on 2026-11-02)
+
+| # | Action | Who | Where enforced |
+|---|---|---|---|
+| 43 | Propose a startup in the Startup Hub (name, idea & solution, link, stage, technologies); visible to everyone only after the coordinator approves | SDU accounts (students, teachers); not partners, not alumni | `submit_startup` → `moderation = 'pending'`; `moderate_project`; RLS "Approved projects are public" |
