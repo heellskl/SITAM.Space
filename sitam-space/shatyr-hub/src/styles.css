@@ -2530,3 +2530,11 @@ html.dark .md-table th { background: #111a2e; }
   .ask-archive { position: static; max-height: none; }
   .ask-page-chat { min-height: 480px; }
 }
+
+/* ---------- v22: FAQ in the top menu ---------- */
+.top-faq { margin-left: auto; border-radius: 999px; }
+.top-faq.is-on { background: var(--btn-bg); color: var(--btn-fg); }
+.top-faq ~ .guest-actions, .top-faq ~ .top-bar-theme { margin-left: 0 !important; }
+html.dark .on-hero .top-faq:not(.is-on) { color: #fff; }
+html:not(.dark) .on-hero .top-faq:not(.is-on) { color: #0a1830; }
+@media (max-width: 480px) { .top-faq svg { display: none; } .top-faq { padding-inline: 10px; } }

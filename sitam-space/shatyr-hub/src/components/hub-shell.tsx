@@ -179,6 +179,10 @@ export function TopBar() {
       <div className="top-bar-inner">
         {!guest && <Button variant="ghost" size="icon" className="mobile-menu-button" aria-label="Open menu" aria-expanded={menu} onClick={() => setMenu(true)}><Menu /></Button>}
         <span className="top-bar-logo"><Logo /></span>
+        {/* FAQ in the top menu: for everyone, guests included (they have no sidebar) */}
+        <Button asChild size="sm" variant="ghost" className="top-faq">
+          <Link to="/faq" activeProps={{ className: 'is-on' }}><CircleHelp />FAQ</Link>
+        </Button>
         {guest && !loading && (
           // Guests: no sidebar — only the way in.
           <nav className="guest-actions" aria-label="Account">
