@@ -11,13 +11,13 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 | Actor | How it is defined |
 |---|---|
 | Guest | not signed in |
-| Student | `profiles.role = 'student'` (SDU e-mail starting with digits). Legacy `phd` accounts behave like students. |
-| Teacher | `profiles.role = 'teacher'` (SDU e-mail starting with a name). **Verified teacher** = `staff_verified = true` (`is_staff()`). |
-| Partner | `profiles.role = 'partner'`, member of a company. **Verified partner** = the company has `verified = true`. |
+| Student | `profiles.role = 'student'` (chosen at registration, SDU e-mail required). Legacy `phd` accounts behave like students. |
+| Teacher | `profiles.role = 'teacher'` (chosen at registration, SDU e-mail required). **Verified teacher** = `staff_verified = true` (`is_staff()`). |
+| Partner | `profiles.role = 'partner'`, **active** member of a company (`company_members.status = 'active'`). **Verified partner** = the company has `verified = true`. Joining an existing company by name is a pending request until the coordinator or a company owner approves it (v20). |
 | Lab member | has a `lab_members` row in a lab with a non-head position (member, mentor, project_coordinator, research_assistant, student_researcher, and legacy student_lead / deputy_student_lead). |
-| Lab head | `lab_members.role` in (`lead`, `co_lead`) for **that** lab → `can_edit = true` → `is_lab_manager(lab)`. A student or a teacher. Extra to the base role, never replaces it. |
+| Lab head | `lab_members.role` in (`lead`, `co_lead`) for **that** lab → `can_edit = true` → `is_lab_manager(lab)`. A student or a teacher. Extra to the base role, never replaces it. A seat listed with the person's e-mail is linked only after the coordinator confirms the account (`account_claims`, v20). |
 | Alumni | `profiles.role = 'alumni'` (v17): any e-mail; faculty, graduation year, job title, company. |
-| Coordinator | e-mail in `coordinator_emails` → `is_coordinator()`; `is_admin()` is true for them. |
+| Coordinator | row in `coordinator_emails` **bound to the account** (`user_id`, v20) → `is_coordinator()`; `is_admin()` is true for them. An e-mail on the list alone gives nothing. |
 
 ## Matrix
 
@@ -25,8 +25,9 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 |---|---|---|---|---|---|---|---|---|---|
 | 1 | View labs, projects, events, opportunities, research | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | public RLS select |
 | 2 | See people's contacts (name, role, e-mail), `/people/$id` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | view `public_people` (authenticated only) |
-| 3 | Sign in | Google SDU | Google SDU | Google SDU | e-mail + password | — | — | Google SDU | `enforce_signup_email`, `handle_new_user` |
-| 4 | Choose own account type | ❌ | ❌ (from e-mail) | ❌ (from e-mail) | ❌ | — | — | ❌ | `account_type_from_email` |
+| 3 | Register | — | SDU e-mail + password | SDU e-mail + password | any e-mail + password | — | — | SDU e-mail + password | `enforce_signup_email`, `handle_new_user` |
+| 3a | Sign in | — | SDU or personal e-mail + password | SDU or personal e-mail + password | e-mail + password | — | — | SDU or personal e-mail + password | `sign_in_email` (personal e-mail → sign-in e-mail, only with the right password; one account per personal e-mail) |
+| 4 | Choose own account type | — | at registration (SDU e-mail required) | at registration (SDU e-mail required) | at registration | — | — | — | `handle_new_user` (falls back to `account_type_from_email`) |
 | 5 | Edit own profile (name, photo, faculty, group, major) + CV | — | ✅ | ✅ | ✅ (no CV) | — | — | ✅ | column grants on `profiles`, storage `cvs`/`avatars` own folder |
 | 6 | Apply to an opportunity (with CV) | ❌ (login modal) | ✅ | ❌ | ❌ | ✅ (as student) | ❌ on own lab's listings | ❌ | `submit_application` (role student/phd, not own listing) |
 | 7 | Withdraw own application | — | 🔒 | — | — | — | — | — | `withdraw_application` |
@@ -61,6 +62,7 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 5. Clients never write `lab_members.user_id`, `lab_members.can_edit`, `lab_members.lab_id`, nor insert directly into `applications`, `events`, `event_hosts`, `opportunity_hosts`, `opportunities`, `event_registrations`.
 6. CVs: visible only to the owner and to reviewers of the exact application. Phones are never public.
 7. Whatever a lab creates (event, project, case) appears in every matching section automatically (Events / Projects / Opportunities + the lab page).
+8. Registration does not prove an e-mail (accounts are confirmed at once). No right may come from a typed e-mail alone: lab seats, researcher pages and coordinator rows are bound to an account by the coordinator / project owner; company membership by the coordinator or a company owner.
 
 ## Open questions (ask the user before relying on them)
 
@@ -93,3 +95,13 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 | # | Action | Who | Where enforced |
 |---|---|---|---|
 | 38 | Edit own work / internship history (`profiles.experience`); others see it when signed in (as row 2) | the person themselves | column grant + RLS "Update own profile", check `valid_experience`; view `public_people` |
+
+## v20 additions — account safety (asked for by the user on 2026-10-30)
+
+| # | Action | Who | Where enforced |
+|---|---|---|---|
+| 39 | Confirm that a new account owns an e-mail listed in a lab team (sign-up or personal e-mail) | coordinator | `account_claims_inbox`, `decide_account_claim` |
+| 40 | A sign-up or personal e-mail that matches a researcher card creates a "This is me" request (row 33 approves it); nothing is linked automatically | automatic | `create_account_claims`, `researcher_profile_requests` |
+| 41 | Approve a request to join an existing company | coordinator; owner of that company | `company_join_requests`, `decide_company_member` |
+| 42 | Sign in with the personal e-mail from Profile → Settings and the same password | the account owner (one account per personal e-mail) | `sign_in_email`, `profiles_personal_email_guard` |
+

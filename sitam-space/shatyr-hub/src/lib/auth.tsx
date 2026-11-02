@@ -86,11 +86,16 @@ export type Capabilities = {
   pendingLabHeads: number;
   /** The user's own Lab Head requests that are pending or were declined. */
   labHeadRequests: LabHeadRequest[];
+  /** v20: labs that list this e-mail and wait for the coordinator's confirmation. */
+  pendingClaims: string[];
+  /** v20: existing companies this partner asked to join (waiting for the coordinator or a company owner). */
+  pendingCompanies: string[];
 };
 
 const NO_CAPS: Capabilities = {
   isStudent: false, isPhd: false, canApply: false, isTeacher: false, isStaff: false, isAdmin: false, isCoordinator: false, isPartner: false, isAlumni: false,
   managedLabs: [], labMemberships: [], companies: [], savedLabs: [], professorUsername: null, canReview: false, pendingModeration: 0, pendingLabHeads: 0, labHeadRequests: [],
+  pendingClaims: [], pendingCompanies: [],
 };
 
 type DbProfile = {
@@ -105,6 +110,7 @@ type DbContext = {
   lab_memberships?: { id: string; slug: string; name: string; role: string; title: string | null; can_edit: boolean; is_head: boolean }[];
   saved_labs: string[]; professor: { username: string; full_name: string } | null; pending_moderation?: number;
   pending_lab_heads?: number; lab_head_requests?: LabHeadRequest[];
+  pending_claims?: string[]; pending_companies?: string[];
 };
 
 function toProfile(p: DbProfile): Profile {
@@ -258,6 +264,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       pendingModeration: Number(ctx.pending_moderation ?? 0),
       pendingLabHeads: Number(ctx.pending_lab_heads ?? 0),
       labHeadRequests: ctx.lab_head_requests ?? [],
+      pendingClaims: ctx.pending_claims ?? [],
+      pendingCompanies: ctx.pending_companies ?? [],
     });
     setCtxLoading(false);
   }, []);

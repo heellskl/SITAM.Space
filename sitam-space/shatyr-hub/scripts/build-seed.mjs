@@ -183,9 +183,14 @@ on conflict (username) do update set first_name = excluded.first_name, last_name
   orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
   i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
   keywords = excluded.keywords, topics = excluded.topics, updated_at = now();`);
+  if ((p.other_emails ?? []).length) {
+    // v20: older e-mails (e.g. on papers from a previous university) — a personal e-mail matching one creates a claim
+    out.push(`update public.professors set alt_emails = ${arr(p.other_emails.map((e) => String(e).toLowerCase()))} where username = ${q(username)};`);
+  }
   const P = `(select id from public.professors where username = ${q(username)})`;
   for (const pub of p.publications ?? []) {
-    const key = pub.scopus_eid ? `scopus_eid = ${q(pub.scopus_eid)}` : `lower(doi) = lower(${q(pub.doi)})`;
+    // match an existing paper by Scopus EID, else DOI, else title (papers found outside Scopus may have neither)
+    const key = pub.scopus_eid ? `scopus_eid = ${q(pub.scopus_eid)}` : pub.doi ? `lower(doi) = lower(${q(pub.doi)})` : `lower(title) = lower(${q(pub.title)})`;
     out.push(`insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
 select ${q(pub.title)}, ${Number.isInteger(pub.publication_year) ? pub.publication_year : 'null'}, ${q(pub.type)}, ${q(pub.doi)}, ${q(pub.journal_venue)},
   ${q(pub.publisher)}, ${pub.citations_count ?? 0}, ${pub.is_open_access ? 'true' : 'false'}, ${q(url(pub.pdf_url) ?? url(pub.doi))}, ${q(pub.scopus_eid)}, ${arr(pub.keywords)}

@@ -7,9 +7,9 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import {
   CATEGORY_LABEL, INDUSTRIAL_LABEL, KIND_LABEL, MODERATION_LABEL, STATUS_LABEL, STATUS_TONE, formatDate, hostNames, humanError, opportunityLabel, signedUrl,
-  useAdminAction, useBriefs, useCompanies, useDeleteOpportunity, useInbox, useManagedOpportunities, useModerate, useModerationQueue, useOpportunities, usePendingTeachers, useProjects,
+  useAccountClaims, useAdminAction, useBriefs, useCompanies, useCompanyRequests, useDecideClaim, useDecideCompanyMember, useDeleteOpportunity, useInbox, useManagedOpportunities, useModerate, useModerationQueue, useOpportunities, usePendingTeachers, useProjects,
   uploadLabImage, useLabs, useReviewApplication, useSaveEvent, useSaveOpportunity, useSetPoster, useUpdateBrief,
-  type ApplicationStatus, type InboxItem, type IndustrialType, type ModerationItem, type Opportunity, type OpportunityCategory, type PartnerRequest,
+  type ApplicationStatus, type CompanyJoinRequest, type InboxItem, type IndustrialType, type ModerationItem, type Opportunity, type OpportunityCategory, type PartnerRequest,
 } from '@/lib/api';
 import { ROLE_LABEL, useAuth, type Role } from '@/lib/auth';
 import { TagInput } from '@/components/tag-input';
@@ -440,7 +440,7 @@ export function EventDialog({ preset, onClose }: { preset?: HostSel; onClose: ()
       <DialogContent className="hub-dialog wide">
         <span className="eyebrow">Event</span>
         <DialogTitle>New event</DialogTitle>
-        <DialogDescription>Research: Tuesdays 17:00 · Industry: Thursdays 17:00 · Room C1.2. It appears on the Events page right away.</DialogDescription>
+        <DialogDescription>It appears on the Events page right away.</DialogDescription>
         <EventForm {...(preset ? { preset } : {})} onDone={onClose} />
       </DialogContent>
     </Dialog>
@@ -454,7 +454,7 @@ export function EventsPanel() {
   return (
     <section className="panel">
       <h3 className="panel-title"><CalendarPlus size={15} />Publish an event</h3>
-      <p className="small-note mb-3">Research: Tuesdays 17:00. Industry: Thursdays 17:00. Room C1.2. A lab can co-host with a company or one of its projects.</p>
+      <p className="small-note mb-3">A lab can co-host with a company or one of its projects.</p>
       <EventForm />
     </section>
   );
@@ -498,6 +498,75 @@ export function BriefsPanel({ staff }: { staff: boolean }) {
 
 /* ═════════════════════ Admin ═════════════════════ */
 
+/** v20: accounts whose sign-up or personal e-mail is listed in a lab team. Registration does not prove the
+ *  e-mail, so the coordinator confirms the person before the place (and any head rights) is linked. */
+export function AccountClaimsPanel() {
+  const { caps } = useAuth();
+  const claims = useAccountClaims(caps.isCoordinator);
+  const decide = useDecideClaim();
+  if (!caps.isCoordinator) return null;
+  const run = (id: string, approve: boolean, label: string) =>
+    decide.mutate({ id, approve }, { onSuccess: () => toast.success(label), onError: (e) => toast.error(humanError(e)) });
+  const list = claims.data ?? [];
+  return (
+    <section className="panel">
+      <h3 className="panel-title"><ShieldCheck size={15} />Accounts to confirm · {list.length}</h3>
+      <p className="small-note mb-3">These people registered (or added a personal e-mail) with an e-mail that is listed in a lab team. Researcher cards come as researcher profile requests. E-mails are not proven, so confirm only if you know the account is really theirs: a lab head gets the rights of that lab.</p>
+      {list.length === 0 ? <p className="small-note">Nothing to confirm.</p> : (
+        <ul className="rows">
+          {list.map((c) => (
+            <li key={c.id}>
+              <div>
+                <strong>{c.first_name} {c.last_name}</strong>
+                <small>{c.email}{c.matched_email && c.matched_email !== c.email.toLowerCase() ? ` · matched by personal e-mail ${c.matched_email}` : ''} · {formatDate(c.created_at)} → {c.target ?? '—'} ({c.target_detail ?? ''})</small>
+              </div>
+              <span className="inline-form">
+                <Button size="sm" disabled={decide.isPending} onClick={() => run(c.id, true, 'Account linked')}>Confirm</Button>
+                <Button size="sm" variant="ghost" disabled={decide.isPending} onClick={() => run(c.id, false, 'Request rejected')}>Reject</Button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** v20: partners who typed the name of an existing company. The coordinator sees all; a company owner sees their own. */
+export function CompanyRequestsPanel({ hideWhenEmpty = false }: { hideWhenEmpty?: boolean }) {
+  const requests = useCompanyRequests(true);
+  const decide = useDecideCompanyMember();
+  const list = requests.data ?? [];
+  if (hideWhenEmpty && list.length === 0) return null;
+  const run = (r: CompanyJoinRequest, approve: boolean) =>
+    decide.mutate(
+      { companyId: r.company_id, userId: r.user_id, approve },
+      { onSuccess: () => toast.success(approve ? `${r.first_name} joined ${r.company_name}` : 'Request rejected'), onError: (e) => toast.error(humanError(e)) },
+    );
+  return (
+    <section className="panel">
+      <h3 className="panel-title"><Building2 size={15} />Requests to join a company · {list.length}</h3>
+      <p className="small-note mb-3">Approve only people who really work there: a member of a verified company sees its applicants and their CVs.</p>
+      {list.length === 0 ? <p className="small-note">No requests.</p> : (
+        <ul className="rows">
+          {list.map((r) => (
+            <li key={`${r.company_id}:${r.user_id}`}>
+              <div>
+                <strong>{r.first_name} {r.last_name} → {r.company_name}{r.company_verified ? ' ✓' : ''}</strong>
+                <small>{r.email} · {formatDate(r.created_at)}</small>
+              </div>
+              <span className="inline-form">
+                <Button size="sm" disabled={decide.isPending} onClick={() => run(r, true)}>Approve</Button>
+                <Button size="sm" variant="ghost" disabled={decide.isPending} onClick={() => run(r, false)}>Reject</Button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 export function AdminPanel() {
   const teachers = usePendingTeachers(true);
   const companies = useCompanies(true);
@@ -507,6 +576,8 @@ export function AdminPanel() {
 
   return (
     <div className="profile-grid">
+      <AccountClaimsPanel />
+      <CompanyRequestsPanel />
       <section className="panel">
         <h3 className="panel-title"><ShieldCheck size={15} />Teacher accounts to verify</h3>
         {(teachers.data ?? []).length === 0 ? <p className="small-note">No pending accounts.</p> : (

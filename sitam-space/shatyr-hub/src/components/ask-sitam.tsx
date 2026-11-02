@@ -130,7 +130,11 @@ export function AskSitam() {
   async function ask(text: string, sc: Scope = scope) {
     const question = text.trim();
     if (question.length < 3 || busy) return;
-    const history = msgs.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content })).slice(-6);
+    // only answered questions: a question whose answer failed is left out together with the error
+    const history = msgs
+      .filter((m, i) => !m.error && !(m.role === 'user' && msgs[i + 1]?.error))
+      .map((m) => ({ role: m.role, content: m.content }))
+      .slice(-6);
     setMsgs((m) => [...m, { role: 'user', content: question }]);
     setQ('');
     setBusy(true);

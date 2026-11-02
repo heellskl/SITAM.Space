@@ -136,3 +136,21 @@ grant execute on function public.import_publications(uuid, jsonb) to authenticat
 grant update (experience) on public.profiles to authenticated;
 revoke all on public.public_people from anon, public;
 grant select on public.public_people to authenticated;
+-- v20: account safety (guarded: this file may run before v20 exists)
+do $$ begin
+  if to_regprocedure('public.ai_refund_quota(uuid)') is not null then
+    revoke execute on function public.ai_refund_quota(uuid) from anon, authenticated, public;
+    grant execute on function public.ai_refund_quota(uuid) to service_role;
+  end if;
+  if to_regclass('public.account_claims') is not null then
+    revoke insert, update, delete on public.account_claims from anon, authenticated;
+  end if;
+  if to_regprocedure('public.decide_account_claim(uuid, boolean)') is not null then
+    revoke execute on function public.account_claims_inbox(), public.decide_account_claim(uuid, boolean),
+      public.company_join_requests(), public.decide_company_member(uuid, uuid, boolean) from anon, public;
+  end if;
+  if to_regprocedure('public.create_account_claims(uuid, text)') is not null then
+    revoke execute on function public.create_account_claims(uuid, text) from anon, authenticated, public;
+  end if;
+end $$;
+revoke insert, update, delete on public.company_members from anon, authenticated;

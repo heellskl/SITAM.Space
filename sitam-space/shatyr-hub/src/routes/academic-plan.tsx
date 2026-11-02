@@ -4,7 +4,7 @@ import { CalendarRange, Download, ExternalLink, FileUp, Pencil, Plus, Printer, S
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
-import { humanError, useEvents, useExternalEvents, useLabs } from '@/lib/api';
+import { humanError, sitamDay, useEvents, useExternalEvents, useLabs } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { pageHead } from '@/lib/hub-data';
 import {
@@ -41,7 +41,7 @@ function AcademicPlanPage() {
 
   const plan = plans.data?.plans.find((p) => p.is_current) ?? plans.data?.plans[0] ?? null;
   const labOf = useMemo(() => new Map((labs.data ?? []).map((l) => [l.id, l])), [labs.data]);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = sitamDay();
 
   const entries = useMemo<Entry[]>(() => {
     if (!plan) return [];

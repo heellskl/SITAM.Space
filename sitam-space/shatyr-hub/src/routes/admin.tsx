@@ -13,6 +13,7 @@ import { TagManager } from '@/components/tag-manager';
 import { ResearcherRequestsAdmin } from '@/components/onboarding';
 import { ScopusBulkImport } from '@/components/publications-editor';
 import { AiIndexPanel } from '@/components/ai-index-panel';
+import { AccountClaimsPanel, CompanyRequestsPanel } from '@/components/manage-panels';
 import { HEAD_ROLES, humanError, useAdminLabActions, useLabs, useSetLabKind, type Lab } from '@/lib/api';
 
 const COMMUNITY = '__community__';
@@ -69,6 +70,11 @@ function Admin() {
     <main className="container content-page">
       <h1><ShieldCheck className="inline" size={34} /> Admin</h1>
 
+      <div className="profile-grid mt-6">
+        <AccountClaimsPanel />
+        <CompanyRequestsPanel />
+      </div>
+
       <section className="panel mt-6">
         <h3 className="panel-title"><Plus size={15} />New lab</h3>
         <form className="inline-form" onSubmit={create}>
@@ -112,7 +118,7 @@ function Admin() {
                     ><X size={13} /></button>
                   </span>
                 ))}
-                {unlinked.map((h) => <span key={h.id} className="small-note">{h.full_name} (head in the lab form, no account yet)</span>)}
+                {unlinked.map((h) => <span key={h.id} className="small-note">{h.full_name} (head in the lab form, not linked yet: confirm the account above once they register)</span>)}
               </div>
               <PeoplePicker
                 placeholder="Assign a head: search users by name or e-mail"
