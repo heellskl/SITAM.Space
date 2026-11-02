@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { ArrowUpRight, BookOpen, ExternalLink, GraduationCap, Quote, Search, UserRound } from 'lucide-react';
+import { ArrowUpRight, BookOpen, ExternalLink, GraduationCap, Quote, Search, Unlock, UserRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { SearchBar } from '@/components/search-bar';
 import { RequestResearcherCta } from '@/components/onboarding';
