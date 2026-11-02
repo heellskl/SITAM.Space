@@ -9,9 +9,15 @@
    Safe to run more than once (each event is added only if it is not there yet).
    ════════════════════════════════════════════════════════════════════════════ */
 
-alter table public.events drop constraint if exists events_poster_url_check;
+-- remove every old check on poster_url, whatever its name, then add the new one
+do $$ declare r record; begin
+  for r in select c.conrelid::regclass as tbl, c.conname from pg_constraint c
+            where c.contype = 'c' and c.conrelid in ('public.events'::regclass, 'public.external_events'::regclass)
+              and pg_get_constraintdef(c.oid) ilike '%poster_url%' loop
+    execute format('alter table %s drop constraint %I', r.tbl, r.conname);
+  end loop;
+end $$;
 alter table public.events add constraint events_poster_url_check check (poster_url is null or poster_url ~* '^(https?://|/events/)');
-alter table public.external_events drop constraint if exists external_events_poster_url_check;
 alter table public.external_events add constraint external_events_poster_url_check check (poster_url is null or poster_url ~* '^(https?://|/events/)');
 
 /* ───────────── SDU events ───────────── */
