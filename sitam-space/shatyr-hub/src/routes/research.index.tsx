@@ -31,11 +31,13 @@ function Research() {
   return (
     <main className="container content-page">
       <PageHero
+        eyebrow="SITAM Research"
         title="Research at SITAM"
         text="Researchers, publications and citations of the school, from Scopus. Find a supervisor or a paper."
         stats={[
           { label: 'Researchers', value: profs.data?.length, to: '/research', search: { tab: 'people' } },
           { label: 'Publications', value: pubs.data?.length, to: '/research', search: { tab: 'search' } },
+          { label: 'Citations', value: pubs.data?.reduce((s, p) => s + p.citations, 0), to: '/research', search: { tab: 'search' } },
         ]}
       />
       <div className="mt-6"><ResearchPublications query={q} tab={current} onQuery={(v) => set({ q: v })} onTab={(t) => set({ tab: t })} /></div>

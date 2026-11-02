@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { ArrowUpRight, BookOpen, CalendarRange, ChevronDown, ExternalLink, GraduationCap, Quote, Search, UserRound } from 'lucide-react';
+import { ArrowUpRight, CalendarRange, ChevronDown, ExternalLink, GraduationCap, Quote, Search } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
 import { SearchBar } from '@/components/search-bar';
@@ -198,11 +198,6 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
     return terms.every((t) => hay.includes(t));
   })), [community, terms]);
 
-  const totals = {
-    pubs: scope.length,
-    cites: scope.reduce((s, p) => s + p.citations, 0),
-    profs: terms.length ? new Set(scope.flatMap((p) => p.publication_authors.map((a) => a.professors?.full_name).filter(Boolean))).size : people.length,
-  };
 
   const error = pubs.error ?? profs.error;
   if (error) return <p className="form-alert">{humanError(error)}</p>;
@@ -219,11 +214,6 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
       </TabsList>
 
       <TabsContent value="overview">
-        <div className="kpi-grid">
-          <button type="button" className="kpi is-link" onClick={() => onTab('search')} title="Open Publications"><BookOpen size={16} /><strong>{totals.pubs}</strong><span>Publications</span></button>
-          <button type="button" className="kpi is-link" onClick={() => onTab('search')} title="Open Publications"><Quote size={16} /><strong>{totals.cites}</strong><span>Citations</span></button>
-          <button type="button" className="kpi is-link" onClick={() => onTab('people')} title="Open Researchers"><UserRound size={16} /><strong>{totals.profs}</strong><span>Researchers</span></button>
-        </div>
         <div className="chart-grid two">
           <section className="panel">
             <h3 className="panel-title">Publications per year</h3>

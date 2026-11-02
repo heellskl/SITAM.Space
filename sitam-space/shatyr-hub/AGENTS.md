@@ -149,3 +149,4 @@
 ## SITAM SPACE v25 — real events
 - Posters can be site files: `public/events/*.jpg`, `poster_url = '/events/…'` (checks `events_poster_url_check`, `external_events_poster_url_check` allow `https://` or `/events/`).
 - Migration `20261103120000_sitam_v25_real_events.sql` (`update-to-v25.sql`, after v23): JANA TALKS (4 Nov), Research Poster Day (13 Nov, time/room TBA), Roblox career talk (7 Sep, past); external: QazTech Meetup Tech Talqy (kind `other` → shown as Industry), Wemathify (olympiad at SDU), DATA CHALLENGE '26 (hackathon, Astana).
+- v24.1: the banner uses the SITAM palette (navy #0A1930 → #10365A, ice-blue dot pattern on the right, amber dot + ice eyebrow "SITAM Labs / Industry / Research"), no logo watermark; numbers are plain columns with thin dividers. Research banner has Researchers · Publications · Citations; the number tiles under the Research tabs were removed (Overview = charts only).

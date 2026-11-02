@@ -36,6 +36,7 @@ function Labs() {
   return (
     <main className="container content-page">
       <PageHero
+        eyebrow="SITAM Labs"
         title="Explore labs and communities"
         text="Laboratories, student communities and their projects at SITAM. Find your team and join real work."
         stats={[
