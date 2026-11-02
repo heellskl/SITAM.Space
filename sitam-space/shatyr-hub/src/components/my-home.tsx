@@ -139,131 +139,134 @@ export function MyHome() {
         <div className="kpi"><strong>{myEvents.attended.length}</strong><span>Events attended</span></div>
       </div>
 
-      <div className="home-grid">
-        {/* ── research ── */}
-        <section className="panel">
-          <div className="panel-head">
-            <h3 className="panel-title"><GraduationCap size={15} />Research</h3>
-            {prof && <Button asChild size="sm" variant="ghost"><Link to="/research/$username" params={{ username: prof.username }}>My research page<ArrowUpRight /></Link></Button>}
-          </div>
-          {prof ? (
-            <>
-              <dl className="home-metrics">
-                <div><dt>h-index</dt><dd>{prof.h_index}</dd></div>
-                <div><dt>i10-index</dt><dd>{prof.i10_index}</dd></div>
-                <div><dt>Citations</dt><dd>{prof.total_citations}</dd></div>
-                <div><dt>Works</dt><dd>{prof.total_works}</dd></div>
-              </dl>
-              {(card.data?.pubs ?? []).length > 0 && (
+      <div className="lab-layout home-layout">
+        <div className="lab-main">
+          {/* ── labs ── */}
+          <section className="panel">
+            <div className="panel-head"><h3 className="panel-title"><FlaskConical size={15} />My labs</h3></div>
+            {caps.labMemberships.length ? (
+              <ul className="rows">
+                {caps.labMemberships.map((m) => (
+                  <li key={m.id}>
+                    <div><strong><Link to="/labs/$slug" params={{ slug: m.slug }}>{m.name}</Link></strong><small>{m.title ?? LAB_POSITION_LABEL[m.role as LabRole] ?? m.role}</small></div>
+                    {m.isHead && <span className="pill pill-gold">Head</span>}
+                  </li>
+                ))}
+              </ul>
+            ) : <Empty>You are not in a lab yet. <Link to="/labs">Browse the labs</Link>.</Empty>}
+          </section>
+
+          {/* ── research ── */}
+          <section className="panel">
+            <div className="panel-head">
+              <h3 className="panel-title"><GraduationCap size={15} />Research</h3>
+              {prof && <Button asChild size="sm" variant="ghost"><Link to="/research/$username" params={{ username: prof.username }}>My research page<ArrowUpRight /></Link></Button>}
+            </div>
+            {prof ? (
+              <>
+                <dl className="home-metrics">
+                  <div><dt>h-index</dt><dd>{prof.h_index}</dd></div>
+                  <div><dt>i10-index</dt><dd>{prof.i10_index}</dd></div>
+                  <div><dt>Citations</dt><dd>{prof.total_citations}</dd></div>
+                  <div><dt>Works</dt><dd>{prof.total_works}</dd></div>
+                </dl>
+                {(card.data?.pubs ?? []).length > 0 && (
+                  <ul className="rows">
+                    {(card.data?.pubs ?? []).slice(0, 4).map((p) => (
+                      <li key={p.id}><div><strong>{p.title}</strong><small>{[p.year, p.venue, `${p.citations} citations`].filter(Boolean).join(' · ')}</small></div></li>
+                    ))}
+                  </ul>
+                )}
+                {prof.keywords.length > 0 && <div className="stack-list">{prof.keywords.slice(0, 10).map((k) => <span key={k}>{k}</span>)}</div>}
+              </>
+            ) : caps.isTeacher ? (
+              <Empty>Your researcher card is not linked yet. <Link to="/research" search={{ tab: 'people' }}>Find yourself in Research</Link> and request your profile.</Empty>
+            ) : (
+              <Empty>No research profile. Join a lab or <Link to="/research" search={{ tab: 'supervisor' }}>find a supervisor</Link> to start.</Empty>
+            )}
+          </section>
+
+          {/* ── events ── */}
+          <section className="panel">
+            <div className="panel-head"><h3 className="panel-title"><CalendarDays size={15} />My events</h3><Button asChild size="sm" variant="ghost"><Link to="/events">All events<ArrowUpRight /></Link></Button></div>
+            {myEvents.upcoming.length + myEvents.attended.length === 0 && <Empty>You have not registered for events yet.</Empty>}
+            {myEvents.upcoming.length > 0 && (
+              <>
+                <p className="home-sub">Upcoming</p>
                 <ul className="rows">
-                  {(card.data?.pubs ?? []).slice(0, 4).map((p) => (
-                    <li key={p.id}><div><strong>{p.title}</strong><small>{[p.year, p.venue, `${p.citations} citations`].filter(Boolean).join(' · ')}</small></div></li>
+                  {myEvents.upcoming.slice(0, 4).map(({ r, ev }) => (
+                    <li key={r.id}>
+                      <div><strong><Link to="/events/$eventId" params={{ eventId: ev.id }}>{ev.title}</Link></strong><small>{formatDate(ev.starts_at)} · {ev.room}</small></div>
+                      <Button asChild size="sm" variant="outline"><Link to="/profile"><Ticket />Ticket</Link></Button>
+                    </li>
                   ))}
                 </ul>
-              )}
-              {prof.keywords.length > 0 && <div className="stack-list">{prof.keywords.slice(0, 10).map((k) => <span key={k}>{k}</span>)}</div>}
-            </>
-          ) : caps.isTeacher ? (
-            <Empty>Your researcher card is not linked yet. <Link to="/research" search={{ tab: 'people' }}>Find yourself in Research</Link> and request your profile.</Empty>
-          ) : (
-            <Empty>No research profile. Join a lab or <Link to="/research" search={{ tab: 'supervisor' }}>find a supervisor</Link> to start.</Empty>
-          )}
-        </section>
+              </>
+            )}
+            {myEvents.attended.length > 0 && (
+              <>
+                <p className="home-sub">Took part</p>
+                <ul className="rows">
+                  {myEvents.attended.slice(0, 6).map(({ r, ev }) => (
+                    <li key={r.id}>
+                      <div><strong><Link to="/events/$eventId" params={{ eventId: ev.id }}>{ev.title}</Link></strong><small>{formatDate(ev.starts_at)}</small></div>
+                      {r.status === 'checked_in' && <span className="pill pill-done">Attended</span>}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </section>
+        </div>
+        <aside className="lab-aside">
+          {/* ── industry ── */}
+          <section className="panel">
+            <div className="panel-head">
+              <h3 className="panel-title"><Briefcase size={15} />Industry</h3>
+              {exp.data !== null && <Button size="sm" variant="ghost" onClick={() => setEditExp(true)}><Pencil />Edit experience</Button>}
+            </div>
 
-        {/* ── labs ── */}
-        <section className="panel">
-          <div className="panel-head"><h3 className="panel-title"><FlaskConical size={15} />My labs</h3></div>
-          {caps.labMemberships.length ? (
-            <ul className="rows">
-              {caps.labMemberships.map((m) => (
-                <li key={m.id}>
-                  <div><strong><Link to="/labs/$slug" params={{ slug: m.slug }}>{m.name}</Link></strong><small>{m.title ?? LAB_POSITION_LABEL[m.role as LabRole] ?? m.role}</small></div>
-                  {m.isHead && <span className="pill pill-gold">Head</span>}
-                </li>
-              ))}
-            </ul>
-          ) : <Empty>You are not in a lab yet. <Link to="/labs">Browse the labs</Link>.</Empty>}
-        </section>
-
-        {/* ── events ── */}
-        <section className="panel">
-          <div className="panel-head"><h3 className="panel-title"><CalendarDays size={15} />My events</h3><Button asChild size="sm" variant="ghost"><Link to="/events">All events<ArrowUpRight /></Link></Button></div>
-          {myEvents.upcoming.length + myEvents.attended.length === 0 && <Empty>You have not registered for events yet.</Empty>}
-          {myEvents.upcoming.length > 0 && (
-            <>
-              <p className="home-sub">Upcoming</p>
+            <p className="home-sub">Work & internships</p>
+            {experience.length + viaSitam.length === 0 ? (
+              <Empty>{exp.data === null ? 'Available soon.' : 'Add where you worked or did an internship.'}</Empty>
+            ) : (
               <ul className="rows">
-                {myEvents.upcoming.slice(0, 4).map(({ r, ev }) => (
-                  <li key={r.id}>
-                    <div><strong><Link to="/events/$eventId" params={{ eventId: ev.id }}>{ev.title}</Link></strong><small>{formatDate(ev.starts_at)} · {ev.room}</small></div>
-                    <Button asChild size="sm" variant="outline"><Link to="/profile"><Ticket />Ticket</Link></Button>
+                {experience.map((x, i) => (
+                  <li key={`e${i}`}><div><strong>{x.role ? `${x.role} · ${x.company}` : x.company}</strong><small>{x.kind === 'internship' ? 'Internship' : 'Work'} · {period(x)}</small></div></li>
+                ))}
+                {viaSitam.map((a) => (
+                  <li key={a.id}><div><strong>{a.opportunities?.title}</strong><small>{a.opportunities?.industrial_type ? INDUSTRIAL_LABEL[a.opportunities.industrial_type] : 'Industrial case'} · {hostNames(a.opportunities?.opportunity_hosts ?? [])} · via SITAM SPACE</small></div></li>
+                ))}
+              </ul>
+            )}
+
+            <p className="home-sub">My applications</p>
+            {(apps.data ?? []).length ? (
+              <ul className="rows">
+                {(apps.data ?? []).slice(0, 5).map((a) => (
+                  <li key={a.id}>
+                    <div><strong>{a.opportunities?.title ?? 'Opportunity'}</strong><small>{a.opportunities ? opportunityLabel(a.opportunities) : ''} · {formatDate(a.created_at)}</small></div>
+                    <span className={`pill pill-${STATUS_TONE[a.status]}`}>{STATUS_LABEL[a.status]}</span>
                   </li>
                 ))}
               </ul>
-            </>
-          )}
-          {myEvents.attended.length > 0 && (
-            <>
-              <p className="home-sub">Took part</p>
+            ) : <Empty>No applications yet. <Link to="/opportunities">See open vacancies and internships</Link>.</Empty>}
+
+            <p className="home-sub">Industry events</p>
+            {industryEvents.length ? (
               <ul className="rows">
-                {myEvents.attended.slice(0, 6).map(({ r, ev }) => (
-                  <li key={r.id}>
-                    <div><strong><Link to="/events/$eventId" params={{ eventId: ev.id }}>{ev.title}</Link></strong><small>{formatDate(ev.starts_at)}</small></div>
-                    {r.status === 'checked_in' && <span className="pill pill-done">Attended</span>}
-                  </li>
+                {industryEvents.slice(0, 4).map(({ r, ev }) => (
+                  <li key={r.id}><div><strong><Link to="/events/$eventId" params={{ eventId: ev.id }}>{ev.title}</Link></strong><small>{formatDate(ev.starts_at)}{hostNames(ev.event_hosts) ? ` · ${hostNames(ev.event_hosts)}` : ''}</small></div></li>
                 ))}
               </ul>
-            </>
-          )}
-        </section>
+            ) : <Empty>No industry events yet.</Empty>}
 
-        {/* ── industry ── */}
-        <section className="panel">
-          <div className="panel-head">
-            <h3 className="panel-title"><Briefcase size={15} />Industry</h3>
-            {exp.data !== null && <Button size="sm" variant="ghost" onClick={() => setEditExp(true)}><Pencil />Edit experience</Button>}
-          </div>
-
-          <p className="home-sub">Work & internships</p>
-          {experience.length + viaSitam.length === 0 ? (
-            <Empty>{exp.data === null ? 'Available soon.' : 'Add where you worked or did an internship.'}</Empty>
-          ) : (
-            <ul className="rows">
-              {experience.map((x, i) => (
-                <li key={`e${i}`}><div><strong>{x.role ? `${x.role} · ${x.company}` : x.company}</strong><small>{x.kind === 'internship' ? 'Internship' : 'Work'} · {period(x)}</small></div></li>
-              ))}
-              {viaSitam.map((a) => (
-                <li key={a.id}><div><strong>{a.opportunities?.title}</strong><small>{a.opportunities?.industrial_type ? INDUSTRIAL_LABEL[a.opportunities.industrial_type] : 'Industrial case'} · {hostNames(a.opportunities?.opportunity_hosts ?? [])} · via SITAM SPACE</small></div></li>
-              ))}
-            </ul>
-          )}
-
-          <p className="home-sub">My applications</p>
-          {(apps.data ?? []).length ? (
-            <ul className="rows">
-              {(apps.data ?? []).slice(0, 5).map((a) => (
-                <li key={a.id}>
-                  <div><strong>{a.opportunities?.title ?? 'Opportunity'}</strong><small>{a.opportunities ? opportunityLabel(a.opportunities) : ''} · {formatDate(a.created_at)}</small></div>
-                  <span className={`pill pill-${STATUS_TONE[a.status]}`}>{STATUS_LABEL[a.status]}</span>
-                </li>
-              ))}
-            </ul>
-          ) : <Empty>No applications yet. <Link to="/opportunities">See open vacancies and internships</Link>.</Empty>}
-
-          <p className="home-sub">Industry events</p>
-          {industryEvents.length ? (
-            <ul className="rows">
-              {industryEvents.slice(0, 4).map(({ r, ev }) => (
-                <li key={r.id}><div><strong><Link to="/events/$eventId" params={{ eventId: ev.id }}>{ev.title}</Link></strong><small>{formatDate(ev.starts_at)}{hostNames(ev.event_hosts) ? ` · ${hostNames(ev.event_hosts)}` : ''}</small></div></li>
-              ))}
-            </ul>
-          ) : <Empty>No industry events yet.</Empty>}
-
-          <p className="home-sub"><Building2 size={13} />Partner companies of my labs</p>
-          {partners.length ? (
-            <div className="stack-list">{partners.map(([p, ls]) => <span key={p} title={ls.join(', ')}>{p}</span>)}</div>
-          ) : <Empty>{caps.labMemberships.length ? 'Your labs have not listed partners yet.' : 'Join a lab to see its partners.'}</Empty>}
-        </section>
+            <p className="home-sub"><Building2 size={13} />Partner companies of my labs</p>
+            {partners.length ? (
+              <div className="stack-list">{partners.map(([p, ls]) => <span key={p} title={ls.join(', ')}>{p}</span>)}</div>
+            ) : <Empty>{caps.labMemberships.length ? 'Your labs have not listed partners yet.' : 'Join a lab to see its partners.'}</Empty>}
+          </section>
+        </aside>
       </div>
 
       {exp.data !== null && exp.data !== undefined && <ExperienceDialog userId={uid} items={exp.data} open={editExp} onOpenChange={setEditExp} />}
