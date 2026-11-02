@@ -25,8 +25,7 @@ function Events() {
         <h1>Events</h1>
         {canCreate && <Button onClick={() => setAdding(true)}><CalendarPlus />New event</Button>}
       </div>
-      <div className="mt-6"><SearchBar value={q} onChange={setQ} placeholder="Search events, speakers, labs" /></div>
-      <EventBoard query={q} />
+      <EventBoard query={q} search={<SearchBar value={q} onChange={setQ} placeholder="Search events, speakers, labs" />} />
       {adding && <EventDialog preset={{ labs: caps.managedLabs.map((l) => l.id).slice(0, 1), companies: [], projects: [] }} onClose={() => setAdding(false)} />}
     </main>
   );
