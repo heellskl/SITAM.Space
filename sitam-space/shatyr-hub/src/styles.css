@@ -2642,3 +2642,13 @@ html:not(.dark) .on-hero .top-faq:not(.is-on) { color: #0a1830; }
 .about2-stats div.is-link:hover .stat-link { color: var(--navy); }
 .about2-stats div.is-link:hover .stat-link::before { opacity: 1; transform: none; }
 .about2-stats .stat-link:focus-visible { outline: 2px solid var(--navy); outline-offset: 4px; border-radius: 4px; }
+
+/* dark theme: no near-black boxes — FAQ items, panels, keyword chips etc. used old near-black colours
+   (--glass #151515 at 72 %, --pearl-2 almost black); they now get a soft light-blue tint over the night sky */
+html.dark {
+  --glass: rgba(133, 183, 235, 0.08);
+  --glass-border: rgba(255, 255, 255, 0.10);
+  --pearl-2: rgba(133, 183, 235, 0.10);
+  --hero-dark: #0f2647;
+}
+html.dark .stack-list > span { background: rgba(133, 183, 235, 0.12); border-color: rgba(133, 183, 235, 0.22); color: #DCE8F7; }
