@@ -1,4 +1,4 @@
-import { createFileRoute } from '@tanstack/react-router';
+import { createFileRoute, Link } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { Building2, GraduationCap, Presentation } from 'lucide-react';
 import { useLabs, useProjects, usePublications } from '@/lib/api';
@@ -140,10 +140,11 @@ function Index() {
             <li><span className="about2-ic tone-amber"><Building2 size={16} /></span><div><strong>Partners</strong><span>See what we build and collaborate</span></div></li>
           </ul>
           <dl className="about2-stats">
-            <div><dt><CountUp value={labs.data?.filter((l) => (l.kind ?? 'lab') === 'lab').length} /></dt><dd>Laboratories</dd></div>
-            <div><dt><CountUp value={projects.data?.length} /></dt><dd>Projects</dd></div>
+            {/* the numbers open their pages (the whole cell is clickable) */}
+            <div className="is-link"><dt><CountUp value={labs.data?.filter((l) => (l.kind ?? 'lab') === 'lab').length} /></dt><dd><Link to="/labs" className="stat-link">Laboratories</Link></dd></div>
+            <div className="is-link"><dt><CountUp value={projects.data?.length} /></dt><dd><Link to="/labs" search={{ tab: 'projects' }} className="stat-link">Projects</Link></dd></div>
             <div><dt><CountUp value={involved} /></dt><dd>Students involved</dd></div>
-            <div><dt><CountUp value={pubs.data?.length} /></dt><dd>Scopus publications</dd></div>
+            <div className="is-link"><dt><CountUp value={pubs.data?.length} /></dt><dd><Link to="/research" search={{ tab: 'search' }} className="stat-link">Scopus publications</Link></dd></div>
           </dl>
         </div>
       </section>
