@@ -2498,10 +2498,18 @@ html.dark .md-table th { background: #111a2e; }
 }
 /* Research: the submit button sits at the top of its own tab; Publications: a period of years */
 .tab-actions { display: flex; justify-content: flex-end; margin-bottom: 16px; }
-.period-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
-.period-range { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.period-dash { color: var(--muted-foreground); }
-.period-count { margin-left: 6px; }
+.period-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 18px; }
+.period-trigger { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.period-pop { width: 300px; padding: 14px; border-radius: 16px; display: grid; gap: 10px; }
+.period-quick { display: grid; gap: 4px; }
+.period-quick button { height: 36px; padding: 0 12px; border: 0; border-radius: 10px; background: transparent; color: var(--navy); font: 500 14px/1 var(--font-ui); text-align: left; cursor: pointer; }
+.period-quick button:hover { background: color-mix(in oklab, var(--navy) 6%, transparent); }
+.period-quick button.is-on { background: var(--btn-bg); color: var(--btn-fg); }
+.period-pop-label { margin: 4px 0 0; padding-top: 10px; border-top: 1px solid var(--border); font: 500 12px/1 var(--font-ui); color: var(--muted-foreground); }
+.period-range { display: flex; align-items: center; gap: 8px; }
+.period-field { flex: 1; display: grid; gap: 4px; font: 500 12px/1 var(--font-ui); color: var(--muted-foreground); }
+.period-field select { height: 36px; padding: 0 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--navy); font: 500 14px/1 var(--font-ui); }
+.period-dash { color: var(--muted-foreground); margin-top: 16px; }
 
 /* ---------- v22: FAQ → Ask SITAM AI — the chat on the page, the archive of questions next to it ---------- */
 .faq-page .faq-tab { max-width: 640px; }

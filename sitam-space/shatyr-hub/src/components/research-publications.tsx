@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { ArrowUpRight, BookOpen, ExternalLink, GraduationCap, Quote, Search, Unlock, UserRound } from 'lucide-react';
+import { ArrowUpRight, BookOpen, CalendarRange, ChevronDown, ExternalLink, GraduationCap, Quote, Search, UserRound } from 'lucide-react';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
 import { SearchBar } from '@/components/search-bar';
 import { RequestResearcherCta } from '@/components/onboarding';
@@ -43,7 +44,6 @@ export function PublicationRow({ p, showAuthors = true, onKeyword, terms = [] }:
       </div>
       <div className="pub-side">
         <span className="pub-cites" title="Citations"><Quote size={12} />{p.citations}</span>
-        {p.is_open_access && <span className="pill pill-live"><Unlock size={11} />Open</span>}
         {(p.doi || p.url) && <a className="pub-link" href={p.doi ?? p.url ?? '#'} target="_blank" rel="noopener noreferrer" aria-label="Open publication"><ExternalLink size={14} /></a>}
       </div>
     </li>
@@ -149,6 +149,10 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
     { label: 'Last 3 years', from: newest - 2, to: null },
     { label: 'Last 5 years', from: newest - 4, to: null },
   ] as const;
+  // what the "Date range" button says
+  const periodLabel = !yearFrom && !yearTo ? 'Date range'
+    : quick.find((q) => q.from !== null && yearFrom === String(q.from) && !yearTo)?.label
+      ?? (yearFrom && yearTo ? (yearFrom === yearTo ? yearFrom : `${yearFrom} – ${yearTo}`) : yearFrom ? `From ${yearFrom}` : `Until ${yearTo}`);
 
   const found = useMemo(() => {
     const list = all
@@ -261,32 +265,42 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
       </TabsContent>
 
       <TabsContent value="search">
-        {/* period: quick choices, or any range "from … to …" */}
-        <div className="period-bar" role="group" aria-label="Publication period">
-          <div className="filter-list">
-            {quick.map((q) => {
-              const on = (q.from === null ? !yearFrom : yearFrom === String(q.from)) && !yearTo;
-              return <button key={q.label} type="button" className={on ? 'filter active' : 'filter'} aria-pressed={on} onClick={() => setPeriod(q.from, q.to)}>{q.label}</button>;
-            })}
-          </div>
-          <div className="period-range">
-            <label className={yearFrom ? 'ev-select is-set' : 'ev-select'}>
-              <span>From</span>
-              <select value={yearFrom} onChange={(e) => setPeriod(e.target.value ? Number(e.target.value) : null, yearTo ? Number(yearTo) : null)} aria-label="From year">
-                <option value="">Any</option>
-                {[...years].reverse().map((y) => <option key={y} value={y}>{y}</option>)}
-              </select>
-            </label>
-            <span className="period-dash" aria-hidden>–</span>
-            <label className={yearTo ? 'ev-select is-set' : 'ev-select'}>
-              <span>To</span>
-              <select value={yearTo} onChange={(e) => setPeriod(yearFrom ? Number(yearFrom) : null, e.target.value ? Number(e.target.value) : null)} aria-label="To year">
-                <option value="">Any</option>
-                {years.map((y) => <option key={y} value={y}>{y}</option>)}
-              </select>
-            </label>
-            <span className="small-note period-count">{found.length} {found.length === 1 ? 'paper' : 'papers'}</span>
-          </div>
+        {/* one small "Date range" button; the choices open under it */}
+        <div className="period-bar">
+          <Popover>
+            <PopoverTrigger asChild>
+              <button type="button" className={yearFrom || yearTo ? 'filter active period-trigger' : 'filter period-trigger'}>
+                <CalendarRange size={15} />{periodLabel}<ChevronDown size={14} />
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="period-pop">
+              <div className="period-quick" role="group" aria-label="Quick periods">
+                {quick.map((q) => {
+                  const on = (q.from === null ? !yearFrom : yearFrom === String(q.from)) && !yearTo;
+                  return <button key={q.label} type="button" className={on ? 'is-on' : ''} aria-pressed={on} onClick={() => setPeriod(q.from, q.to)}>{q.label}</button>;
+                })}
+              </div>
+              <p className="period-pop-label">Custom range</p>
+              <div className="period-range">
+                <label className="period-field">
+                  <span>From</span>
+                  <select value={yearFrom} onChange={(e) => setPeriod(e.target.value ? Number(e.target.value) : null, yearTo ? Number(yearTo) : null)} aria-label="From year">
+                    <option value="">Any</option>
+                    {[...years].reverse().map((y) => <option key={y} value={y}>{y}</option>)}
+                  </select>
+                </label>
+                <span className="period-dash" aria-hidden>–</span>
+                <label className="period-field">
+                  <span>To</span>
+                  <select value={yearTo} onChange={(e) => setPeriod(yearFrom ? Number(yearFrom) : null, e.target.value ? Number(e.target.value) : null)} aria-label="To year">
+                    <option value="">Any</option>
+                    {years.map((y) => <option key={y} value={y}>{y}</option>)}
+                  </select>
+                </label>
+              </div>
+            </PopoverContent>
+          </Popover>
+          <span className="small-note period-count">{found.length} {found.length === 1 ? 'paper' : 'papers'}</span>
         </div>
         <ul className="pub-list">{found.map((p) => <PublicationRow key={p.id} p={p} terms={terms} onKeyword={searchFor} />)}</ul>
         {terms.length > 0 && found.length === 0 && <p className="small-note">No papers found.</p>}
