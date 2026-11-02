@@ -142,7 +142,7 @@ function PosterCard({ item, onOpen }: { item: FeedItem; onOpen: (i: FeedItem) =>
     <>
       {cover}
       <h3 className="poster-title">{item.title}</h3>
-      <p className="poster-tags"><span className={`ev-tag ev-${item.type}`}>{TYPE_LABEL[item.type]}</span> {LOCATION_LABEL[item.location]} · {item.meta}</p>
+      <p className="poster-tags"><span className={`ev-tag ev-${item.type}`}>{TYPE_LABEL[item.type]}</span></p>
     </>
   );
   return item.sdu ? (
@@ -245,7 +245,7 @@ function PosterList({ items, onOpen, past }: { items: FeedItem[]; onOpen: (i: Fe
   );
 }
 
-/* ───────── v22: "Coming up next" — the nearest event as a large card ───────── */
+/* ───────── v22: "Coming up next" — the nearest day's events as large cards (several → they scroll to the right) ───────── */
 function whenLine(it: FeedItem) {
   if (it.sdu) { const d = eventDate(it.sdu.starts_at); return `${d.long} · ${d.time}`; }
   return it.external ? externalDates(it.external) : '';
@@ -265,29 +265,53 @@ function PosterImage({ item }: { item: FeedItem }) {
   );
 }
 
+function NextCard({ item, onOpen }: { item: FeedItem; onOpen: (i: FeedItem) => void }) {
+  return (
+    <a href={item.sdu ? `/events/${item.sdu.id}` : '#'} className="ev-next-card" onClick={(e) => { e.preventDefault(); onOpen(item); }}>
+      <div className={`ev-next-poster poster-${item.type}`}><PosterImage item={item} /></div>
+      <div className="ev-next-body">
+        <div className="ev-next-tags">
+          <span className="ev-next-tag">{TYPE_LABEL[item.type]}</span>
+          <span className="ev-next-tag is-soft">{LOCATION_LABEL[item.location]}</span>
+        </div>
+        <h3>{item.title}</h3>
+        <p><CalendarDays size={16} aria-hidden />{whenLine(item)}</p>
+        <p><MapPin size={16} aria-hidden />{placeLine(item)}</p>
+        <span className="ev-next-link">View event<ArrowRight size={16} /></span>
+      </div>
+    </a>
+  );
+}
+
 function ComingUpNext({ items, onOpen, onViewAll }: { items: FeedItem[]; onOpen: (i: FeedItem) => void; onViewAll: () => void }) {
-  const next = items[0];
-  if (!next) return null;
-  const open = (e: { preventDefault(): void }, it: FeedItem) => { e.preventDefault(); onOpen(it); };
+  const ref = useRef<HTMLDivElement>(null);
+  const [edge, setEdge] = useState({ start: true, end: false });
+  const first = items[0];
+  // every event that starts on the same day as the nearest one
+  const sameDay = first?.start ? items.filter((it) => it.start && dayKey(it.start) === dayKey(first.start!)) : [];
+  const update = () => {
+    const el = ref.current;
+    if (el) setEdge({ start: el.scrollLeft < 8, end: el.scrollLeft + el.clientWidth >= el.scrollWidth - 8 });
+  };
+  useEffect(update, [sameDay.length]);
+  if (!first) return null;
+  const many = sameDay.length > 1;
+  const go = (dir: number) => ref.current?.scrollBy({ left: dir * (ref.current?.clientWidth ?? 600) * 0.8, behavior: 'smooth' });
   return (
     <section className="ev-next" aria-labelledby="ev-next-title">
       <div className="ev-next-head">
-        <h2 id="ev-next-title">Coming Up Next</h2>
+        <h2 id="ev-next-title">Coming Up Next{many && <span className="ev-next-count">{sameDay.length} events</span>}</h2>
         <button type="button" className="ev-next-all" onClick={onViewAll}>View all<ArrowRight size={16} /></button>
       </div>
-      <a href={next.sdu ? `/events/${next.sdu.id}` : '#'} className="ev-next-card" onClick={(e) => open(e, next)}>
-        <div className={`ev-next-poster poster-${next.type}`}><PosterImage item={next} /></div>
-        <div className="ev-next-body">
-          <div className="ev-next-tags">
-            <span className="ev-next-tag">{TYPE_LABEL[next.type]}</span>
-            <span className="ev-next-tag is-soft">{LOCATION_LABEL[next.location]}</span>
+      {many ? (
+        <div className="ev-next-carousel">
+          <div ref={ref} className="ev-next-track" onScroll={update} role="list">
+            {sameDay.map((it) => <div key={it.key} role="listitem" className="ev-next-slide"><NextCard item={it} onOpen={onOpen} /></div>)}
           </div>
-          <h3>{next.title}</h3>
-          <p><CalendarDays size={16} aria-hidden />{whenLine(next)}</p>
-          <p><MapPin size={16} aria-hidden />{placeLine(next)}</p>
-          <span className="ev-next-link">View event<ArrowRight size={16} /></span>
+          {!edge.start && <button type="button" className="ev-arrow prev" aria-label="Scroll left" onClick={() => go(-1)}><ChevronLeft /></button>}
+          {!edge.end && <button type="button" className="ev-arrow next" aria-label="Scroll right" onClick={() => go(1)}><ChevronRight /></button>}
         </div>
-      </a>
+      ) : <NextCard item={first} onOpen={onOpen} />}
     </section>
   );
 }
