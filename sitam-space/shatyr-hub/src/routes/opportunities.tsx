@@ -4,7 +4,8 @@ import { ArrowUpRight, Briefcase, Building2, FlaskConical, Plus } from 'lucide-r
 import { Button } from '@/components/ui/button';
 import { ListingDialog } from '@/components/manage-panels';
 import { useMyLabs } from '@/components/my-labs';
-import { eventDate, opportunityLabel, useOpportunities } from '@/lib/api';
+import { eventDate, opportunityLabel, useIndustryPartners, useOpportunities } from '@/lib/api';
+import { PageHero } from '@/components/page-hero';
 import { OpportunityBoard, type OppTab } from '@/components/opportunity-board';
 import { pageHead } from '@/lib/hub-data';
 import { IndustryPartners } from '@/components/industry-partners';
@@ -59,10 +60,19 @@ function MyLabCases() {
 function Opportunities() {
   const { tab, open, view = 'opportunities' } = Route.useSearch();
   const navigate = Route.useNavigate();
+  const opps = useOpportunities();
+  const partners = useIndustryPartners();
   const go = (v: 'opportunities' | 'partners') => navigate({ search: v === 'partners' ? { view: 'partners' } : {}, replace: true });
   return (
     <main className="container content-page">
-      <h1>Industry</h1>
+      <PageHero
+        title="Industry and partners"
+        text="Vacancies, internships and cases from companies and SITAM labs, and the companies we work with."
+        stats={[
+          { label: 'Open opportunities', value: opps.data?.length, to: '/opportunities' },
+          { label: 'Partner companies', value: partners.data?.length, to: '/opportunities', search: { view: 'partners' } },
+        ]}
+      />
       <div className="view-switch labs-switch" role="tablist" aria-label="Show">
         <button type="button" role="tab" aria-selected={view === 'opportunities'} className={view === 'opportunities' ? 'is-on' : ''} onClick={() => go('opportunities')}><Briefcase size={15} />Opportunities</button>
         <button type="button" role="tab" aria-selected={view === 'partners'} className={view === 'partners' ? 'is-on' : ''} onClick={() => go('partners')}><Building2 size={15} />Partners</button>

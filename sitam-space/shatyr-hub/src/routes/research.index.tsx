@@ -1,6 +1,8 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { RESEARCH_TABS, ResearchPublications, type ResearchTab } from '@/components/research-publications';
 import { pageHead } from '@/lib/hub-data';
+import { PageHero } from '@/components/page-hero';
+import { useProfessors, usePublications } from '@/lib/api';
 
 export const Route = createFileRoute('/research/')({
   // the open tab and the search text live in the address, so "Back" from a researcher returns to the same place
@@ -17,6 +19,8 @@ export const Route = createFileRoute('/research/')({
 function Research() {
   const { q = '', tab } = Route.useSearch();
   const navigate = Route.useNavigate();
+  const profs = useProfessors();
+  const pubs = usePublications();
   // legacy links (/research?q=…) open Publications
   const current: ResearchTab = tab ?? (q ? 'search' : 'overview');
   const set = (next: { q?: string; tab?: ResearchTab }) => {
@@ -26,9 +30,14 @@ function Research() {
   };
   return (
     <main className="container content-page">
-      <div className="page-head-row">
-        <h1>Research</h1>
-      </div>
+      <PageHero
+        title="Research at SITAM"
+        text="Researchers, publications and citations of the school, from Scopus. Find a supervisor or a paper."
+        stats={[
+          { label: 'Researchers', value: profs.data?.length, to: '/research', search: { tab: 'people' } },
+          { label: 'Publications', value: pubs.data?.length, to: '/research', search: { tab: 'search' } },
+        ]}
+      />
       <div className="mt-6"><ResearchPublications query={q} tab={current} onQuery={(v) => set({ q: v })} onTab={(t) => set({ tab: t })} /></div>
     </main>
   );

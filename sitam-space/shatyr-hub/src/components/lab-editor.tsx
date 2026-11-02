@@ -1,6 +1,6 @@
 // Lab head editor — mirrors the lab form (labs.json fields). List answers: one item per line.
 
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { ImagePlus, Loader2, Lock, Plus, Save, Trash2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -64,7 +64,9 @@ export function LabEditor({ lab, onDone, section }: { lab: Lab; onDone: () => vo
   }
   return (
     <EditorForm
-      initialTab={SECTIONS.some((x) => x.id === section) ? (section as SectionId) : 'about'}
+      // ?section=add-project → the Projects section with a new empty project ready to fill
+      initialTab={section === 'add-project' ? 'projects' : SECTIONS.some((x) => x.id === section) ? (section as SectionId) : 'about'}
+      addProject={section === 'add-project'}
       key={lab.updated_at}
       lab={lab}
       internal={internalQ.data ?? null}
@@ -86,9 +88,10 @@ type Props = {
   canEditHeads: boolean;
   onDone: () => void;
   initialTab: SectionId;
+  addProject?: boolean;
 };
 
-function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, onDone, initialTab }: Props) {
+function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, onDone, initialTab, addProject }: Props) {
   const contactOf = (id: string) => contacts.find((c) => c.member_id === id);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -153,12 +156,24 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
       .map((m) => ({ id: m.id, full_name: m.full_name, title: m.title ?? '', role: m.role, term: m.term ?? '', email: contactOf(m.id)?.email ?? '', contact: contactOf(m.id)?.contact ?? '',
         is_past: !!m.is_past, graduation_year: m.graduation_year ? String(m.graduation_year) : '' })),
   );
-  const [projs, setProjs] = useState<ProjectDraft[]>(() =>
-    projects.map((p) => ({
+  const [projs, setProjs] = useState<ProjectDraft[]>(() => [
+    ...projects.map((p): ProjectDraft => ({
       id: p.id, title: p.title, kind: p.kind, status: p.status, summary: p.summary ?? '', year: p.year ? String(p.year) : '',
       github_url: p.github_url ?? '', demo_url: p.demo_url ?? '', paper_url: p.paper_url ?? '', tags: p.tags.join(', '),
     })),
-  );
+    ...(addProject ? [{ title: '', kind: 'research', status: 'ongoing', summary: '', year: '', github_url: '', demo_url: '', paper_url: '', tags: '' } as ProjectDraft] : []),
+  ]);
+  // the new empty project (from "New project") is scrolled into view and its title focused
+  useEffect(() => {
+    if (!addProject) return;
+    const t = window.setTimeout(() => {
+      const rows = document.querySelectorAll<HTMLInputElement>('.project-row > input[aria-label="Project title"]');
+      const last = rows[rows.length - 1];
+      last?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      last?.focus({ preventScroll: true });
+    }, 150);
+    return () => window.clearTimeout(t);
+  }, [addProject]);
   const [removedProjects, setRemovedProjects] = useState<string[]>([]);
 
   const set = <K extends keyof typeof f>(k: K) => (e: { target: { value: string } }) => setF((s) => ({ ...s, [k]: e.target.value }));
@@ -256,7 +271,6 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
       <BackButton fallback={`/labs/${lab.slug}`} />
       <span className="eyebrow">Edit lab · {lab.name}</span>
       <h1>Lab form</h1>
-      <p className="page-intro">The same questions as the lab-head form, in 5 sections. Lists: one item per line. “Internal” (in Activities & partners) is visible only to lab heads and SITAM staff.</p>
 
       <div className="editor-tabs" role="tablist" aria-label="Lab form sections">
         {SECTIONS.map((x, i) => (

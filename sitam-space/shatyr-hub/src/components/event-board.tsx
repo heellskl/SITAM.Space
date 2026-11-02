@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { QRCodeSVG } from 'qrcode.react';
-import { ArrowRight, CalendarDays, ChevronLeft, ChevronRight, History, LayoutGrid, MapPin, Trophy, X } from 'lucide-react';
+import { ArrowRight, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, History, LayoutGrid, MapPin, Trophy, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { EXTERNAL_KIND_LABEL, eventDate, externalDates, hostNames, humanError, isUpcomingExternal, ticketUrl, useEvents, useExternalEvents, type ExternalEvent, type Host, type Registration, type SitamEvent } from '@/lib/api';
 import { mineFirst, useMyLabs } from '@/lib/my-labs';
 import { type Capabilities } from '@/lib/auth';
@@ -207,18 +208,28 @@ function CalendarView({ items, onOpen }: { items: FeedItem[]; onOpen: (i: FeedIt
   );
 }
 
-/** Compact filter: a small pill-shaped select ("Type: All ▾"). */
+/** Compact filter: a pill button ("Type ▾") that opens a small menu, same as Labs → Focus. */
 function FilterRow<T extends string>({ label, options, labels, value, onChange }: {
   label: string; options: readonly T[]; labels: Record<T, string>; value: T | 'all'; onChange: (v: T | 'all') => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const pick = (o: T | 'all') => { onChange(o); setOpen(false); };
   return (
-    <label className={value === 'all' ? 'ev-select' : 'ev-select is-set'}>
-      <span>{label}</span>
-      <select value={value} onChange={(e) => onChange(e.target.value as T | 'all')} aria-label={label}>
-        <option value="all">All</option>
-        {options.map((o) => <option key={o} value={o}>{labels[o]}</option>)}
-      </select>
-    </label>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button type="button" className={value === 'all' ? 'filter menu-trigger' : 'filter active menu-trigger'} aria-label={`${label}: ${value === 'all' ? 'All' : labels[value]}`}>
+          {value === 'all' ? label : labels[value]}<ChevronDown size={14} />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="period-pop menu-pop">
+        <p className="period-pop-label is-top">{label}</p>
+        <div className="period-quick" role="group" aria-label={label}>
+          {(['all', ...options] as (T | 'all')[]).map((o) => (
+            <button key={o} type="button" className={value === o ? 'is-on' : ''} aria-pressed={value === o} onClick={() => pick(o)}>{o === 'all' ? 'All' : labels[o]}</button>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 

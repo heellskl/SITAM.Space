@@ -143,7 +143,7 @@ function HeadTools({ lab, compact }: { lab: Lab; compact?: boolean }) {
     <div className={compact ? 'head-tools compact' : 'head-tools'}>
       <Button asChild size="sm"><Link to="/labs/$slug" params={{ slug: lab.slug }} search={{ edit: true }}><Pencil />Edit info</Link></Button>
       <Button asChild size="sm" variant="outline"><Link to="/labs/$slug" params={{ slug: lab.slug }} search={{ team: true }}><UserCog />Team & positions</Link></Button>
-      {!compact && <Button asChild size="sm" variant="outline"><Link to="/labs/$slug" params={{ slug: lab.slug }} search={{ edit: true }}><Plus />New project</Link></Button>}
+      {!compact && <Button asChild size="sm" variant="outline"><Link to="/labs/$slug" params={{ slug: lab.slug }} search={{ edit: true, section: 'add-project' }}><Plus />New project</Link></Button>}
       {!compact && <Button size="sm" variant="outline" onClick={() => setAdding(true)}><CalendarPlus />New event</Button>}
       {adding && <EventDialog preset={{ labs: [lab.id], companies: [], projects: [] }} onClose={() => setAdding(false)} />}
     </div>
@@ -159,7 +159,6 @@ function MyLabPanel({ lab, projects, card }: { lab: Lab; projects: number; card:
       <div className="mylab-one-side">
         <span className="eyebrow">Your lab</span>
         <p className="mylab-one-stats">{members} {members === 1 ? 'person' : 'people'} in the team · {projects} {projects === 1 ? 'project' : 'projects'}</p>
-        <p className="small-note">Fill in the lab information, add students to the team and change their positions.</p>
         <HeadTools lab={lab} />
       </div>
     </section>

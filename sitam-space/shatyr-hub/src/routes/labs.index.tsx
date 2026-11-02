@@ -3,6 +3,8 @@ import { FlaskConical, Rocket, Users } from 'lucide-react';
 import { LabsFeed } from '@/components/labs-feed';
 import { ProjectsPanel } from '@/components/projects-panel';
 import { pageHead } from '@/lib/hub-data';
+import { PageHero } from '@/components/page-hero';
+import { useLabs } from '@/lib/api';
 
 type LabsTab = 'labs' | 'communities' | 'projects';
 type LabsSearch = { lab?: string; tab?: LabsTab; ptab?: 'labs' | 'community' };
@@ -29,10 +31,18 @@ export const Route = createFileRoute('/labs/')({
 function Labs() {
   const { tab = 'labs' } = Route.useSearch();
   const navigate = Route.useNavigate();
+  const labs = useLabs();
   const go = (t: LabsTab) => navigate({ search: t === 'labs' ? {} : { tab: t }, replace: true });
   return (
     <main className="container content-page">
-      <h1>{tab === 'communities' ? 'Communities' : tab === 'projects' ? 'Projects' : 'Laboratories'}</h1>
+      <PageHero
+        title="Explore labs and communities"
+        text="Laboratories, student communities and their projects at SITAM. Find your team and join real work."
+        stats={[
+          { label: 'Laboratories', value: labs.data?.filter((l) => (l.kind ?? 'lab') === 'lab').length, to: '/labs' },
+          { label: 'Communities', value: labs.data?.filter((l) => l.kind === 'community').length, to: '/labs', search: { tab: 'communities' } },
+        ]}
+      />
       {/* Labs · Communities · Projects — under the heading, above the search */}
       <div className="view-switch labs-switch" role="tablist" aria-label="Show">
         {TABS.map(({ id, label, icon: Icon }) => (

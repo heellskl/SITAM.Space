@@ -11,7 +11,6 @@ import { mineFirst, personKey, useMyLabs } from '@/lib/my-labs';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { humanError, useProfessors, useProjects, usePublications, type Professor, type Publication } from '@/lib/api';
 import { ProjectCard } from '@/components/projects-showcase';
-import { SubmitProjectButton } from '@/components/submit-project';
 
 
 const kindOf = (t: string | null) => (/article/i.test(t ?? '') ? 'article' : /conference/i.test(t ?? '') ? 'conference' : 'other');
@@ -221,9 +220,9 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
 
       <TabsContent value="overview">
         <div className="kpi-grid">
-          <div className="kpi"><BookOpen size={16} /><strong>{totals.pubs}</strong><span>Publications</span></div>
-          <div className="kpi"><Quote size={16} /><strong>{totals.cites}</strong><span>Citations</span></div>
-          <div className="kpi"><UserRound size={16} /><strong>{totals.profs}</strong><span>Researchers</span></div>
+          <button type="button" className="kpi is-link" onClick={() => onTab('search')} title="Open Publications"><BookOpen size={16} /><strong>{totals.pubs}</strong><span>Publications</span></button>
+          <button type="button" className="kpi is-link" onClick={() => onTab('search')} title="Open Publications"><Quote size={16} /><strong>{totals.cites}</strong><span>Citations</span></button>
+          <button type="button" className="kpi is-link" onClick={() => onTab('people')} title="Open Researchers"><UserRound size={16} /><strong>{totals.profs}</strong><span>Researchers</span></button>
         </div>
         <div className="chart-grid two">
           <section className="panel">
@@ -307,9 +306,8 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
       </TabsContent>
 
       <TabsContent value="community">
-        <div className="tab-actions"><SubmitProjectButton kind="research" label="Submit your research" /></div>
         <div className="project-grid">{communityFound.map((p) => <ProjectCard key={p.id} p={p} />)}</div>
-        {!projects.isLoading && communityFound.length === 0 && <p className="small-note">{terms.length ? 'Nothing found.' : 'Nothing yet — use “Submit your research”.'}</p>}
+        {!projects.isLoading && communityFound.length === 0 && <p className="small-note">{terms.length ? 'Nothing found.' : 'Nothing yet.'}</p>}
       </TabsContent>
 
     </Tabs>
