@@ -2737,10 +2737,3 @@ html.dark .side-link:hover, html.dark .side-link.side-active, html.dark .side-li
 .su-by { font-size: 12.5px; color: var(--muted-foreground); }
 .su-mine { margin-bottom: 18px; }
 
-/* v26.1: every event poster in one 3:4 frame, the whole poster visible (wide ones on a blurred copy of themselves) */
-.poster { aspect-ratio: 3 / 4; }
-.poster-card.skeleton-card { aspect-ratio: 3 / 4; }
-.poster-photo { position: absolute; inset: 0; display: block; overflow: hidden; background: #0b1424; }
-.poster-photo > img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-.poster-photo > img.poster-photo-bg { object-fit: cover; filter: blur(22px) brightness(.62) saturate(1.15); transform: scale(1.2); }
-.poster-photo > img.poster-photo-img { object-fit: contain; filter: none; transform: none; }
