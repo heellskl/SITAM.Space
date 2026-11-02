@@ -2,6 +2,7 @@ import { createFileRoute, Link } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { Building2, GraduationCap, Presentation } from 'lucide-react';
 import { useLabs, useProjects, usePublications } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 import { pageHead } from '@/lib/hub-data';
 import { BRAND } from '@/lib/sitam-data';
 import { useTheme, type Theme } from '@/components/theme-toggle';
@@ -101,6 +102,7 @@ function CountUp({ value }: { value: number | undefined }) {
 
 /** Landing page for everyone (the logo opens it): a cinematic, centred hero and an "About us" section. The personal Home is /home. */
 function Index() {
+  const { user } = useAuth();
   const labs = useLabs();
   const projects = useProjects();
   const pubs = usePublications();
@@ -140,11 +142,11 @@ function Index() {
             <li><span className="about2-ic tone-amber"><Building2 size={16} /></span><div><strong>Partners</strong><span>See what we build and collaborate</span></div></li>
           </ul>
           <dl className="about2-stats">
-            {/* the numbers open their pages (the whole cell is clickable) */}
-            <div className="is-link"><dt><CountUp value={labs.data?.filter((l) => (l.kind ?? 'lab') === 'lab').length} /></dt><dd><Link to="/labs" className="stat-link">Laboratories</Link></dd></div>
-            <div className="is-link"><dt><CountUp value={projects.data?.length} /></dt><dd><Link to="/labs" search={{ tab: 'projects' }} className="stat-link">Projects</Link></dd></div>
+            {/* the numbers open their pages (the whole cell is clickable); people who are not signed in go to Sign in */}
+            <div className="is-link"><dt><CountUp value={labs.data?.filter((l) => (l.kind ?? 'lab') === 'lab').length} /></dt><dd>{user ? <Link to="/labs" className="stat-link">Laboratories</Link> : <Link to="/login" className="stat-link">Laboratories</Link>}</dd></div>
+            <div className="is-link"><dt><CountUp value={projects.data?.length} /></dt><dd>{user ? <Link to="/labs" search={{ tab: 'projects' }} className="stat-link">Projects</Link> : <Link to="/login" className="stat-link">Projects</Link>}</dd></div>
             <div><dt><CountUp value={involved} /></dt><dd>Students involved</dd></div>
-            <div className="is-link"><dt><CountUp value={pubs.data?.length} /></dt><dd><Link to="/research" search={{ tab: 'search' }} className="stat-link">Scopus publications</Link></dd></div>
+            <div className="is-link"><dt><CountUp value={pubs.data?.length} /></dt><dd>{user ? <Link to="/research" search={{ tab: 'search' }} className="stat-link">Scopus publications</Link> : <Link to="/login" className="stat-link">Scopus publications</Link>}</dd></div>
           </dl>
         </div>
       </section>
