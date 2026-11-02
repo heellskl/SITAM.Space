@@ -1,46 +1,32 @@
-import { createFileRoute } from '@tanstack/react-router';
+import { createFileRoute, Link, redirect } from '@tanstack/react-router';
 import { gmailCompose } from '@/lib/utils';
-import { ArrowUpRight } from 'lucide-react';
+import { ArrowUpRight, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { FaqList } from '@/components/faq-list';
-import { AskSitamPage } from '@/components/ask-sitam';
 import { pageHead } from '@/lib/hub-data';
 import { BRAND } from '@/lib/sitam-data';
 import { useAuth, personaOf } from '@/lib/auth';
 
-type FaqTab = 'faq' | 'ask';
-
 export const Route = createFileRoute('/faq')({
   head: () => pageHead('FAQ', 'Answers about labs, research assistantships, events and industry collaboration at SITAM SDU.'),
-  validateSearch: (s: Record<string, unknown>): { tab?: FaqTab } => (s['tab'] === 'ask' ? { tab: 'ask' } : {}),
+  // the AI chat has its own page now (one chat, not two); old links /faq?tab=ask go there
+  beforeLoad: ({ search }) => {
+    if ((search as Record<string, unknown>)['tab'] === 'ask') throw redirect({ to: '/ask', replace: true });
+  },
   component: Faq,
 });
 
 function Faq() {
-  const { profile, caps } = useAuth();
-  const { tab = 'faq' } = Route.useSearch();
-  const navigate = Route.useNavigate();
+  const { profile, caps, user } = useAuth();
   const persona = personaOf(profile, caps);
   const audience = persona === 'lab_leader' ? 'leader' : persona === 'teacher' ? 'teacher' : persona === 'student' ? 'student' : 'all';
   return (
     <main className="container content-page faq-page">
-      {/* the page starts with its tabs (no big heading) */}
-      <Tabs value={tab} onValueChange={(v) => void navigate({ search: v === 'ask' ? { tab: 'ask' } : {}, replace: true })}>
-        <TabsList className="manage-tabs faq-menu">
-          <TabsTrigger value="faq">FAQ</TabsTrigger>
-          <TabsTrigger value="ask">Ask SITAM AI</TabsTrigger>
-        </TabsList>
-        <TabsContent value="faq" className="faq-tab">
-          <FaqList prefer={audience} />
-          <div className="profile-actions">
-            <Button asChild><a href={gmailCompose(BRAND.contactEmail)} target="_blank" rel="noopener noreferrer">Ask the SITAM office<ArrowUpRight /></a></Button>
-          </div>
-        </TabsContent>
-        <TabsContent value="ask">
-          <AskSitamPage />
-        </TabsContent>
-      </Tabs>
+      <FaqList prefer={audience} />
+      <div className="profile-actions">
+        {user && <Button asChild><Link to="/ask"><Sparkles />Ask SITAM</Link></Button>}
+        <Button asChild variant={user ? 'outline' : 'default'}><a href={gmailCompose(BRAND.contactEmail)} target="_blank" rel="noopener noreferrer">Ask the SITAM office<ArrowUpRight /></a></Button>
+      </div>
     </main>
   );
 }

@@ -66,7 +66,6 @@ function Opportunities() {
   return (
     <main className="container content-page">
       <PageHero
-        eyebrow="SITAM Industry"
         title="Industry and partners"
         text="Vacancies, internships and cases from companies and SITAM labs, and the companies we work with."
         stats={[

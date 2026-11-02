@@ -31,7 +31,6 @@ function Research() {
   return (
     <main className="container content-page">
       <PageHero
-        eyebrow="SITAM Research"
         title="Research at SITAM"
         text="Researchers, publications and citations of the school, from Scopus. Find a supervisor or a paper."
         stats={[

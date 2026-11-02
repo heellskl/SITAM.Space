@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as DashboardRouteImport } from './routes/dashboard'
+import { Route as AskRouteImport } from './routes/ask'
 import { Route as FaqRouteImport } from './routes/faq'
 import { Route as StartupsRouteImport } from './routes/startups'
 import { Route as HomeRouteImport } from './routes/home'
@@ -45,6 +46,11 @@ const AdminRoute = AdminRouteImport.update({
 const DashboardRoute = DashboardRouteImport.update({
   id: '/dashboard',
   path: '/dashboard',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AskRoute = AskRouteImport.update({
+  id: '/ask',
+  path: '/ask',
   getParentRoute: () => rootRouteImport,
 } as any)
 const FaqRoute = FaqRouteImport.update({
@@ -147,6 +153,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/dashboard': typeof DashboardRoute
+  '/ask': typeof AskRoute
   '/faq': typeof FaqRoute
   '/startups': typeof StartupsRoute
   '/home': typeof HomeRoute
@@ -171,6 +178,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/dashboard': typeof DashboardRoute
+  '/ask': typeof AskRoute
   '/faq': typeof FaqRoute
   '/startups': typeof StartupsRoute
   '/home': typeof HomeRoute
@@ -196,6 +204,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/dashboard': typeof DashboardRoute
+  '/ask': typeof AskRoute
   '/faq': typeof FaqRoute
   '/startups': typeof StartupsRoute
   '/home': typeof HomeRoute
@@ -222,6 +231,7 @@ export interface FileRouteTypes {
     | '/'
     | '/admin'
     | '/dashboard'
+    | '/ask'
     | '/faq'
     | '/startups'
     | '/home'
@@ -246,6 +256,7 @@ export interface FileRouteTypes {
     | '/'
     | '/admin'
     | '/dashboard'
+    | '/ask'
     | '/faq'
     | '/startups'
     | '/home'
@@ -270,6 +281,7 @@ export interface FileRouteTypes {
     | '/'
     | '/admin'
     | '/dashboard'
+    | '/ask'
     | '/faq'
     | '/startups'
     | '/home'
@@ -295,6 +307,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRoute
   DashboardRoute: typeof DashboardRoute
+  AskRoute: typeof AskRoute
   FaqRoute: typeof FaqRoute
   StartupsRoute: typeof StartupsRoute
   HomeRoute: typeof HomeRoute
@@ -337,6 +350,13 @@ declare module '@tanstack/react-router' {
       path: '/dashboard'
       fullPath: '/dashboard'
       preLoaderRoute: typeof DashboardRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/ask': {
+      id: '/ask'
+      path: '/ask'
+      fullPath: '/ask'
+      preLoaderRoute: typeof AskRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/faq': {
@@ -479,6 +499,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
   DashboardRoute: DashboardRoute,
+  AskRoute: AskRoute,
   FaqRoute: FaqRoute,
   StartupsRoute: StartupsRoute,
   HomeRoute: HomeRoute,

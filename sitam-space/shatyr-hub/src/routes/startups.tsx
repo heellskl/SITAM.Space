@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { LoginRequiredDialog } from '@/components/login-required';
 import { SearchBar } from '@/components/search-bar';
+import { PageHero } from '@/components/page-hero';
 import { TagInput } from '@/components/tag-input';
 import { useAuth } from '@/lib/auth';
 import {
@@ -21,22 +22,29 @@ export const Route = createFileRoute('/startups')({
 
 const STAGES: StartupStage[] = ['idea', 'prototype', 'mvp'];
 
+const STAGE_TONE: Record<StartupStage, string> = { idea: 'amber', prototype: 'violet', mvp: 'green' };
+
+/** Same card as a lab card: icon + stage chip on top, name, two lines and technologies below. */
 function StartupCard({ p }: { p: Project }) {
   const stage = (p.stage ?? 'idea') as StartupStage;
-  return (
-    <article className="su-card">
-      <div className="su-card-top">
+  const body = (
+    <>
+      <div className="labcard-top">
+        <span className={`labcard-icon tone-${STAGE_TONE[stage]}`} aria-hidden><Rocket size={18} /></span>
+        <span className={`labcard-count su-stage su-${stage}`}>{STARTUP_STAGE_LABEL[stage]}</span>
+        {p.demo_url && <ExternalLink className="labcard-arrow" size={16} aria-hidden />}
+      </div>
+      <div className="labcard-bottom">
         <h3>{p.title}</h3>
-        <span className={`su-stage su-${stage}`}>{STARTUP_STAGE_LABEL[stage]}</span>
+        {p.summary && <p className="su-text" title={p.summary}>{p.summary}</p>}
+        {p.tags.length > 0 && <div className="labcard-tags">{p.tags.slice(0, 5).map((t) => <span key={t}>{t}</span>)}</div>}
+        {p.authors.length > 0 && <small className="su-by">{p.authors.join(', ')}</small>}
       </div>
-      {p.summary && <p className="su-text">{p.summary}</p>}
-      {p.tags.length > 0 && <div className="su-tags">{p.tags.slice(0, 6).map((t) => <span key={t}>{t}</span>)}</div>}
-      <div className="su-foot">
-        <small>{p.authors.join(', ')}</small>
-        {p.demo_url && <Button asChild size="sm" variant="outline"><a href={p.demo_url} target="_blank" rel="noopener noreferrer">Open project<ExternalLink /></a></Button>}
-      </div>
-    </article>
+    </>
   );
+  return p.demo_url
+    ? <a className="labcard" href={p.demo_url} target="_blank" rel="noopener noreferrer" aria-label={`${p.title} — open the project`}>{body}</a>
+    : <div className="labcard is-static">{body}</div>;
 }
 
 function ProposeDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
@@ -109,16 +117,15 @@ function StartupHub() {
 
   return (
     <main className="container content-page">
-      <section className="su-hero">
-        <div>
-          <span className="eyebrow">Startup Hub</span>
-          <h1>Student startups and innovation at SITAM</h1>
-          <p>Explore our students' projects, prototypes and MVPs, or propose your own idea.</p>
-        </div>
-        {(!user || canPropose) && (
-          <Button onClick={() => (user ? setPropose(true) : setLogin(true))}><Plus />Propose a project</Button>
-        )}
-      </section>
+      <PageHero
+        title="Student startups"
+        text="Ideas, prototypes and MVPs of SITAM students. Propose yours: it appears here after a short review."
+        stats={[
+          { label: 'Startups', value: projects.data ? all.length : undefined },
+          { label: 'MVPs', value: projects.data ? all.filter((p) => p.stage === 'mvp').length : undefined },
+        ]}
+        action={(!user || canPropose) ? <Button onClick={() => (user ? setPropose(true) : setLogin(true))}><Plus />Propose a project</Button> : undefined}
+      />
 
       {myPending.length > 0 && (
         <section className="panel su-mine">
@@ -132,19 +139,17 @@ function StartupHub() {
         </section>
       )}
 
-      <div className="su-bar">
-        <div className="su-filters" role="tablist" aria-label="Stage">
-          {(['all', ...STAGES] as const).map((s) => (
-            <button key={s} type="button" role="tab" aria-selected={stage === s} className={stage === s ? 'is-on' : ''} onClick={() => setStage(s)}>
-              {s === 'all' ? 'All' : STARTUP_STAGE_LABEL[s]}
-            </button>
-          ))}
-        </div>
-        <SearchBar value={q} onChange={setQ} placeholder="Search startups, technologies" />
+      <SearchBar value={q} onChange={setQ} placeholder="Search startups, technologies" />
+      <div className="filter-list su-filters" role="tablist" aria-label="Stage">
+        {(['all', ...STAGES] as const).map((s) => (
+          <button key={s} type="button" role="tab" aria-selected={stage === s} className={stage === s ? 'filter active' : 'filter'} onClick={() => setStage(s)}>
+            {s === 'all' ? 'All' : STARTUP_STAGE_LABEL[s]}
+          </button>
+        ))}
       </div>
 
       {projects.isLoading ? <p className="small-note">Loading…</p> : list.length ? (
-        <div className="su-grid">{list.map((p) => <StartupCard key={p.id} p={p} />)}</div>
+        <div className="labcard-grid su-grid">{list.map((p) => <StartupCard key={p.id} p={p} />)}</div>
       ) : (
         <div className="mini-empty"><Rocket size={20} /><p>{all.length ? 'No startups for this filter.' : 'No startups yet. Be the first to propose one.'}</p></div>
       )}

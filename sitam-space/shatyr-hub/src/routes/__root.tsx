@@ -129,6 +129,7 @@ function RootShell({ children }: { children: ReactNode }) {
 /** Signed-in people get the sidebar; guests see a clean, full-width page with a slim top bar (no sidebar). */
 function Shell({ isHome }: { isHome: boolean }) {
   const { user, loading } = useAuth();
+  const onAsk = useRouterState({ select: (st) => st.location.pathname === '/ask' });
   const guest = !user;
   return (
     <div className={guest ? (loading ? "app-shell is-guest is-pending" : "app-shell is-guest") : "app-shell"}>
@@ -139,7 +140,8 @@ function Shell({ isHome }: { isHome: boolean }) {
         <Outlet />
         <HubFooter />
       </div>
-      <AskSitam />
+      {/* on /ask the chat is the page itself, so the floating one is hidden (it reloads the same chat when you leave) */}
+      {!onAsk && <AskSitam />}
     </div>
   );
 }

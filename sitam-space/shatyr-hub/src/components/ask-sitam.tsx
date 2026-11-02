@@ -11,7 +11,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useRouter } from '@tanstack/react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  ArrowUp, BookOpen, Briefcase, CalendarDays, ChevronDown, CircleHelp, FlaskConical, History, Loader2, Maximize2, Minimize2, Minus, PanelRight, RotateCcw, Rocket, Sparkles, Trash2, UserRound,
+  ArrowUp, BookOpen, Briefcase, CalendarDays, ChevronDown, CircleHelp, FlaskConical, History, Loader2, Maximize2, Minus, PanelRight, RotateCcw, Rocket, Sparkles, Trash2, UserRound,
 } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { db } from '@/lib/api';
@@ -39,11 +39,12 @@ const EXAMPLES: { q: string; scope: Scope }[] = [
 ];
 const STORE = 'sitam-ask-v1';
 const VIEW_KEY = 'sitam-ask-view-v1';
-type View = 'float' | 'dock' | 'full';
+// the big view is its own page (/ask), so the floating chat is a small window or a side panel
+type View = 'float' | 'dock';
 const readView = (): { view: View; width: number } => {
   try {
     const v = JSON.parse(localStorage.getItem(VIEW_KEY) ?? '');
-    return { view: v.view === 'dock' || v.view === 'full' ? v.view : 'float', width: Number(v.width) || 440 };
+    return { view: v.view === 'dock' ? 'dock' : 'float', width: Number(v.width) || 440 };
   } catch { return { view: 'float', width: 440 }; }
 };
 const clampWidth = (w: number) => Math.round(Math.min(Math.max(w, 360), Math.min(window.innerWidth * 0.7, 980)));
@@ -178,12 +179,6 @@ export function AskSitam() {
     root.style.setProperty('--ask-dock-w', `${width}px`);
     return () => root.classList.remove('ask-docked');
   }, [open, view, width]);
-  useEffect(() => {
-    if (!open || view !== 'full') return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setView('float'); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, view]);
   const startResize = useCallback((e: { preventDefault(): void }) => {
     e.preventDefault();
     const right = view === 'dock' ? window.innerWidth : window.innerWidth - 20;
@@ -207,7 +202,6 @@ export function AskSitam() {
   // open a page and keep the chat: on a computer the panel stays open, on a phone it folds into the button
   const openUrl = (url: string) => {
     if (window.matchMedia('(max-width: 760px)').matches) setOpen(false);
-    else if (view === 'full') setView('dock'); // keep the chat next to the page that opens
     router.history.push(url);
   };
   const openPage = (s: Source) => openUrl(s.url);
@@ -223,8 +217,8 @@ export function AskSitam() {
         </button>
       )}
       {open && (
-        <section className={`ask-panel is-${view}`} role="dialog" aria-label="Ask SITAM" style={view === 'full' ? undefined : { width: `min(${width}px, calc(100vw - ${view === 'dock' ? 0 : 32}px))` }}>
-          {view !== 'full' && (
+        <section className={`ask-panel is-${view}`} role="dialog" aria-label="Ask SITAM" style={{ width: `min(${width}px, calc(100vw - ${view === 'dock' ? 0 : 32}px))` }}>
+          {(
             <div className="ask-resize" role="separator" aria-orientation="vertical" aria-label="Resize the chat" tabIndex={0}
               onPointerDown={startResize} onKeyDown={(e) => { if (e.key === 'ArrowLeft') nudge(24); if (e.key === 'ArrowRight') nudge(-24); }} />
           )}
@@ -234,10 +228,8 @@ export function AskSitam() {
             {msgs.length > 0 && <button type="button" className="ask-icon" onClick={reset} title="New chat" aria-label="New chat"><RotateCcw size={16} /></button>}
             <button type="button" className={view === 'dock' ? 'ask-icon is-on hide-sm' : 'ask-icon hide-sm'} onClick={() => setView(view === 'dock' ? 'float' : 'dock')}
               title={view === 'dock' ? 'Back to a small window' : 'Side panel — the page stays visible'} aria-pressed={view === 'dock'} aria-label="Side panel"><PanelRight size={16} /></button>
-            <button type="button" className="ask-icon" onClick={() => setView(view === 'full' ? 'float' : 'full')}
-              title={view === 'full' ? 'Exit full screen (Esc)' : 'Expand to full screen'} aria-label={view === 'full' ? 'Exit full screen' : 'Expand'}>
-              {view === 'full' ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-            </button>
+            <button type="button" className="ask-icon" onClick={() => { setOpen(false); router.history.push('/ask'); }}
+              title="Open as a page — with your saved questions" aria-label="Open Ask SITAM as a page"><Maximize2 size={16} /></button>
             <button type="button" className="ask-icon" onClick={() => setOpen(false)} title="Minimise — the chat is kept" aria-label="Minimise"><Minus size={18} /></button>
           </header>
 
@@ -287,7 +279,10 @@ export function AskSitam() {
 export function AskSitamPage() {
   const { user } = useAuth();
   const router = useRouter();
-  const { msgs, setMsgs, scope, setScope, busy, ask } = useAskChat([], 'auto');
+  const [start] = useState(load);
+  // the same conversation as the floating chat: it continues here and goes back with you
+  const { msgs, setMsgs, scope, setScope, busy, ask } = useAskChat(start.msgs, start.scope);
+  useEffect(() => { try { sessionStorage.setItem(STORE, JSON.stringify({ msgs: msgs.slice(-30), open: false, scope })); } catch { /* storage blocked */ } }, [msgs, scope]);
   const archive = useAskArchive(!!user);
   const qc = useQueryClient();
   const [q, setQ] = useState('');
