@@ -49,7 +49,9 @@ alter table public.profiles add column if not exists personal_email text
   check (personal_email is null or personal_email ~* '^[^@\s]+@[^@\s]+\.[^@\s]+$');
 grant update (personal_email) on public.profiles to authenticated;
 
-create or replace view public.public_people as
+-- drop first: an older version of this view may have other columns ("cannot drop columns from view")
+drop view if exists public.public_people;
+create view public.public_people as
   select p.id, p.first_name, p.last_name, p.role::text as role, p.email, p.course, p.major, p.department, p.position, p.bio,
          p.faculty, p.group_name, p.avatar_url, p.personal_email
     from public.profiles p;

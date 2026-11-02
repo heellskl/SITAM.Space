@@ -10,6 +10,8 @@ import {
 import { PeoplePicker } from '@/components/people-picker';
 import { SearchBar } from '@/components/search-bar';
 import { TagManager } from '@/components/tag-manager';
+import { ResearcherRequestsAdmin } from '@/components/onboarding';
+import { ScopusBulkImport } from '@/components/publications-editor';
 import { AiIndexPanel } from '@/components/ai-index-panel';
 import { AccountClaimsPanel, CompanyRequestsPanel } from '@/components/manage-panels';
 import { HEAD_ROLES, humanError, useAdminLabActions, useLabs, useSetLabKind, type Lab } from '@/lib/api';
@@ -131,6 +133,8 @@ function Admin() {
         })}
       </section>
 
+      <ResearcherRequestsAdmin />
+      <ScopusBulkImport />
       <TagManager />
       <AiIndexPanel />
 

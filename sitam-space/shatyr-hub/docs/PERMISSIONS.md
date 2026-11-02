@@ -13,10 +13,11 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 | Guest | not signed in |
 | Student | `profiles.role = 'student'` (chosen at registration, SDU e-mail required). Legacy `phd` accounts behave like students. |
 | Teacher | `profiles.role = 'teacher'` (chosen at registration, SDU e-mail required). **Verified teacher** = `staff_verified = true` (`is_staff()`). |
-| Partner | `profiles.role = 'partner'`, **active** member of a company (`company_members.status = 'active'`). **Verified partner** = the company has `verified = true`. Joining an existing company by name is a pending request until the coordinator or a company owner approves it (v17). |
+| Partner | `profiles.role = 'partner'`, **active** member of a company (`company_members.status = 'active'`). **Verified partner** = the company has `verified = true`. Joining an existing company by name is a pending request until the coordinator or a company owner approves it (v20). |
 | Lab member | has a `lab_members` row in a lab with a non-head position (member, mentor, project_coordinator, research_assistant, student_researcher, and legacy student_lead / deputy_student_lead). |
-| Lab head | `lab_members.role` in (`lead`, `co_lead`) for **that** lab → `can_edit = true` → `is_lab_manager(lab)`. A student or a teacher. Extra to the base role, never replaces it. A seat listed with the person's e-mail is linked only after the coordinator confirms the account (`account_claims`, v17). |
-| Coordinator | row in `coordinator_emails` **bound to the account** (`user_id`, v17) → `is_coordinator()`; `is_admin()` is true for them. An e-mail on the list alone gives nothing. |
+| Lab head | `lab_members.role` in (`lead`, `co_lead`) for **that** lab → `can_edit = true` → `is_lab_manager(lab)`. A student or a teacher. Extra to the base role, never replaces it. A seat listed with the person's e-mail is linked only after the coordinator confirms the account (`account_claims`, v20). |
+| Alumni | `profiles.role = 'alumni'` (v17): any e-mail; faculty, graduation year, job title, company. |
+| Coordinator | row in `coordinator_emails` **bound to the account** (`user_id`, v20) → `is_coordinator()`; `is_admin()` is true for them. An e-mail on the list alone gives nothing. |
 
 ## Matrix
 
@@ -35,7 +36,8 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 | 10 | Create / rename / delete a lab | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | `admin_create_lab`, RLS `labs` (admin) |
 | 11 | Edit lab information (about, logo, socials, photos, achievements, teaching, partners, alumni) | ❌ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | RLS `labs` update: `is_lab_manager` |
 | 12 | Read lab Internal section | ❌ | ❌ | ⚠️ verified teachers can read **all** labs' internals (`is_staff`) — confirm with the user if this is intended | ❌ | ❌ | 🔒 | ✅ | RLS `lab_internal` select |
-| 13 | Assign / remove a lab head | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | `assign_lab_head`, `remove_lab_head`, trigger `lab_members_guard` |
+| 13 | Assign / remove a lab Head (`lead`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | `assign_lab_head`, `remove_lab_head`, trigger `lab_members_guard` |
+| 13a | Appoint / remove a Co-Head (`co_lead`) in the lab (v17, approved by the user 2026-10-31) | ❌ | ❌ | ❌ | ❌ | ❌ | 🔒 only the Head (`lead`) of that lab, not themselves | ✅ | `add_lab_member`, `lab_members_guard`, `is_lab_lead` |
 | 14 | Add / remove members, change a member's position (non-head positions only) | ❌ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | `add_lab_member` (registered users only), RLS + `lab_members_guard` |
 | 15 | Create / edit / delete lab projects | ❌ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | RLS `projects` (`is_lab_manager(lab_id)`), column grants |
 | 16 | Submit own (non-lab) project / research | ❌ | ❌ (closed) | ❌ | ❌ | ❌ | ❌ | ❌ | `submit_project` raises NOT_ALLOWED |
@@ -50,8 +52,6 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 | 25 | Submit a B2B brief (/partners) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | RLS insert `partner_requests` |
 | 26 | Read B2B briefs | ❌ | ❌ | ✅ verified (all) | 🔒 own | ❌ | ❌ | ✅ | RLS `partner_requests` select |
 | 27 | See the Admin page (/admin) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | UI `caps.isCoordinator`; every action re-checked in SQL |
-| 28 | Confirm that a new account owns a listed e-mail (lab seat, researcher page) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | `account_claims_inbox`, `decide_account_claim` |
-| 29 | Approve a request to join an existing company | ❌ | ❌ | ❌ | 🔒 owner of that company | — | — | ✅ | `company_join_requests`, `decide_company_member` |
 
 ## Invariants (must always hold)
 
@@ -61,11 +61,47 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 4. A head removed by the coordinator stays in the lab as `member`.
 5. Clients never write `lab_members.user_id`, `lab_members.can_edit`, `lab_members.lab_id`, nor insert directly into `applications`, `events`, `event_hosts`, `opportunity_hosts`, `opportunities`, `event_registrations`.
 6. CVs: visible only to the owner and to reviewers of the exact application. Phones are never public.
-8. Registration does not prove an e-mail (accounts are confirmed at once). No right may come from a typed e-mail alone: lab seats, researcher pages and coordinator rows are bound to an account by the coordinator / project owner; company membership by the coordinator or a company owner.
 7. Whatever a lab creates (event, project, case) appears in every matching section automatically (Events / Projects / Opportunities + the lab page).
+8. Registration does not prove an e-mail (accounts are confirmed at once). No right may come from a typed e-mail alone: lab seats, researcher pages and coordinator rows are bound to an account by the coordinator / project owner; company membership by the coordinator or a company owner.
 
 ## Open questions (ask the user before relying on them)
 
 - Row 12: should verified teachers read the Internal section of **every** lab, or only heads + coordinator?
 - Row 8: should partners be able to register for events?
 - Row 26: should all verified teachers read all B2B briefs?
+
+## v17 additions (approved by the user on 2026-10-31)
+
+| # | Action | Who | Where enforced |
+|---|---|---|---|
+| 28 | Register as SDU Alumni with a personal e-mail | anyone | `enforce_signup_email`, `handle_new_user` |
+| 29 | "Offer help" to a lab (mentor / guest speaker / research advisor) | alumni only | `offer_help` |
+| 30 | See and answer offers of help | heads of that lab, coordinator; the author sees own | RLS `help_offers`, `respond_help_offer` |
+| 31 | Alumni apply to opportunities / submit student projects | ❌ never | `submit_application` (student/phd only), `submit_project` |
+| 32 | Request a researcher profile / claim an unlinked card | teachers (and legacy PhD) | `request_researcher_profile` |
+| 33 | Approve / reject researcher profile requests | coordinator | `review_researcher_request` |
+| 34 | Edit a researcher card (bio, interests, office hours, ORCID / Scholar / Scopus ID) | only the teacher linked to that card | `update_my_researcher_profile` |
+| 35 | B2B "Contact a lab" / "Offer an internship" | anyone; read by the SITAM office only (as row 26) | RLS `partner_requests` |
+
+## v18 additions (approved by the user on 2026-10-31)
+
+| # | Action | Who | Where enforced |
+|---|---|---|---|
+| 36 | Add / edit / remove papers on a researcher card, import an own Scopus CSV | the teacher linked to that card; the coordinator for every card | `save_publication`, `remove_publication`, `import_publications` (`can_edit_professor`) |
+| 37 | Import one Scopus export for many researchers (matched by Scopus Author ID) | coordinator | `import_publications` per card |
+
+## v19 additions (approved by the user on 2026-11-02)
+
+| # | Action | Who | Where enforced |
+|---|---|---|---|
+| 38 | Edit own work / internship history (`profiles.experience`); others see it when signed in (as row 2) | the person themselves | column grant + RLS "Update own profile", check `valid_experience`; view `public_people` |
+
+## v20 additions — account safety (asked for by the user on 2026-10-30)
+
+| # | Action | Who | Where enforced |
+|---|---|---|---|
+| 39 | Confirm that a new account owns an e-mail listed in a lab team (sign-up or personal e-mail) | coordinator | `account_claims_inbox`, `decide_account_claim` |
+| 40 | A sign-up or personal e-mail that matches a researcher card creates a "This is me" request (row 33 approves it); nothing is linked automatically | automatic | `create_account_claims`, `researcher_profile_requests` |
+| 41 | Approve a request to join an existing company | coordinator; owner of that company | `company_join_requests`, `decide_company_member` |
+| 42 | Sign in with the personal e-mail from Profile → Settings and the same password | the account owner (one account per personal e-mail) | `sign_in_email`, `profiles_personal_email_guard` |
+

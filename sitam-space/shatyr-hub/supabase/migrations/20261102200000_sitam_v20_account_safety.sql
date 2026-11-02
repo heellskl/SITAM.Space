@@ -1,20 +1,21 @@
-/* SITAM SPACE v17 — account safety, sign-in with a personal e-mail, Ask SITAM fixes
-   ───────────────────────────────────────────────────────────────────────────────
+/* SITAM SPACE v20 — account safety, sign-in with a personal e-mail, Ask SITAM fixes
+   ──────────────────────────────────────────────────────────────────────────────
    Since v9.5 new accounts are confirmed at once (no e-mail code), so the site cannot prove that a person owns the
-   e-mail they typed. Nothing that gives rights may therefore depend on the e-mail alone:
+   e-mail they typed (or the personal e-mail added in Profile). Nothing that gives rights may depend on an e-mail alone:
 
-   • Lab seats and professor pages are no longer linked automatically at sign-up. A registration whose e-mail is
-     listed in a lab team or on a professor page creates an account claim; the coordinator confirms or rejects it in
-     Manage → Admin (decide_account_claim). Until then the person has no lab rights.
-   • Coordinators are bound to an account (coordinator_emails.user_id), not only to an e-mail. Existing coordinator
-     accounts are bound below. To add a coordinator after the person has registered:
+   • Lab seats listed with an e-mail are no longer linked at sign-up: an account claim is created and the coordinator
+     confirms it (Admin → "Accounts to confirm", decide_account_claim).
+   • Researcher cards with a matching e-mail (professors.email or professors.alt_emails) are no longer linked at
+     sign-up either: a researcher profile request ("This is me", v17) is created for the coordinator.
+   • The same happens when someone adds a personal e-mail in Profile → Settings that matches a seat or a card.
+   • Coordinators are bound to an account (coordinator_emails.user_id). Existing coordinator accounts are bound below.
+     To add a coordinator after the person has registered:
        insert into public.coordinator_emails (email) values ('name@sdu.edu.kz');      -- binds the existing account
      If the row already exists, bind it with:
        update public.coordinator_emails c set user_id = u.id from auth.users u
         where lower(u.email) = c.email and c.email = 'name@sdu.edu.kz';
    • A partner who types the name of an existing company joins it only after approval by the coordinator or an owner
-     of that company (company_members.status = 'pending' → decide_company_member). A new company name still creates
-     a new, unverified company with the person as owner.
+     of that company (company_members.status = 'pending' → decide_company_member).
    • Students and teachers register with their SDU e-mail only. Later they may add a personal e-mail in
      Profile → Settings and sign in with it and the same password: sign_in_email(e-mail, password) returns the
      account's sign-in e-mail when the password is right. A personal e-mail can belong to one account only.
@@ -24,20 +25,18 @@
 create schema if not exists extensions;
 create extension if not exists pgcrypto with schema extensions;
 
-/* ───────────── account claims: lab seats and professor pages ───────────── */
+/* ───────────── account claims: lab seats listed with an e-mail ───────────── */
 create table if not exists public.account_claims (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles(id) on delete cascade,
-  kind text not null check (kind in ('lab_seat', 'professor')),
-  member_id uuid references public.lab_members(id) on delete cascade,
-  professor_id uuid references public.professors(id) on delete cascade,
+  member_id uuid not null references public.lab_members(id) on delete cascade,
+  matched_email text,
   status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
   created_at timestamptz not null default now(),
   decided_at timestamptz,
-  decided_by uuid,
-  check ((kind = 'lab_seat' and member_id is not null) or (kind = 'professor' and professor_id is not null))
+  decided_by uuid
 );
-create unique index if not exists account_claims_once on public.account_claims (user_id, kind, coalesce(member_id, professor_id));
+create unique index if not exists account_claims_once on public.account_claims (user_id, member_id);
 alter table public.account_claims enable row level security;
 drop policy if exists "Own claims and coordinator" on public.account_claims;
 create policy "Own claims and coordinator" on public.account_claims for select to authenticated
@@ -125,10 +124,11 @@ begin
     end if;
     return new;
   end if;
-  if v_role = 'partner' or public.is_sdu_email(new.email) then
+  -- students and teachers need an SDU e-mail; partners and alumni may use any e-mail (v17)
+  if v_role in ('partner', 'alumni') or public.is_sdu_email(new.email) then
     return new;
   end if;
-  raise exception 'SITAM_EMAIL_DOMAIN: students and professors must register with an @sdu.edu.kz e-mail'
+  raise exception 'SITAM_EMAIL_DOMAIN: students and teachers must register with an @sdu.edu.kz e-mail'
     using errcode = 'P0001';
 end;
 $$;
@@ -166,7 +166,38 @@ $$;
 revoke execute on function public.sign_in_email(text, text) from public;
 grant execute on function public.sign_in_email(text, text) to anon, authenticated;
 
-/* ───────────── sign-up: no rights from an unproven e-mail ───────────── */
+/* ───────────── an e-mail that matches a lab seat or a researcher card → request for the coordinator ───────────── */
+-- older e-mails of a researcher (e.g. on papers from a previous university); private: no column grant to the site
+alter table public.professors add column if not exists alt_emails text[] not null default '{}';
+
+create or replace function public.create_account_claims(p_user uuid, p_email text)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_email text := nullif(lower(trim(coalesce(p_email, ''))), ''); v_prof public.professors;
+begin
+  if p_user is null or v_email is null then return; end if;
+  insert into public.account_claims (user_id, member_id, matched_email)
+  select p_user, m.id, v_email
+    from public.lab_members m join public.lab_member_contacts c on c.member_id = m.id
+   where lower(c.email) = v_email and m.user_id is null and m.role::text <> 'former_lead'
+  on conflict do nothing;
+  -- researcher card: the same request the teacher would send with "This is me" (one pending request per person)
+  if not exists (select 1 from public.professors where profile_id = p_user)
+     and not exists (select 1 from public.researcher_profile_requests where user_id = p_user and status = 'pending') then
+    select * into v_prof from public.professors pr
+     where pr.profile_id is null
+       and (lower(pr.email) = v_email or v_email = any (select lower(x) from unnest(pr.alt_emails) x))
+     order by pr.full_name limit 1;
+    if v_prof.id is not null then
+      insert into public.researcher_profile_requests (user_id, professor_id, full_name, title, degree, scholar_url, orcid_url, note)
+      values (p_user, v_prof.id, left(v_prof.full_name, 160), left(v_prof.job_title, 160), left(v_prof.degree, 120), v_prof.scholar_url, v_prof.orcid_url,
+              'Automatic: the account e-mail ' || v_email || ' matches this researcher card. E-mails are not verified — confirm it is really this person.');
+    end if;
+  end if;
+end;
+$$;
+revoke execute on function public.create_account_claims(uuid, text) from anon, authenticated, public;
+
+/* ───────────── sign-up: no rights from an unproven e-mail (v17 handle_new_user + v20 changes) ───────────── */
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer set search_path = public as $$
 declare
@@ -180,6 +211,7 @@ declare
 begin
   v_role := case
     when v_meta->>'role' = 'partner' then 'partner'
+    when v_meta->>'role' = 'alumni' then 'alumni'
     when v_meta->>'role' in ('teacher', 'professor') and public.is_sdu_email(new.email) then 'teacher'
     when v_meta->>'role' in ('student', 'phd') and public.is_sdu_email(new.email) then 'student'
     else public.account_type_from_email(new.email)
@@ -189,7 +221,7 @@ begin
     v_last := coalesce(v_last, nullif(trim(substr(v_full, char_length(split_part(v_full, ' ', 1)) + 1)), ''));
   end if;
 
-  insert into public.profiles (id, role, first_name, last_name, email, course, major, department, position, phone)
+  insert into public.profiles (id, role, first_name, last_name, email, course, major, department, position, phone, faculty, graduation_year, company)
   values (
     new.id, v_role::public.app_role,
     left(coalesce(v_first, ''), 100), left(coalesce(v_last, ''), 100),
@@ -197,8 +229,11 @@ begin
     case when v_role = 'student' and v_meta->>'course' ~ '^[1-6]$' then (v_meta->>'course')::smallint end,
     case when v_role = 'student' then nullif(left(v_meta->>'major', 100), '') end,
     case when v_role = 'teacher' then nullif(left(v_meta->>'department', 100), '') end,
-    case when v_role = 'partner' then nullif(left(v_meta->>'position', 100), '') end,
-    case when v_meta->>'phone' ~ '^[0-9 +()-]{6,24}$' then v_meta->>'phone' end
+    case when v_role in ('partner', 'alumni') then nullif(left(v_meta->>'position', 100), '') end,
+    case when v_meta->>'phone' ~ '^[0-9 +()-]{6,24}$' then v_meta->>'phone' end,
+    case when v_role = 'alumni' then nullif(left(v_meta->>'faculty', 120), '') end,
+    case when v_role = 'alumni' and v_meta->>'graduation_year' ~ '^(19|20)[0-9]{2}$' then (v_meta->>'graduation_year')::int end,
+    case when v_role = 'alumni' then v_company_name end
   )
   on conflict (id) do nothing;
 
@@ -220,35 +255,37 @@ begin
     end if;
   end if;
 
-  -- listed in a lab team or on a professor page: the coordinator confirms it is really this person
-  insert into public.account_claims (user_id, kind, member_id)
-  select new.id, 'lab_seat', m.id
-    from public.lab_members m join public.lab_member_contacts c on c.member_id = m.id
-   where c.email = lower(new.email) and m.user_id is null and m.role::text <> 'former_lead'
-  on conflict do nothing;
-  insert into public.account_claims (user_id, kind, professor_id)
-  select new.id, 'professor', pr.id from public.professors pr
-   where lower(pr.email) = lower(new.email) and pr.profile_id is null
-  on conflict do nothing;
+  perform public.create_account_claims(new.id, new.email);
   return new;
 end;
 $$;
 
-/* ───────────── coordinator: confirm or reject claims ───────────── */
-drop function if exists public.account_claims_inbox();  -- v17.2 adds a column; dropping keeps both files re-runnable
+/* Profile → Settings: a new personal e-mail can also match a lab seat or a researcher card */
+create or replace function public.profiles_personal_email_claims()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if new.personal_email is not null and new.personal_email is distinct from old.personal_email then
+    perform public.create_account_claims(new.id, new.personal_email);
+  end if;
+  return new;
+end;
+$$;
+drop trigger if exists profiles_personal_email_claims on public.profiles;
+create trigger profiles_personal_email_claims after update of personal_email on public.profiles
+  for each row execute function public.profiles_personal_email_claims();
+
+/* ───────────── coordinator: confirm or reject lab seat claims ───────────── */
+drop function if exists public.account_claims_inbox();
 create function public.account_claims_inbox()
-returns table (id uuid, kind text, status text, created_at timestamptz, user_id uuid, first_name text, last_name text,
-               email text, role text, target text, target_detail text, lab_slug text, professor_username text)
+returns table (id uuid, status text, created_at timestamptz, user_id uuid, first_name text, last_name text,
+               email text, role text, target text, target_detail text, lab_slug text, matched_email text)
 language sql stable security definer set search_path = public as $$
-  select c.id, c.kind, c.status, c.created_at, p.id, p.first_name, p.last_name, p.email, p.role::text,
-         coalesce(l.name, pr.full_name),
-         case when c.kind = 'lab_seat' then m.full_name || ' · ' || initcap(replace(m.role::text, '_', ' ')) else 'Researcher page' end,
-         l.slug, pr.username
+  select c.id, c.status, c.created_at, p.id, p.first_name, p.last_name, p.email, p.role::text,
+         l.name, m.full_name || ' · ' || initcap(replace(m.role::text, '_', ' ')), l.slug, c.matched_email
     from public.account_claims c
     join public.profiles p on p.id = c.user_id
-    left join public.lab_members m on m.id = c.member_id
-    left join public.labs l on l.id = m.lab_id
-    left join public.professors pr on pr.id = c.professor_id
+    join public.lab_members m on m.id = c.member_id
+    join public.labs l on l.id = m.lab_id
    where public.is_coordinator() and c.status = 'pending'
    order by c.created_at desc
 $$;
@@ -262,15 +299,11 @@ begin
   if c.id is null then raise exception 'NOT_FOUND: claim'; end if;
   if c.status <> 'pending' then raise exception 'ALREADY_DECIDED: this request was already decided'; end if;
   if p_approve then
-    if c.kind = 'lab_seat' then
-      if exists (select 1 from public.lab_members x join public.lab_members m on m.id = c.member_id
-                  where x.lab_id = m.lab_id and x.user_id = c.user_id) then
-        raise exception 'DUPLICATE: this person is already in the lab';
-      end if;
-      update public.lab_members set user_id = c.user_id where id = c.member_id and user_id is null;
-    else
-      update public.professors set profile_id = c.user_id where id = c.professor_id and profile_id is null;
+    if exists (select 1 from public.lab_members x join public.lab_members m on m.id = c.member_id
+                where x.lab_id = m.lab_id and x.user_id = c.user_id) then
+      raise exception 'DUPLICATE: this person is already in the lab';
     end if;
+    update public.lab_members set user_id = c.user_id where id = c.member_id and user_id is null;
     get diagnostics n = row_count;
     if n = 0 then raise exception 'TAKEN: this place is already linked to another account'; end if;
   end if;
@@ -341,10 +374,9 @@ returns jsonb language sql stable security definer set search_path = public as $
       from public.company_members cm join public.companies c on c.id = cm.company_id
       where cm.user_id = auth.uid() and cm.status = 'pending'), '[]'::jsonb),
     'pending_claims', coalesce((
-      select jsonb_agg(coalesce(l.name, pr.full_name) order by ac.created_at)
+      select jsonb_agg(l.name order by ac.created_at)
       from public.account_claims ac
-      left join public.lab_members m on m.id = ac.member_id left join public.labs l on l.id = m.lab_id
-      left join public.professors pr on pr.id = ac.professor_id
+      join public.lab_members m on m.id = ac.member_id join public.labs l on l.id = m.lab_id
       where ac.user_id = auth.uid() and ac.status = 'pending'), '[]'::jsonb),
     'professor', (select jsonb_build_object('username', username, 'full_name', full_name) from public.professors where profile_id = auth.uid() limit 1),
     'saved_labs', coalesce((select jsonb_agg(lab_id) from public.saved_labs where user_id = auth.uid()), '[]'::jsonb),

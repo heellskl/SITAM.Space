@@ -1,5 +1,6 @@
--- SITAM SPACE v17.1 — researcher Amine Sbai (Statistics lab head): profile + 7 Scopus papers with citations
--- (Scopus author page 57223768105, 2026-10-30: 18 citations, h-index 3). Generated with scripts/build-seed.mjs. Re-runnable.
+-- SITAM SPACE v20.1 — researcher Amine Sbai (Statistics lab head): profile + 7 Scopus papers with citations
+-- (Scopus author page 57223768105, 2026-10-30: 18 citations, h-index 3) and his older e-mails from the papers.
+-- Generated with scripts/build-seed.mjs. Re-runnable.
 
 -- Amine Sbai
 insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
@@ -13,6 +14,7 @@ on conflict (username) do update set first_name = excluded.first_name, last_name
   orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
   i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
   keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+update public.professors set alt_emails = array['a.sbai@uhp.ac.ma', 'asbai@correo.ugr.es']::text[] where username = 'amine.sbai';
 insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
 select 'Boundary controllability for a coupled system of parabolic equations with singular potentials', 2022, 'Article', 'https://doi.org/10.1007/s00030-022-00792-1', 'Nonlinear Differential Equations and Applications NoDEA',
   'Springer Nature', 1, false, 'https://www.scopus.com/pages/publications/85134416991?origin=resultslist', '2-s2.0-85134416991', array['controllability', 'singular parabolic systems', 'biorthogonal families', 'spectral analysis', 'moment method']::text[]

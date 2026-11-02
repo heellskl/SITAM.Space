@@ -133,7 +133,8 @@ function Shell({ isHome }: { isHome: boolean }) {
   return (
     <div className={guest ? (loading ? "app-shell is-guest is-pending" : "app-shell is-guest") : "app-shell"}>
       {!guest && <AppSidebar />}
-      <div className={isHome ? "app-main on-hero" : "app-main"}>
+      {/* signed-in people keep the normal top bar and logo colours on the landing page too */}
+      <div className={isHome && guest ? "app-main on-hero" : "app-main"}>
         <TopBar />
         <Outlet />
         <HubFooter />

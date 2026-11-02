@@ -105,7 +105,38 @@ grant execute on function public.ai_index_status() to authenticated;
 grant execute on function public.ai_pending_documents(int), public.ai_upsert_document(text, text, text, text, text, text, extensions.vector), public.ai_remove_stale(), public.ai_take_quota(uuid, int), public.match_documents(extensions.vector, int, float, text[]), public.ai_index_status() to service_role;
 revoke execute on function public.match_documents(extensions.vector, int, float, text[]) from anon, public;
 grant execute on function public.match_documents(extensions.vector, int, float, text[]) to authenticated, service_role;
--- v17: account safety (guarded: this file may run before v17 exists)
+grant execute on function public.is_lab_lead(uuid) to authenticated;
+grant update (graduation_year, company) on public.profiles to authenticated;
+revoke all on public.public_people from anon, public;
+grant select on public.public_people to authenticated;
+revoke insert, update, delete on public.help_offers from anon, authenticated;
+grant select on public.help_offers to authenticated;
+grant select (bio, office_hours, interests) on public.professors to anon, authenticated;
+revoke insert, update, delete on public.researcher_profile_requests from anon, authenticated;
+grant select on public.researcher_profile_requests to authenticated;
+revoke execute on function public.offer_help(uuid, text, text) from anon, public;
+revoke execute on function public.respond_help_offer(uuid, text) from anon, public;
+revoke execute on function public.request_researcher_profile(uuid, text, text, text, text, text, text, text, text) from anon, public;
+revoke execute on function public.review_researcher_request(uuid, boolean, text) from anon, public;
+revoke execute on function public.update_my_researcher_profile(text, text, text[], text, text, text) from anon, public;
+grant execute on function public.offer_help(uuid, text, text) to authenticated;
+grant execute on function public.respond_help_offer(uuid, text) to authenticated;
+grant execute on function public.request_researcher_profile(uuid, text, text, text, text, text, text, text, text) to authenticated;
+grant execute on function public.review_researcher_request(uuid, boolean, text) to authenticated;
+grant execute on function public.update_my_researcher_profile(text, text, text[], text, text, text) to authenticated;
+grant select (publications_updated_at) on public.professors to anon, authenticated;
+revoke execute on function public.can_edit_professor(uuid) from anon, public;
+grant execute on function public.can_edit_professor(uuid) to authenticated;
+revoke execute on function public.save_publication(uuid, uuid, text, int, text, text, text, text, int, boolean) from anon, public;
+revoke execute on function public.remove_publication(uuid, uuid) from anon, public;
+revoke execute on function public.import_publications(uuid, jsonb) from anon, public;
+grant execute on function public.save_publication(uuid, uuid, text, int, text, text, text, text, int, boolean) to authenticated;
+grant execute on function public.remove_publication(uuid, uuid) to authenticated;
+grant execute on function public.import_publications(uuid, jsonb) to authenticated;
+grant update (experience) on public.profiles to authenticated;
+revoke all on public.public_people from anon, public;
+grant select on public.public_people to authenticated;
+-- v20: account safety (guarded: this file may run before v20 exists)
 do $$ begin
   if to_regprocedure('public.ai_refund_quota(uuid)') is not null then
     revoke execute on function public.ai_refund_quota(uuid) from anon, authenticated, public;
@@ -117,6 +148,9 @@ do $$ begin
   if to_regprocedure('public.decide_account_claim(uuid, boolean)') is not null then
     revoke execute on function public.account_claims_inbox(), public.decide_account_claim(uuid, boolean),
       public.company_join_requests(), public.decide_company_member(uuid, uuid, boolean) from anon, public;
+  end if;
+  if to_regprocedure('public.create_account_claims(uuid, text)') is not null then
+    revoke execute on function public.create_account_claims(uuid, text) from anon, authenticated, public;
   end if;
 end $$;
 revoke insert, update, delete on public.company_members from anon, authenticated;

@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { gmailCompose } from '@/lib/utils';
 import { Link } from '@tanstack/react-router';
 import { PhotoGallery } from '@/components/photo-gallery';
+import { OfferHelpButton } from '@/components/onboarding';
 import {
   ArrowLeft, ArrowUpRight, Award, Bookmark, BookmarkCheck, BriefcaseBusiness, CalendarDays, Crown, ExternalLink, FlaskConical, History,
   CalendarPlus, GraduationCap, Inbox, Landmark, Lock, Mail, MapPin, Pencil, Plus, Rocket, Trophy, UserCog, Users,
@@ -120,6 +121,11 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
             <Button variant="outline" onClick={() => toggle(lab)}>
               {saved.includes(lab.id) ? <><BookmarkCheck />Saved</> : <><Bookmark />Save lab</>}
             </Button>
+          )}
+          <OfferHelpButton labId={lab.id} labName={lab.name} />
+          {/* partners, alumni and guests: write to the lab through the SITAM office */}
+          {!isManager && !mine && !caps.isStudent && !caps.isTeacher && (
+            <Button asChild variant="outline"><Link to="/partners" search={{ lab: lab.slug }}><Mail />Contact this lab</Link></Button>
           )}
           {isManager && (
             <>

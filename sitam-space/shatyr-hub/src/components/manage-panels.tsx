@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import {
   CATEGORY_LABEL, INDUSTRIAL_LABEL, KIND_LABEL, MODERATION_LABEL, STATUS_LABEL, STATUS_TONE, formatDate, hostNames, humanError, opportunityLabel, signedUrl,
   useAccountClaims, useAdminAction, useBriefs, useCompanies, useCompanyRequests, useDecideClaim, useDecideCompanyMember, useDeleteOpportunity, useInbox, useManagedOpportunities, useModerate, useModerationQueue, useOpportunities, usePendingTeachers, useProjects,
-  uploadLabImage, useReviewApplication, useSaveEvent, useSaveOpportunity, useSetPoster, useUpdateBrief,
+  uploadLabImage, useLabs, useReviewApplication, useSaveEvent, useSaveOpportunity, useSetPoster, useUpdateBrief,
   type ApplicationStatus, type CompanyJoinRequest, type InboxItem, type IndustrialType, type ModerationItem, type Opportunity, type OpportunityCategory, type PartnerRequest,
 } from '@/lib/api';
 import { ROLE_LABEL, useAuth, type Role } from '@/lib/auth';
@@ -462,11 +462,13 @@ export function EventsPanel() {
 
 /* ═════════════════════ B2B ═════════════════════ */
 
-const BRIEF_TYPE: Record<PartnerRequest['request_type'], string> = { rnd: 'R&D', mvp: 'MVP outsourcing', hiring: 'Hiring', sponsorship: 'Sponsorship' };
+const BRIEF_TYPE: Record<PartnerRequest['request_type'], string> = { rnd: 'R&D challenge', mvp: 'MVP outsourcing', hiring: 'Hiring', sponsorship: 'Sponsorship', internship: 'Internship / vacancy', contact_lab: 'Contact a lab' };
 
 export function BriefsPanel({ staff }: { staff: boolean }) {
   const briefs = useBriefs(true);
   const update = useUpdateBrief();
+  const labs = useLabs();
+  const labName = (id?: string | null) => (id ? labs.data?.find((l) => l.id === id)?.name : undefined);
   return (
     <section className="panel">
       <h3 className="panel-title"><Building2 size={15} />{staff ? 'B2B requests' : 'Your B2B requests'}</h3>
@@ -477,7 +479,7 @@ export function BriefsPanel({ staff }: { staff: boolean }) {
           {(briefs.data ?? []).map((b) => (
             <li key={b.id} className="brief-row">
               <div>
-                <strong>{b.company_name} · {BRIEF_TYPE[b.request_type]}</strong>
+                <strong>{b.company_name} · {BRIEF_TYPE[b.request_type] ?? b.request_type}{labName(b.requested_lab_id) ? ` → ${labName(b.requested_lab_id)}` : ''}</strong>
                 <small>{b.contact_name} · <a href={gmailCompose(b.contact_email)} target="_blank" rel="noopener noreferrer">{b.contact_email}</a> · {b.has_budget ? `budget: ${b.budget_range ?? 'yes'}` : 'no budget yet'} · {b.tech_stack}</small>
                 <p className="lab-text">{b.description}</p>
               </div>
@@ -496,7 +498,7 @@ export function BriefsPanel({ staff }: { staff: boolean }) {
 
 /* ═════════════════════ Admin ═════════════════════ */
 
-/** v17: new accounts whose e-mail is listed in a lab team or on a researcher page. Registration does not prove the
+/** v20: accounts whose sign-up or personal e-mail is listed in a lab team. Registration does not prove the
  *  e-mail, so the coordinator confirms the person before the place (and any head rights) is linked. */
 export function AccountClaimsPanel() {
   const { caps } = useAuth();
@@ -509,7 +511,7 @@ export function AccountClaimsPanel() {
   return (
     <section className="panel">
       <h3 className="panel-title"><ShieldCheck size={15} />Accounts to confirm · {list.length}</h3>
-      <p className="small-note mb-3">These people registered (or added a personal e-mail) with an e-mail that is listed in a lab team or on a researcher page. E-mails are not proven, so confirm only if you know the account is really theirs: a lab head gets the rights of that lab.</p>
+      <p className="small-note mb-3">These people registered (or added a personal e-mail) with an e-mail that is listed in a lab team. Researcher cards come as researcher profile requests. E-mails are not proven, so confirm only if you know the account is really theirs: a lab head gets the rights of that lab.</p>
       {list.length === 0 ? <p className="small-note">Nothing to confirm.</p> : (
         <ul className="rows">
           {list.map((c) => (
@@ -530,7 +532,7 @@ export function AccountClaimsPanel() {
   );
 }
 
-/** v17: partners who typed the name of an existing company. The coordinator sees all; a company owner sees their own. */
+/** v20: partners who typed the name of an existing company. The coordinator sees all; a company owner sees their own. */
 export function CompanyRequestsPanel({ hideWhenEmpty = false }: { hideWhenEmpty?: boolean }) {
   const requests = useCompanyRequests(true);
   const decide = useDecideCompanyMember();

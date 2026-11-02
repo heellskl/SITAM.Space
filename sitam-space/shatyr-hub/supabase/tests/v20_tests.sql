@@ -1,4 +1,4 @@
--- SITAM SPACE v17 checks: run after permissions_tests.sql on the same scratch database (it reuses its coordinator).
+-- SITAM SPACE v20 checks: run after permissions_tests.sql on the same scratch database (it reuses its coordinator).
 -- The local stub needs: alter table auth.users add column encrypted_password text;
 \set QUIET 1
 set client_min_messages = notice;
@@ -8,7 +8,7 @@ $$;
 create or replace function pg_temp.as_super() returns void language sql as $$
   select set_config('role', 'postgres', false), set_config('request.jwt.claim.sub', '', false);
 $$;
-\echo '── v17: account safety, personal e-mail sign-in'
+\echo '── v20: account safety, personal e-mail sign-in'
 
 -- 1. someone registers with a lab head's e-mail: only a claim, no rights
 insert into auth.users (id, email, raw_user_meta_data) values
@@ -34,15 +34,16 @@ select 'rejected claim leaves the seat free: ' || case when exists (select 1 fro
   where l.slug = 'robotics-lab' and c.email = 'ingkar.baidaly@sdu.edu.kz' and m.user_id is null)
   and not exists (select 1 from account_claims where user_id = '00000000-0000-0000-0000-0000000e0001' and status = 'pending') then 'PASS' else 'FAIL' end;
 
--- 2. professor page: claim, not linked
+-- 2. researcher card: a "This is me" request for the coordinator, not linked
 insert into auth.users (id, email, raw_user_meta_data) values
- ('00000000-0000-0000-0000-0000000e0002', 'abai.nussipbekov@sdu.edu.kz', '{"role":"teacher","first_name":"A","last_name":"N","department":"Computer Science"}');
-select 'professor page is not linked before confirmation: ' || case when (select profile_id from professors where username = 'abai.nussipbekov') is null
-  and exists (select 1 from account_claims where user_id = '00000000-0000-0000-0000-0000000e0002' and kind = 'professor') then 'PASS' else 'FAIL' end;
+ ('00000000-0000-0000-0000-0000000e0002', 'abay.magauiya@sdu.edu.kz', '{"role":"teacher","first_name":"A","last_name":"M","department":"Computer Science"}');
+select 'researcher card is not linked before confirmation: ' || case when (select profile_id from professors where username = 'abay.magauiya') is null
+  and exists (select 1 from researcher_profile_requests r join professors pr on pr.id = r.professor_id
+               where r.user_id = '00000000-0000-0000-0000-0000000e0002' and r.status = 'pending' and pr.username = 'abay.magauiya') then 'PASS' else 'FAIL' end;
 select pg_temp.as_user('00000000-0000-0000-0000-00000000c001');
-select count(public.decide_account_claim(id, true)) from account_claims where user_id = '00000000-0000-0000-0000-0000000e0002';
+select count(public.review_researcher_request(id, true)) from researcher_profile_requests where user_id = '00000000-0000-0000-0000-0000000e0002' and status = 'pending';
 select pg_temp.as_super();
-select 'confirmed professor page is linked: ' || case when (select profile_id from professors where username = 'abai.nussipbekov') = '00000000-0000-0000-0000-0000000e0002' then 'PASS' else 'FAIL' end;
+select 'confirmed professor page is linked: ' || case when (select profile_id from professors where username = 'abay.magauiya') = '00000000-0000-0000-0000-0000000e0002' then 'PASS' else 'FAIL' end;
 
 -- 3. a coordinator e-mail listed before anybody registered it
 insert into public.coordinator_emails (email) values ('260000001@sdu.edu.kz');
@@ -121,18 +122,20 @@ select 'users cannot refund questions: ' || case when not has_function_privilege
 select 'FAQ has no duplicate "join a laboratory" and no weekday schedule: ' || case when not exists (select 1 from ai_faq where question = 'How do I join a laboratory?')
   and not exists (select 1 from ai_faq where answer ~* 'tuesday|thursday|registration is attached') then 'PASS' else 'FAIL' end;
 
--- 7. v17.2: a personal e-mail that matches a researcher page creates a claim (not a link)
+-- 7. a personal e-mail that matches a researcher card (old e-mail on the papers) → request, not a link
 insert into auth.users (id, email, raw_user_meta_data) values
  ('00000000-0000-0000-0000-0000000e0007', 'amine.sbai.test@sdu.edu.kz', '{"role":"teacher","first_name":"Amine","last_name":"Sbai","department":"Mathematics"}');
-select 'registering with an unlisted SDU e-mail makes no claim: ' || case when not exists (select 1 from account_claims where user_id = '00000000-0000-0000-0000-0000000e0007') then 'PASS' else 'FAIL' end;
+select 'registering with an unlisted SDU e-mail makes no request: ' || case when not exists (select 1 from researcher_profile_requests where user_id = '00000000-0000-0000-0000-0000000e0007')
+  and not exists (select 1 from account_claims where user_id = '00000000-0000-0000-0000-0000000e0007') then 'PASS' else 'FAIL' end;
 select pg_temp.as_user('00000000-0000-0000-0000-0000000e0007');
 update profiles set personal_email = 'A.Sbai@uhp.ac.ma' where id = auth.uid();
-select 'personal e-mail = old e-mail on the papers → claim, not linked: ' || case when exists (select 1 from account_claims where user_id = auth.uid() and kind = 'professor' and status = 'pending' and matched_email = 'a.sbai@uhp.ac.ma')
+select 'personal e-mail = old e-mail on the papers → request, not linked: ' || case when exists (select 1 from researcher_profile_requests r join professors pr on pr.id = r.professor_id
+    where r.user_id = auth.uid() and r.status = 'pending' and pr.username = 'amine.sbai' and r.note like '%a.sbai@uhp.ac.ma%')
   and (select profile_id from professors where username = 'amine.sbai') is null then 'PASS' else 'FAIL' end;
-select 'nobody but the coordinator reads the old e-mails: ' || case when not has_column_privilege('authenticated', 'public.professors', 'alt_emails', 'select') then 'PASS' else 'FAIL' end;
+select 'nobody on the site reads the old e-mails: ' || case when not has_column_privilege('authenticated', 'public.professors', 'alt_emails', 'select')
+  and not has_column_privilege('anon', 'public.professors', 'alt_emails', 'select') then 'PASS' else 'FAIL' end;
 select pg_temp.as_super();
 select pg_temp.as_user('00000000-0000-0000-0000-00000000c001');
-select 'coordinator sees which e-mail matched: ' || case when exists (select 1 from public.account_claims_inbox() where matched_email = 'a.sbai@uhp.ac.ma' and professor_username = 'amine.sbai') then 'PASS' else 'FAIL' end;
-select count(public.decide_account_claim(id, true)) from account_claims where user_id = '00000000-0000-0000-0000-0000000e0007';
+select count(public.review_researcher_request(id, true)) from researcher_profile_requests where user_id = '00000000-0000-0000-0000-0000000e0007' and status = 'pending';
 select pg_temp.as_super();
-select 'confirmed: the SDU account owns the researcher page: ' || case when (select profile_id from professors where username = 'amine.sbai') = '00000000-0000-0000-0000-0000000e0007' then 'PASS' else 'FAIL' end;
+select 'confirmed: the SDU account owns the researcher card: ' || case when (select profile_id from professors where username = 'amine.sbai') = '00000000-0000-0000-0000-0000000e0007' then 'PASS' else 'FAIL' end;

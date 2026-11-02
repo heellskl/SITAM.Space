@@ -5,7 +5,7 @@ import { db, isMissingSchema, uploadCv } from '@/lib/api';
 import { takePendingCv } from '@/lib/pending-cv';
 
 /** Base account role, stored in profiles.role. "teacher" = Professor / Researcher, "phd" = PhD student. */
-export type Role = 'student' | 'phd' | 'teacher' | 'partner' | 'admin';
+export type Role = 'student' | 'phd' | 'teacher' | 'partner' | 'admin' | 'alumni';
 
 /** SITAM bachelor's programmes (sdu.edu.kz → School of IT and Applied Mathematics → Bachelor's). */
 export const MAJORS = [
@@ -45,6 +45,9 @@ export type Profile = {
   /** v12: second, personal e-mail (the SDU e-mail is `email`) */
   personalEmail?: string;
   avatarUrl?: string;
+  /** v17: alumni — graduation year and current company (job title is `position`) */
+  graduationYear?: number;
+  company?: string;
 };
 
 export type ManagedLab = { id: string; slug: string; name: string; role: string };
@@ -66,6 +69,8 @@ export type Capabilities = {
   /** SITAM coordinator (e-mail in the server list): admin panel, assigns lab heads. */
   isCoordinator: boolean;
   isPartner: boolean;
+  /** v17: SDU alumni (personal e-mail): read everything, offer help to labs */
+  isAlumni: boolean;
   managedLabs: ManagedLab[];
   /** All lab memberships (led or not). Older databases without v4 fall back to managedLabs. */
   labMemberships: LabMembership[];
@@ -81,14 +86,14 @@ export type Capabilities = {
   pendingLabHeads: number;
   /** The user's own Lab Head requests that are pending or were declined. */
   labHeadRequests: LabHeadRequest[];
-  /** v17: labs / researcher pages that list this e-mail and wait for the coordinator's confirmation. */
+  /** v20: labs that list this e-mail and wait for the coordinator's confirmation. */
   pendingClaims: string[];
-  /** v17: existing companies this partner asked to join (waiting for the coordinator or a company owner). */
+  /** v20: existing companies this partner asked to join (waiting for the coordinator or a company owner). */
   pendingCompanies: string[];
 };
 
 const NO_CAPS: Capabilities = {
-  isStudent: false, isPhd: false, canApply: false, isTeacher: false, isStaff: false, isAdmin: false, isCoordinator: false, isPartner: false,
+  isStudent: false, isPhd: false, canApply: false, isTeacher: false, isStaff: false, isAdmin: false, isCoordinator: false, isPartner: false, isAlumni: false,
   managedLabs: [], labMemberships: [], companies: [], savedLabs: [], professorUsername: null, canReview: false, pendingModeration: 0, pendingLabHeads: 0, labHeadRequests: [],
   pendingClaims: [], pendingCompanies: [],
 };
@@ -97,6 +102,7 @@ type DbProfile = {
   id: string; role: Role; first_name: string; last_name: string; email: string; course: number | null; major: string | null;
   department: string | null; position: string | null; phone: string | null; bio: string | null; staff_verified: boolean | null;
   faculty?: string | null; group_name?: string | null; avatar_url?: string | null; personal_email?: string | null;
+  graduation_year?: number | null; company?: string | null;
   cv_path: string | null; cv_filename: string | null; cv_uploaded_at: string | null;
 };
 type DbContext = {
@@ -123,6 +129,8 @@ function toProfile(p: DbProfile): Profile {
     ...(p.faculty ? { faculty: p.faculty } : {}),
     ...(p.group_name ? { groupName: p.group_name } : {}),
     ...(p.personal_email ? { personalEmail: p.personal_email } : {}),
+    ...(p.graduation_year ? { graduationYear: p.graduation_year } : {}),
+    ...(p.company ? { company: p.company } : {}),
     ...(p.avatar_url ? { avatarUrl: p.avatar_url } : {}),
     staffVerified: !!p.staff_verified,
     cvPath: p.cv_path,
@@ -246,6 +254,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAdmin: !!ctx.is_admin,
       isCoordinator: !!ctx.is_coordinator,
       isPartner: p.role === 'partner',
+      isAlumni: p.role === 'alumni',
       managedLabs,
       labMemberships,
       companies,
@@ -348,4 +357,5 @@ export const ROLE_LABEL: Record<Role, string> = {
   teacher: 'Teacher',
   partner: 'Industry Partner',
   admin: 'SITAM Admin',
+  alumni: 'SDU Alumni',
 };

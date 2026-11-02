@@ -1,9 +1,9 @@
 import { PersonEmails } from '@/components/lab-page';
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { gmailCompose } from '@/lib/utils';
-import { ArrowLeft, FlaskConical, LogIn, Mail, UserRound } from 'lucide-react';
+import { ArrowLeft, Briefcase, FlaskConical, LogIn, Mail, UserRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { LAB_POSITION_LABEL, humanError, personName, usePerson } from '@/lib/api';
+import { LAB_POSITION_LABEL, humanError, personName, useExperience, usePerson } from '@/lib/api';
 import { ROLE_LABEL, useAuth, type Role } from '@/lib/auth';
 
 export const Route = createFileRoute('/people/$id')({
@@ -16,6 +16,7 @@ function PersonPage() {
   const { id } = Route.useParams();
   const { user, loading } = useAuth();
   const q = usePerson(id, !!user);
+  const exp = useExperience(user ? id : undefined);
 
   if (!loading && !user) {
     return (
@@ -68,6 +69,16 @@ function PersonPage() {
           </ul>
         ) : <p className="small-note">Not a member of a lab yet.</p>}
       </section>
+      {exp.data && exp.data.length > 0 && (
+        <section className="panel mt-4">
+          <h3 className="panel-title"><Briefcase size={15} />Work & internships</h3>
+          <ul className="rows">
+            {exp.data.map((x, i) => (
+              <li key={i}><div><strong>{x.role ? `${x.role} · ${x.company}` : x.company}</strong><small>{x.kind === 'internship' ? 'Internship' : 'Work'}{x.start ? ` · ${x.start.replace('-', '/')} – ${x.end ? x.end.replace('-', '/') : 'present'}` : ''}</small></div></li>
+            ))}
+          </ul>
+        </section>
+      )}
     </main>
   );
 }

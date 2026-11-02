@@ -341,14 +341,18 @@ function EditorForm({ lab, internal, contacts, projects, userId, canEditHeads, o
         {tab === 'team' && <Block title="Team" wide note={`Add members with “Manage members” on the lab page. E-mails and phones are private.`}>
           <div className="team-editor">
             {members.map((m, i) => {
-              const locked = !canEditHeads && !!m.id && isHeadRole(lab.lab_members.find((x) => x.id === m.id)?.role ?? m.role);
+              const orig = lab.lab_members.find((x) => x.id === m.id);
+              // the Head of this lab may change Co-Head rows (not their own row, not the Head)
+              const isLead = lab.lab_members.some((x) => x.user_id === userId && x.role === 'lead');
+              const leadMayEdit = isLead && (orig?.role ?? m.role) === 'co_lead' && orig?.user_id !== userId;
+              const locked = !canEditHeads && !!m.id && isHeadRole(orig?.role ?? m.role) && !leadMayEdit;
               return (
               <div key={m.id ?? `new-${i}`} className={`team-row${isHeadRole(m.role) ? ' is-head' : ''}${m.is_past ? ' is-past' : ''}`}>
                 <span className="team-num" aria-label={`Row ${i + 1}`}>{i + 1}</span>
                 <input aria-label="Full name" placeholder="Full name" value={m.full_name} disabled={locked} onChange={(e) => patchMember(i, { full_name: e.target.value })} />
                 <input aria-label="Title" placeholder="Title / year & major" value={m.title} disabled={locked} onChange={(e) => patchMember(i, { title: e.target.value })} />
                 <select aria-label="Position" value={m.role} disabled={locked} onChange={(e) => patchMember(i, { role: e.target.value as LabRole })}>
-                  {positionOptions(ROLES.filter((r) => canEditHeads || locked || !isHeadRole(r)), m.role).map((r) => <option key={r} value={r}>{SINGULAR[r]}</option>)}
+                  {positionOptions(ROLES.filter((r) => canEditHeads || locked || !isHeadRole(r) || (isLead && r === 'co_lead')), m.role, canEditHeads || isLead).map((r) => <option key={r} value={r}>{SINGULAR[r]}</option>)}
                 </select>
                 {m.role === 'former_lead' ? (
                   <input aria-label="Term" placeholder="2023–2025" value={m.term} onChange={(e) => patchMember(i, { term: e.target.value })} />

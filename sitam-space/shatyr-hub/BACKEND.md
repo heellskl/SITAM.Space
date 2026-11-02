@@ -145,3 +145,10 @@ delete from companies where name = 'Demo Partner (sample)';
 ## v16 (2026-10-30) — Ask SITAM
 - Migration `20261030100000_sitam_v16_ask_sitam.sql` (in `update-to-v16.sql`, which contains v12 → v16): pgvector, `ai_documents`, `ai_faq`, view `ai_sources`, `ai_pending_documents`, `ai_upsert_document`, `ai_remove_stale`, `ai_index_status`, `match_documents`, `ai_usage` + `ai_take_quota`. Service-role-only helpers; `match_documents` / `ai_index_status` for signed-in users.
 - Edge Functions `ask-sitam`, `ai-index`; setup in docs/ASK-SITAM.md.
+
+## v17 (2026-10-31) — roles & onboarding
+- Migration `20261031100000_sitam_v17_roles_onboarding.sql` (now in `update-to-v18.sql`): `app_role` + alumni, `is_lab_lead`, new `lab_members_guard` / `add_lab_member` (Head appoints Co-Heads), profiles.graduation_year / company, `public_people` + those, `enforce_signup_email` / `handle_new_user` (alumni), `submit_project` (no alumni), `help_offers` + `offer_help` / `respond_help_offer`, professors.bio / office_hours / interests, `researcher_profile_requests` + `request_researcher_profile` / `review_researcher_request` / `update_my_researcher_profile`, partner_request_type + internship / contact_lab, partner_requests.requested_lab_id.
+- Tests: 98 checks (v16 needs pgvector, not in the local test database).
+- v18: migration `20261101100000_sitam_v18_publications.sql` (in `update-to-v19.sql` = v12 → v19): professors.publications_updated_at, `can_edit_professor`, `save_publication`, `remove_publication`, `import_publications` — the linked teacher or the coordinator keeps the papers of a researcher card up to date. Tests: + 8 checks.
+- v19: migration `20261102100000_sitam_v19_my_home.sql` (in `update-to-v19.sql`): profiles.experience (jsonb, `valid_experience` check, own-row update grant), `public_people` + experience. Tests: + 4 checks.
+- v17.1 `20261031110000_sitam_v17_1_member_positions.sql`: `add_lab_member` again offers only member, mentor, research assistant, student researcher, project coordinator (+ Co-Head for the Head / coordinator). No Tech lead.

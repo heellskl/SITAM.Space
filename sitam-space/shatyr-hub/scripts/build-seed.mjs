@@ -184,7 +184,7 @@ on conflict (username) do update set first_name = excluded.first_name, last_name
   i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
   keywords = excluded.keywords, topics = excluded.topics, updated_at = now();`);
   if ((p.other_emails ?? []).length) {
-    // v17.2: older e-mails (e.g. on papers from a previous university) — a personal e-mail matching one creates a claim
+    // v20: older e-mails (e.g. on papers from a previous university) — a personal e-mail matching one creates a claim
     out.push(`update public.professors set alt_emails = ${arr(p.other_emails.map((e) => String(e).toLowerCase()))} where username = ${q(username)};`);
   }
   const P = `(select id from public.professors where username = ${q(username)})`;

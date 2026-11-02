@@ -9527,7 +9527,9 @@ alter table public.profiles add column if not exists personal_email text
   check (personal_email is null or personal_email ~* '^[^@\s]+@[^@\s]+\.[^@\s]+$');
 grant update (personal_email) on public.profiles to authenticated;
 
-create or replace view public.public_people as
+-- drop first: an older version of this view may have other columns ("cannot drop columns from view")
+drop view if exists public.public_people;
+create view public.public_people as
   select p.id, p.first_name, p.last_name, p.role::text as role, p.email, p.course, p.major, p.department, p.position, p.bio,
          p.faculty, p.group_name, p.avatar_url, p.personal_email
     from public.profiles p;
@@ -9845,7 +9847,9 @@ insert into public.ai_faq (question, answer) values
 on conflict (question) do update set answer = excluded.answer;
 
 /* ───────────── what the assistant may know (public data only) ───────────── */
-create or replace view public.ai_sources with (security_invoker = false) as
+-- drop first: an older version of this view may have other columns ("cannot drop columns from view")
+drop view if exists public.ai_sources;
+create view public.ai_sources with (security_invoker = false) as
   -- laboratories and student communities
   select 'lab'::text as source_type, l.id::text as source_id, l.name as title, '/labs/' || l.slug as url,
          concat_ws(E'\n',
@@ -10074,25 +10078,642 @@ grant execute on function public.match_documents(extensions.vector, int, float, 
 
 insert into sitam_meta.applied_migrations (version, name) values ('20261030120000', 'sitam_v16_1_ask_scope') on conflict do nothing;
 
--- ════════ access for the website roles ════════
--- ════════ 20261030140000_sitam_v17_account_safety ════════
-/* SITAM SPACE v17 — account safety, sign-in with a personal e-mail, Ask SITAM fixes
-   ───────────────────────────────────────────────────────────────────────────────
-   Since v9.5 new accounts are confirmed at once (no e-mail code), so the site cannot prove that a person owns the
-   e-mail they typed. Nothing that gives rights may therefore depend on the e-mail alone:
+-- ════════ 20261031100000_sitam_v17_roles_onboarding ════════
+/* SITAM SPACE v17 — roles & onboarding (decided with the user on 2026-10-31)
+   ──────────────────────────────────────────────────────────────────────────
+   1. Co-Heads: a lab's Head (lead) — and the coordinator — appoint and remove Co-Heads in that lab;
+      only the coordinator appoints or removes the Head. Member positions stay as before.
+   2. Alumni: new account type "alumni" (personal e-mail allowed) with faculty, graduation year, job title, company.
+      They read everything and can "Offer help" to a lab (mentor / guest speaker / research advisor);
+      the lab's heads see and answer the offers. Alumni do not apply to vacancies and do not submit projects.
+   3. Researcher profiles: a teacher asks for a new researcher card or claims an existing unlinked one
+      ("This is me"); the coordinator approves; then the teacher edits ONLY their card (bio, interests,
+      office hours, ORCID / Scopus / Google Scholar).
+   4. B2B: new request types "Offer an internship / vacancy" and "Contact a lab" with the chosen lab
+      (still read only by the SITAM office, as before).
+   New enum values are only used inside function bodies / as text in this file, so it runs in one transaction.
+   Re-runnable. */
 
-   • Lab seats and professor pages are no longer linked automatically at sign-up. A registration whose e-mail is
-     listed in a lab team or on a professor page creates an account claim; the coordinator confirms or rejects it in
-     Manage → Admin (decide_account_claim). Until then the person has no lab rights.
-   • Coordinators are bound to an account (coordinator_emails.user_id), not only to an e-mail. Existing coordinator
-     accounts are bound below. To add a coordinator after the person has registered:
+/* ───────────── 1. lab positions ───────────── */
+create or replace function public.is_lab_lead(p_lab uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.lab_members m where m.lab_id = p_lab and m.user_id = auth.uid() and m.role::text = 'lead')
+$$;
+grant execute on function public.is_lab_lead(uuid) to authenticated;
+
+create or replace function public.lab_members_guard()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v_uid uuid := auth.uid(); v_lab uuid := coalesce(new.lab_id, old.lab_id); v_lead boolean;
+begin
+  if v_uid is null or public.is_admin() then
+    return case when tg_op = 'DELETE' then old else new end;
+  end if;
+  if tg_op = 'UPDATE' and new.lab_id is distinct from old.lab_id then
+    raise exception 'NOT_ALLOWED: a member cannot be moved to another lab';
+  end if;
+  v_lead := public.is_lab_lead(v_lab);
+  -- the Head of the lab appoints Co-Heads; only the coordinator appoints the Head
+  if tg_op = 'INSERT' and public.is_lab_head_role(new.role::text) then
+    if not (new.role::text = 'co_lead' and v_lead) then
+      raise exception 'NOT_ALLOWED: only the coordinator appoints the Head; the Head appoints Co-Heads';
+    end if;
+  end if;
+  if tg_op = 'DELETE' and public.is_lab_head_role(old.role::text) then
+    if not (old.role::text = 'co_lead' and v_lead and old.user_id is distinct from v_uid) then
+      raise exception 'NOT_ALLOWED: only the coordinator removes the Head; the Head removes Co-Heads';
+    end if;
+  end if;
+  if tg_op = 'UPDATE' and (public.is_lab_head_role(old.role::text) or public.is_lab_head_role(new.role::text))
+     and (new.role is distinct from old.role or new.user_id is distinct from old.user_id) then
+    if not (v_lead and old.role::text <> 'lead' and new.role::text <> 'lead' and new.user_id is not distinct from old.user_id
+            and old.user_id is distinct from v_uid) then
+      raise exception 'NOT_ALLOWED: only the coordinator changes the Head; the Head appoints or removes Co-Heads';
+    end if;
+  end if;
+  return case when tg_op = 'DELETE' then old else new end;
+end;
+$$;
+
+create or replace function public.add_lab_member(p_lab uuid, p_full_name text, p_email text, p_role text, p_title text default null)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  v_email text := nullif(lower(trim(coalesce(p_email, ''))), '');
+  v_profile public.profiles;
+  v_name text := nullif(trim(coalesce(p_full_name, '')), '');
+  v_role text := coalesce(nullif(p_role, ''), 'member');
+  v_id uuid;
+begin
+  if auth.uid() is null then raise exception 'AUTH_REQUIRED: sign in first'; end if;
+  if not public.is_lab_manager(p_lab) then raise exception 'NOT_ALLOWED: only the head of this lab can add members'; end if;
+  if v_role = 'co_lead' then
+    if not (public.is_lab_lead(p_lab) or public.is_admin()) then raise exception 'NOT_ALLOWED: only the Head of the lab appoints Co-Heads'; end if;
+  elsif v_role not in ('member', 'mentor', 'research_assistant', 'student_researcher', 'project_coordinator') then
+    raise exception 'BAD_ROLE: the Head is appointed by the coordinator';
+  end if;
+  if v_email is null then raise exception 'EMAIL_REQUIRED: choose a registered user'; end if;
+  select * into v_profile from public.profiles where email = v_email;
+  if v_profile.id is null then raise exception 'NOT_FOUND: this person has not signed in to SITAM SPACE yet'; end if;
+  if exists (select 1 from public.lab_members where lab_id = p_lab and user_id = v_profile.id) then
+    raise exception 'DUPLICATE: this person is already in the lab';
+  end if;
+  v_name := coalesce(nullif(trim(v_profile.first_name || ' ' || v_profile.last_name), ''), v_name, v_profile.email);
+
+  insert into public.lab_members (lab_id, user_id, full_name, title, role, sort_order)
+  values (p_lab, v_profile.id, left(v_name, 120), nullif(left(trim(coalesce(p_title, '')), 200), ''),
+          v_role::public.lab_role,
+          coalesce((select max(sort_order) + 1 from public.lab_members where lab_id = p_lab), 0))
+  returning id into v_id;
+  insert into public.lab_member_contacts (member_id, email) values (v_id, v_email)
+  on conflict (member_id) do update set email = excluded.email;
+  return jsonb_build_object('id', v_id, 'linked', true);
+end;
+$$;
+
+/* ───────────── 2. alumni ───────────── */
+alter type public.app_role add value if not exists 'alumni';
+alter table public.profiles add column if not exists graduation_year int check (graduation_year is null or graduation_year between 1990 and 2100);
+alter table public.profiles add column if not exists company text check (company is null or char_length(company) <= 160);
+grant update (graduation_year, company) on public.profiles to authenticated;
+
+-- drop first: an older version of this view may have other columns ("cannot drop columns from view")
+drop view if exists public.public_people;
+create view public.public_people as
+  select p.id, p.first_name, p.last_name, p.role::text as role, p.email, p.course, p.major, p.department, p.position, p.bio,
+         p.faculty, p.group_name, p.avatar_url, p.personal_email, p.graduation_year, p.company
+    from public.profiles p;
+revoke all on public.public_people from anon, public;
+grant select on public.public_people to authenticated;
+
+-- students and teachers need an SDU e-mail; partners and alumni may use any e-mail
+create or replace function public.enforce_signup_email()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v_role text := coalesce(new.raw_user_meta_data->>'role', 'student');
+begin
+  if tg_op = 'UPDATE' then
+    if public.is_sdu_email(old.email) and not public.is_sdu_email(new.email) then
+      raise exception 'SITAM_EMAIL_DOMAIN: SDU accounts must keep an @sdu.edu.kz e-mail' using errcode = 'P0001';
+    end if;
+    return new;
+  end if;
+  if v_role in ('partner', 'alumni') or public.is_sdu_email(new.email) then
+    return new;
+  end if;
+  raise exception 'SITAM_EMAIL_DOMAIN: students and teachers must register with an @sdu.edu.kz e-mail'
+    using errcode = 'P0001';
+end;
+$$;
+
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare
+  v_meta jsonb := coalesce(new.raw_user_meta_data, '{}'::jsonb);
+  v_role text;
+  v_company uuid;
+  v_company_name text := nullif(trim(left(coalesce(v_meta->>'company', ''), 120)), '');
+  v_full text := trim(coalesce(v_meta->>'full_name', v_meta->>'name', ''));
+  v_first text := nullif(trim(coalesce(v_meta->>'first_name', v_meta->>'given_name', '')), '');
+  v_last text := nullif(trim(coalesce(v_meta->>'last_name', v_meta->>'family_name', '')), '');
+begin
+  v_role := case
+    when v_meta->>'role' = 'partner' then 'partner'
+    when v_meta->>'role' = 'alumni' then 'alumni'
+    when v_meta->>'role' in ('teacher', 'professor') and public.is_sdu_email(new.email) then 'teacher'
+    when v_meta->>'role' in ('student', 'phd') and public.is_sdu_email(new.email) then 'student'
+    else public.account_type_from_email(new.email)
+  end;
+  if v_first is null and v_full <> '' then
+    v_first := split_part(v_full, ' ', 1);
+    v_last := coalesce(v_last, nullif(trim(substr(v_full, char_length(split_part(v_full, ' ', 1)) + 1)), ''));
+  end if;
+
+  insert into public.profiles (id, role, first_name, last_name, email, course, major, department, position, phone, faculty, graduation_year, company)
+  values (
+    new.id, v_role::public.app_role,
+    left(coalesce(v_first, ''), 100), left(coalesce(v_last, ''), 100),
+    lower(coalesce(new.email, '')),
+    case when v_role = 'student' and v_meta->>'course' ~ '^[1-6]$' then (v_meta->>'course')::smallint end,
+    case when v_role = 'student' then nullif(left(v_meta->>'major', 100), '') end,
+    case when v_role = 'teacher' then nullif(left(v_meta->>'department', 100), '') end,
+    case when v_role in ('partner', 'alumni') then nullif(left(v_meta->>'position', 100), '') end,
+    case when v_meta->>'phone' ~ '^[0-9 +()-]{6,24}$' then v_meta->>'phone' end,
+    case when v_role = 'alumni' then nullif(left(v_meta->>'faculty', 120), '') end,
+    case when v_role = 'alumni' and v_meta->>'graduation_year' ~ '^(19|20)[0-9]{2}$' then (v_meta->>'graduation_year')::int end,
+    case when v_role = 'alumni' then v_company_name end
+  )
+  on conflict (id) do nothing;
+
+  if v_role = 'partner' and v_company_name is not null then
+    select id into v_company from public.companies where lower(name) = lower(v_company_name);
+    if v_company is null then
+      insert into public.companies (name, website)
+      values (v_company_name, case when v_meta->>'website' ~* '^https?://' then left(v_meta->>'website', 200) end)
+      returning id into v_company;
+    end if;
+    insert into public.company_members (company_id, user_id, role)
+    values (v_company, new.id, case when exists (select 1 from public.company_members where company_id = v_company) then 'member' else 'owner' end)
+    on conflict do nothing;
+  end if;
+
+  update public.lab_members m set user_id = new.id
+    from public.lab_member_contacts c
+   where c.member_id = m.id and c.email = lower(new.email) and m.user_id is null;
+  update public.professors set profile_id = new.id where lower(email) = lower(new.email) and profile_id is null;
+  return new;
+end;
+$$;
+
+-- alumni and partners do not submit student projects
+create or replace function public.submit_project(
+  p_kind text, p_title text, p_summary text, p_tags text[], p_authors text[], p_year int, p_status text,
+  p_github_url text, p_demo_url text, p_paper_url text, p_contact_email text
+) returns public.projects language plpgsql security definer set search_path = public as $$
+declare v_role text := public.my_role_text(); v_row public.projects; v_mod text;
+begin
+  if auth.uid() is null then raise exception 'AUTH_REQUIRED: sign in first'; end if;
+  if v_role is null or v_role in ('partner', 'alumni') then raise exception 'NOT_ALLOWED: SDU accounts only'; end if;
+  if p_kind not in ('research', 'project') then raise exception 'BAD_KIND'; end if;
+  if (select count(*) from public.projects where owner_id = auth.uid() and moderation = 'pending') >= 5 then
+    raise exception 'TOO_MANY: wait until your pending submissions are reviewed';
+  end if;
+  v_mod := case when (v_role = 'phd' and p_kind = 'research') or v_role = 'admin' then 'approved' else 'pending' end;
+  insert into public.projects (lab_id, owner_id, kind, status, title, summary, tags, authors, year,
+                               github_url, demo_url, paper_url, contact_email, moderation, submitted_at)
+  values (null, auth.uid(), p_kind::public.project_kind, coalesce(nullif(p_status, ''), 'ongoing')::public.project_status,
+          trim(p_title), nullif(trim(p_summary), ''), coalesce(p_tags, '{}'), coalesce(p_authors, '{}'), p_year,
+          nullif(p_github_url, ''), nullif(p_demo_url, ''), nullif(p_paper_url, ''), nullif(lower(p_contact_email), ''), v_mod, now())
+  returning * into v_row;
+  return v_row;
+end;
+$$;
+
+-- "Offer help" from alumni to a lab
+create table if not exists public.help_offers (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade default auth.uid(),
+  lab_id uuid not null references public.labs(id) on delete cascade,
+  kind text not null check (kind in ('mentor', 'speaker', 'advisor')),
+  message text not null check (char_length(message) between 10 and 2000),
+  status text not null default 'new' check (status in ('new', 'accepted', 'declined')),
+  created_at timestamptz not null default now(),
+  answered_at timestamptz
+);
+create index if not exists help_offers_lab on public.help_offers (lab_id, created_at desc);
+alter table public.help_offers enable row level security;
+drop policy if exists "Offers: author, lab heads, coordinator" on public.help_offers;
+create policy "Offers: author, lab heads, coordinator" on public.help_offers for select to authenticated
+  using (user_id = auth.uid() or public.is_lab_manager(lab_id) or public.is_admin());
+revoke insert, update, delete on public.help_offers from anon, authenticated;
+grant select on public.help_offers to authenticated;
+
+create or replace function public.offer_help(p_lab uuid, p_kind text, p_message text)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare v_id uuid;
+begin
+  if auth.uid() is null then raise exception 'AUTH_REQUIRED: sign in first'; end if;
+  if public.my_role_text() <> 'alumni' and not public.is_admin() then raise exception 'NOT_ALLOWED: offers of help are for SDU alumni'; end if;
+  if not exists (select 1 from public.labs where id = p_lab) then raise exception 'NOT_FOUND: lab'; end if;
+  if p_kind not in ('mentor', 'speaker', 'advisor') then raise exception 'BAD_INPUT: choose mentor, guest speaker or research advisor'; end if;
+  if char_length(trim(coalesce(p_message, ''))) < 10 then raise exception 'BAD_INPUT: write a short message (10+ characters)'; end if;
+  if (select count(*) from public.help_offers where user_id = auth.uid() and status = 'new') >= 10 then
+    raise exception 'TOO_MANY: wait until the labs answer your offers';
+  end if;
+  insert into public.help_offers (user_id, lab_id, kind, message) values (auth.uid(), p_lab, p_kind, left(trim(p_message), 2000))
+  returning id into v_id;
+  return v_id;
+end;
+$$;
+
+create or replace function public.respond_help_offer(p_offer uuid, p_status text)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_lab uuid;
+begin
+  select lab_id into v_lab from public.help_offers where id = p_offer;
+  if v_lab is null then raise exception 'NOT_FOUND: offer'; end if;
+  if not public.is_lab_manager(v_lab) then raise exception 'NOT_ALLOWED: only the heads of this lab answer its offers'; end if;
+  if p_status not in ('accepted', 'declined', 'new') then raise exception 'BAD_INPUT: status'; end if;
+  update public.help_offers set status = p_status, answered_at = case when p_status = 'new' then null else now() end where id = p_offer;
+end;
+$$;
+
+/* ───────────── 3. researcher profiles: request / claim, approve, edit own ───────────── */
+alter table public.professors add column if not exists bio text check (bio is null or char_length(bio) <= 3000);
+alter table public.professors add column if not exists office_hours text check (office_hours is null or char_length(office_hours) <= 300);
+alter table public.professors add column if not exists interests text[] not null default '{}';
+grant select (bio, office_hours, interests) on public.professors to anon, authenticated;
+
+create table if not exists public.researcher_profile_requests (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade default auth.uid(),
+  professor_id uuid references public.professors(id) on delete set null,   -- "This is me": an existing card
+  full_name text not null check (char_length(trim(full_name)) between 3 and 160),
+  department text check (department is null or char_length(department) <= 160),
+  title text check (title is null or char_length(title) <= 160),
+  degree text check (degree is null or char_length(degree) <= 120),
+  scopus_url text check (scopus_url is null or scopus_url ~* '^https?://'),
+  orcid_url text check (orcid_url is null or orcid_url ~* '^https?://'),
+  scholar_url text check (scholar_url is null or scholar_url ~* '^https?://'),
+  note text check (note is null or char_length(note) <= 1000),
+  status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
+  review_note text check (review_note is null or char_length(review_note) <= 1000),
+  reviewed_by uuid references public.profiles(id) on delete set null,
+  reviewed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create unique index if not exists researcher_requests_one_pending on public.researcher_profile_requests (user_id) where status = 'pending';
+alter table public.researcher_profile_requests enable row level security;
+drop policy if exists "Requests: author and coordinator" on public.researcher_profile_requests;
+create policy "Requests: author and coordinator" on public.researcher_profile_requests for select to authenticated
+  using (user_id = auth.uid() or public.is_admin());
+revoke insert, update, delete on public.researcher_profile_requests from anon, authenticated;
+grant select on public.researcher_profile_requests to authenticated;
+
+create or replace function public.request_researcher_profile(p_professor uuid, p_full_name text, p_department text, p_title text, p_degree text,
+                                                            p_scopus_url text, p_orcid_url text, p_scholar_url text, p_note text)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare v_id uuid; v_role text := public.my_role_text();
+begin
+  if auth.uid() is null then raise exception 'AUTH_REQUIRED: sign in first'; end if;
+  if v_role not in ('teacher', 'phd', 'admin') then raise exception 'NOT_ALLOWED: researcher profiles are for SDU teachers and researchers'; end if;
+  if exists (select 1 from public.professors where profile_id = auth.uid()) then raise exception 'DUPLICATE: your researcher profile is already linked'; end if;
+  if exists (select 1 from public.researcher_profile_requests where user_id = auth.uid() and status = 'pending') then
+    raise exception 'DUPLICATE: your request is waiting for the coordinator';
+  end if;
+  if p_professor is not null and not exists (select 1 from public.professors where id = p_professor and profile_id is null) then
+    raise exception 'NOT_ALLOWED: this researcher card is already linked to an account';
+  end if;
+  if char_length(trim(coalesce(p_full_name, ''))) < 3 then raise exception 'BAD_INPUT: enter your full name'; end if;
+  insert into public.researcher_profile_requests (user_id, professor_id, full_name, department, title, degree, scopus_url, orcid_url, scholar_url, note)
+  values (auth.uid(), p_professor, left(trim(p_full_name), 160), nullif(trim(p_department), ''), nullif(trim(p_title), ''), nullif(trim(p_degree), ''),
+          nullif(trim(p_scopus_url), ''), nullif(trim(p_orcid_url), ''), nullif(trim(p_scholar_url), ''), nullif(trim(p_note), ''))
+  returning id into v_id;
+  return v_id;
+end;
+$$;
+
+create or replace function public.review_researcher_request(p_request uuid, p_approve boolean, p_note text default null)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare r public.researcher_profile_requests; v_prof uuid; v_base text; v_user text; n int := 1;
+begin
+  if not public.is_admin() then raise exception 'NOT_ALLOWED: coordinator only'; end if;
+  select * into r from public.researcher_profile_requests where id = p_request for update;
+  if r.id is null then raise exception 'NOT_FOUND: request'; end if;
+  if r.status <> 'pending' then raise exception 'DONE: this request was already reviewed'; end if;
+  if not coalesce(p_approve, false) then
+    update public.researcher_profile_requests set status = 'rejected', review_note = nullif(trim(p_note), ''), reviewed_by = auth.uid(), reviewed_at = now() where id = r.id;
+    return null;
+  end if;
+  if exists (select 1 from public.professors where profile_id = r.user_id) then raise exception 'DUPLICATE: this person already has a researcher profile'; end if;
+
+  if r.professor_id is not null then
+    update public.professors set profile_id = r.user_id,
+           orcid_url = coalesce(orcid_url, r.orcid_url), scholar_url = coalesce(scholar_url, r.scholar_url)
+     where id = r.professor_id and profile_id is null
+    returning id into v_prof;
+    if v_prof is null then raise exception 'NOT_ALLOWED: this card is already linked to another account'; end if;
+  else
+    v_base := left(trim(both '.' from regexp_replace(lower(r.full_name), '[^a-z0-9]+', '.', 'g')), 60);
+    if v_base !~ '^[a-z0-9._-]{2,}$' then v_base := 'researcher.' || substr(md5(r.full_name), 1, 6); end if;
+    v_user := v_base;
+    while exists (select 1 from public.professors where username = v_user) loop n := n + 1; v_user := v_base || '.' || n; end loop;
+    insert into public.professors (username, first_name, last_name, full_name, job_title, degree, orcid_url, scholar_url, scopus_id, profile_id, email)
+    values (v_user, split_part(trim(r.full_name), ' ', 1), nullif(trim(substr(trim(r.full_name), char_length(split_part(trim(r.full_name), ' ', 1)) + 1)), ''),
+            r.full_name, concat_ws(', ', r.title, r.department), r.degree, r.orcid_url, r.scholar_url,
+            nullif(substring(coalesce(r.scopus_url, '') from 'authorId=([0-9]+)'), ''), r.user_id,
+            (select email from public.profiles where id = r.user_id))
+    returning id into v_prof;
+  end if;
+  update public.researcher_profile_requests set status = 'approved', professor_id = v_prof, review_note = nullif(trim(p_note), ''),
+         reviewed_by = auth.uid(), reviewed_at = now() where id = r.id;
+  return v_prof;
+end;
+$$;
+
+-- the teacher edits only their own card
+create or replace function public.update_my_researcher_profile(p_bio text, p_office_hours text, p_interests text[],
+                                                              p_orcid_url text, p_scholar_url text, p_scopus_id text)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_id uuid;
+begin
+  select id into v_id from public.professors where profile_id = auth.uid();
+  if v_id is null then raise exception 'NOT_ALLOWED: you do not have a linked researcher profile'; end if;
+  if nullif(trim(p_orcid_url), '') is not null and p_orcid_url !~* '^https?://' then raise exception 'BAD_INPUT: ORCID link must start with https://'; end if;
+  if nullif(trim(p_scholar_url), '') is not null and p_scholar_url !~* '^https?://' then raise exception 'BAD_INPUT: Google Scholar link must start with https://'; end if;
+  if nullif(trim(p_scopus_id), '') is not null and trim(p_scopus_id) !~ '^[0-9]{5,15}$' then raise exception 'BAD_INPUT: Scopus Author ID is a number'; end if;
+  update public.professors set
+    bio = nullif(left(trim(coalesce(p_bio, '')), 3000), ''),
+    office_hours = nullif(left(trim(coalesce(p_office_hours, '')), 300), ''),
+    interests = coalesce((select array_agg(distinct left(trim(x), 60)) from unnest(coalesce(p_interests, '{}')) x where trim(x) <> ''), '{}'),
+    orcid_url = nullif(trim(p_orcid_url), ''), scholar_url = nullif(trim(p_scholar_url), ''), scopus_id = nullif(trim(p_scopus_id), ''),
+    updated_at = now()
+  where id = v_id;
+end;
+$$;
+
+/* ───────────── 4. B2B: internships / vacancies and "Contact a lab" ───────────── */
+alter type public.partner_request_type add value if not exists 'internship';
+alter type public.partner_request_type add value if not exists 'contact_lab';
+-- the lab the request is about (no foreign key: partner_requests already links labs via assigned_lab_id)
+alter table public.partner_requests add column if not exists requested_lab_id uuid;
+
+/* ───────────── rights ───────────── */
+revoke execute on function public.offer_help(uuid, text, text) from anon, public;
+revoke execute on function public.respond_help_offer(uuid, text) from anon, public;
+revoke execute on function public.request_researcher_profile(uuid, text, text, text, text, text, text, text, text) from anon, public;
+revoke execute on function public.review_researcher_request(uuid, boolean, text) from anon, public;
+revoke execute on function public.update_my_researcher_profile(text, text, text[], text, text, text) from anon, public;
+grant execute on function public.offer_help(uuid, text, text) to authenticated;
+grant execute on function public.respond_help_offer(uuid, text) to authenticated;
+grant execute on function public.request_researcher_profile(uuid, text, text, text, text, text, text, text, text) to authenticated;
+grant execute on function public.review_researcher_request(uuid, boolean, text) to authenticated;
+grant execute on function public.update_my_researcher_profile(text, text, text[], text, text, text) to authenticated;
+
+insert into sitam_meta.applied_migrations (version, name) values ('20261031100000', 'sitam_v17_roles_onboarding') on conflict do nothing;
+
+-- ════════ 20261031110000_sitam_v17_1_member_positions ════════
+/* SITAM SPACE v17.1 — member positions stay as before (no Tech lead / Student lead for heads to add).
+   Heads add: member, mentor, research assistant, student researcher, project coordinator; the Head (and the
+   coordinator) also appoint Co-Heads. Re-runnable. */
+create or replace function public.add_lab_member(p_lab uuid, p_full_name text, p_email text, p_role text, p_title text default null)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  v_email text := nullif(lower(trim(coalesce(p_email, ''))), '');
+  v_profile public.profiles;
+  v_name text := nullif(trim(coalesce(p_full_name, '')), '');
+  v_role text := coalesce(nullif(p_role, ''), 'member');
+  v_id uuid;
+begin
+  if auth.uid() is null then raise exception 'AUTH_REQUIRED: sign in first'; end if;
+  if not public.is_lab_manager(p_lab) then raise exception 'NOT_ALLOWED: only the head of this lab can add members'; end if;
+  if v_role = 'co_lead' then
+    if not (public.is_lab_lead(p_lab) or public.is_admin()) then raise exception 'NOT_ALLOWED: only the Head of the lab appoints Co-Heads'; end if;
+  elsif v_role not in ('member', 'mentor', 'research_assistant', 'student_researcher', 'project_coordinator') then
+    raise exception 'BAD_ROLE: the Head is appointed by the coordinator';
+  end if;
+  if v_email is null then raise exception 'EMAIL_REQUIRED: choose a registered user'; end if;
+  select * into v_profile from public.profiles where email = v_email;
+  if v_profile.id is null then raise exception 'NOT_FOUND: this person has not signed in to SITAM SPACE yet'; end if;
+  if exists (select 1 from public.lab_members where lab_id = p_lab and user_id = v_profile.id) then
+    raise exception 'DUPLICATE: this person is already in the lab';
+  end if;
+  v_name := coalesce(nullif(trim(v_profile.first_name || ' ' || v_profile.last_name), ''), v_name, v_profile.email);
+
+  insert into public.lab_members (lab_id, user_id, full_name, title, role, sort_order)
+  values (p_lab, v_profile.id, left(v_name, 120), nullif(left(trim(coalesce(p_title, '')), 200), ''),
+          v_role::public.lab_role,
+          coalesce((select max(sort_order) + 1 from public.lab_members where lab_id = p_lab), 0))
+  returning id into v_id;
+  insert into public.lab_member_contacts (member_id, email) values (v_id, v_email)
+  on conflict (member_id) do update set email = excluded.email;
+  return jsonb_build_object('id', v_id, 'linked', true);
+end;
+$$;
+
+insert into sitam_meta.applied_migrations (version, name) values ('20261031110000', 'sitam_v17_1_member_positions') on conflict do nothing;
+
+-- ════════ 20261101100000_sitam_v18_publications ════════
+/* ════════════════════════════════════════════════════════════════════════════
+   SITAM SPACE v18 — researchers keep their publications up to date (approved by the user 2026-10-31)
+   • The teacher linked to a researcher card adds, edits and removes the papers on that card,
+     or imports their own Scopus export. The coordinator can do the same for every card
+     (also from one Scopus export with many authors).
+   • professors.publications_updated_at: when the list was last updated (shown on the page).
+   • Totals (works, citations, h-index, i10) are still recomputed by refresh_professor_metrics.
+   Safe to run more than once.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+alter table public.professors add column if not exists publications_updated_at timestamptz;
+grant select (publications_updated_at) on public.professors to anon, authenticated;
+
+-- who may change the papers of a researcher card: the teacher linked to it, or the coordinator / admin
+create or replace function public.can_edit_professor(p_prof uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select public.is_admin()
+      or exists (select 1 from public.professors where id = p_prof and profile_id = auth.uid() and auth.uid() is not null)
+$$;
+revoke execute on function public.can_edit_professor(uuid) from anon, public;
+grant execute on function public.can_edit_professor(uuid) to authenticated;
+
+create or replace function public.pub_clean_doi(p text)
+returns text language sql immutable as $$
+  select nullif(lower(regexp_replace(btrim(coalesce(p, '')), '^(https?://)?(dx\.)?doi\.org/|^doi:\s*', '', 'i')), '')
+$$;
+
+-- add or update one paper on a researcher card; returns the paper id
+create or replace function public.save_publication(
+  p_prof uuid, p_id uuid, p_title text, p_year int, p_type text, p_venue text, p_doi text, p_url text,
+  p_citations int, p_open_access boolean)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare v_id uuid; v_doi text := public.pub_clean_doi(p_doi); v_title text := btrim(coalesce(p_title, ''));
+begin
+  if not public.can_edit_professor(p_prof) then
+    raise exception 'NOT_ALLOWED: only the researcher or the coordinator can change these publications';
+  end if;
+  if char_length(v_title) < 3 or char_length(v_title) > 600 then raise exception 'INVALID: the title is required'; end if;
+  if p_year is not null and (p_year < 1950 or p_year > extract(year from now())::int + 1) then raise exception 'INVALID: check the year'; end if;
+  if coalesce(p_citations, 0) < 0 then raise exception 'INVALID: citations cannot be negative'; end if;
+
+  if p_id is not null then
+    if not exists (select 1 from public.publication_authors where publication_id = p_id and professor_id = p_prof) then
+      raise exception 'NOT_ALLOWED: this paper is not on this researcher card';
+    end if;
+    v_id := p_id;
+  else
+    -- the same paper may already exist (co-author, earlier import): link it instead of copying
+    select id into v_id from public.publications
+     where (v_doi is not null and lower(doi) = v_doi)
+        or (v_doi is null and lower(title) = lower(v_title) and year is not distinct from p_year)
+     limit 1;
+  end if;
+
+  if v_id is null then
+    insert into public.publications (title, year, type, venue, doi, url, citations, is_open_access)
+    values (v_title, p_year, nullif(btrim(p_type), ''), nullif(btrim(p_venue), ''), v_doi, nullif(btrim(p_url), ''),
+            coalesce(p_citations, 0), coalesce(p_open_access, false))
+    returning id into v_id;
+  else
+    update public.publications
+       set title = v_title, year = p_year, type = nullif(btrim(p_type), ''), venue = nullif(btrim(p_venue), ''),
+           doi = coalesce(v_doi, doi), url = coalesce(nullif(btrim(p_url), ''), url),
+           citations = coalesce(p_citations, citations), is_open_access = coalesce(p_open_access, is_open_access)
+     where id = v_id;
+  end if;
+
+  insert into public.publication_authors (publication_id, professor_id) values (v_id, p_prof) on conflict do nothing;
+  perform public.refresh_professor_metrics(p_prof);
+  update public.professors set publications_updated_at = now() where id = p_prof;
+  return v_id;
+end;
+$$;
+
+-- remove a paper from a researcher card (the paper itself is deleted when no other researcher has it)
+create or replace function public.remove_publication(p_prof uuid, p_id uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not public.can_edit_professor(p_prof) then
+    raise exception 'NOT_ALLOWED: only the researcher or the coordinator can change these publications';
+  end if;
+  delete from public.publication_authors where publication_id = p_id and professor_id = p_prof;
+  delete from public.publications p where p.id = p_id and not exists (select 1 from public.publication_authors a where a.publication_id = p.id);
+  update public.professors set publications_updated_at = now() where id = p_prof;
+end;
+$$;
+
+-- import many papers for one researcher (from a Scopus export); new papers are added, known ones get fresh citations.
+-- p_items: [{title, year, type, venue, publisher, doi, url, citations, open_access, eid, keywords[]}]
+create or replace function public.import_publications(p_prof uuid, p_items jsonb)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare it jsonb; v_id uuid; v_doi text; v_eid text; v_title text; v_year int; v_cites int; v_added int := 0; v_updated int := 0;
+begin
+  if not public.can_edit_professor(p_prof) then
+    raise exception 'NOT_ALLOWED: only the researcher or the coordinator can change these publications';
+  end if;
+  if jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) > 2000 then raise exception 'INVALID: too many rows'; end if;
+  for it in select * from jsonb_array_elements(p_items) loop
+    v_title := btrim(coalesce(it->>'title', ''));
+    continue when char_length(v_title) < 3;
+    v_title := left(v_title, 600);
+    v_doi := public.pub_clean_doi(it->>'doi');
+    v_eid := nullif(btrim(coalesce(it->>'eid', '')), '');
+    v_year := case when (it->>'year') ~ '^\d{4}$' and (it->>'year')::int between 1950 and 2100 then (it->>'year')::int end;
+    v_cites := case when (it->>'citations') ~ '^\d{1,7}$' then (it->>'citations')::int else 0 end;
+    v_id := null;
+    select id into v_id from public.publications
+     where (v_eid is not null and scopus_eid = v_eid)
+        or (v_doi is not null and lower(doi) = v_doi)
+        or (lower(title) = lower(v_title) and year is not distinct from v_year)
+     limit 1;
+    if v_id is null then
+      insert into public.publications (title, year, type, venue, publisher, doi, url, citations, is_open_access, scopus_eid, keywords)
+      values (v_title, v_year, nullif(it->>'type', ''), nullif(it->>'venue', ''), nullif(it->>'publisher', ''), v_doi,
+              nullif(it->>'url', ''), v_cites, coalesce((it->>'open_access')::boolean, false), v_eid,
+              coalesce(array(select jsonb_array_elements_text(case when jsonb_typeof(it->'keywords') = 'array' then it->'keywords' else '[]'::jsonb end)), '{}'))
+      returning id into v_id;
+      v_added := v_added + 1;
+    else
+      update public.publications
+         set citations = greatest(citations, v_cites), doi = coalesce(doi, v_doi), scopus_eid = coalesce(scopus_eid, v_eid),
+             venue = coalesce(venue, nullif(it->>'venue', '')), url = coalesce(url, nullif(it->>'url', ''))
+       where id = v_id;
+      v_updated := v_updated + 1;
+    end if;
+    insert into public.publication_authors (publication_id, professor_id) values (v_id, p_prof) on conflict do nothing;
+  end loop;
+  perform public.refresh_professor_metrics(p_prof);
+  update public.professors set publications_updated_at = now() where id = p_prof;
+  return jsonb_build_object('added', v_added, 'updated', v_updated);
+end;
+$$;
+
+revoke execute on function public.save_publication(uuid, uuid, text, int, text, text, text, text, int, boolean) from anon, public;
+revoke execute on function public.remove_publication(uuid, uuid) from anon, public;
+revoke execute on function public.import_publications(uuid, jsonb) from anon, public;
+grant execute on function public.save_publication(uuid, uuid, text, int, text, text, text, text, int, boolean) to authenticated;
+grant execute on function public.remove_publication(uuid, uuid) to authenticated;
+grant execute on function public.import_publications(uuid, jsonb) to authenticated;
+
+insert into sitam_meta.applied_migrations (version, name) values ('20261101100000', 'sitam_v18_publications') on conflict do nothing;
+
+-- ════════ 20261102100000_sitam_v19_my_home ════════
+/* ════════════════════════════════════════════════════════════════════════════
+   SITAM SPACE v19 — personal Home page
+   • profiles.experience: where the person worked or did an internship
+     [{kind: 'work' | 'internship', company, role, start: 'YYYY-MM', end: 'YYYY-MM' | null}], max 30.
+     Edited only by the person (own row, column grant); shown to signed-in users (public_people), like the job title.
+   Everything else on the Home page is read from existing data (labs, registrations, applications, researcher card).
+   Safe to run more than once.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+create or replace function public.valid_experience(p jsonb)
+returns boolean language sql immutable as $$
+  select jsonb_typeof(p) = 'array' and jsonb_array_length(p) <= 30
+     and not exists (
+       select 1 from jsonb_array_elements(p) e
+        where jsonb_typeof(e) <> 'object'
+           or coalesce(e->>'kind', '') not in ('work', 'internship')
+           or char_length(btrim(coalesce(e->>'company', ''))) not between 1 and 120
+           or char_length(coalesce(e->>'role', '')) > 120
+           or coalesce(e->>'start', '') !~ '^(\d{4}-\d{2})?$'
+           or coalesce(e->>'end', '') !~ '^(\d{4}-\d{2})?$')
+$$;
+
+alter table public.profiles add column if not exists experience jsonb not null default '[]'::jsonb;
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'profiles_experience_valid') then
+    alter table public.profiles add constraint profiles_experience_valid check (public.valid_experience(experience));
+  end if;
+end $$;
+grant update (experience) on public.profiles to authenticated;
+
+drop view if exists public.public_people;
+create view public.public_people as
+  select p.id, p.first_name, p.last_name, p.role::text as role, p.email, p.course, p.major, p.department, p.position, p.bio,
+         p.faculty, p.group_name, p.avatar_url, p.personal_email, p.graduation_year, p.company, p.experience
+    from public.profiles p;
+revoke all on public.public_people from anon, public;
+grant select on public.public_people to authenticated;
+
+insert into sitam_meta.applied_migrations (version, name) values ('20261102100000', 'sitam_v19_my_home') on conflict do nothing;
+
+-- ════════ access for the website roles ════════
+-- ════════ 20261102200000_sitam_v20_account_safety ════════
+/* SITAM SPACE v20 — account safety, sign-in with a personal e-mail, Ask SITAM fixes
+   ──────────────────────────────────────────────────────────────────────────────
+   Since v9.5 new accounts are confirmed at once (no e-mail code), so the site cannot prove that a person owns the
+   e-mail they typed (or the personal e-mail added in Profile). Nothing that gives rights may depend on an e-mail alone:
+
+   • Lab seats listed with an e-mail are no longer linked at sign-up: an account claim is created and the coordinator
+     confirms it (Admin → "Accounts to confirm", decide_account_claim).
+   • Researcher cards with a matching e-mail (professors.email or professors.alt_emails) are no longer linked at
+     sign-up either: a researcher profile request ("This is me", v17) is created for the coordinator.
+   • The same happens when someone adds a personal e-mail in Profile → Settings that matches a seat or a card.
+   • Coordinators are bound to an account (coordinator_emails.user_id). Existing coordinator accounts are bound below.
+     To add a coordinator after the person has registered:
        insert into public.coordinator_emails (email) values ('name@sdu.edu.kz');      -- binds the existing account
      If the row already exists, bind it with:
        update public.coordinator_emails c set user_id = u.id from auth.users u
         where lower(u.email) = c.email and c.email = 'name@sdu.edu.kz';
    • A partner who types the name of an existing company joins it only after approval by the coordinator or an owner
-     of that company (company_members.status = 'pending' → decide_company_member). A new company name still creates
-     a new, unverified company with the person as owner.
+     of that company (company_members.status = 'pending' → decide_company_member).
    • Students and teachers register with their SDU e-mail only. Later they may add a personal e-mail in
      Profile → Settings and sign in with it and the same password: sign_in_email(e-mail, password) returns the
      account's sign-in e-mail when the password is right. A personal e-mail can belong to one account only.
@@ -10102,20 +10723,18 @@ insert into sitam_meta.applied_migrations (version, name) values ('2026103012000
 create schema if not exists extensions;
 create extension if not exists pgcrypto with schema extensions;
 
-/* ───────────── account claims: lab seats and professor pages ───────────── */
+/* ───────────── account claims: lab seats listed with an e-mail ───────────── */
 create table if not exists public.account_claims (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles(id) on delete cascade,
-  kind text not null check (kind in ('lab_seat', 'professor')),
-  member_id uuid references public.lab_members(id) on delete cascade,
-  professor_id uuid references public.professors(id) on delete cascade,
+  member_id uuid not null references public.lab_members(id) on delete cascade,
+  matched_email text,
   status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
   created_at timestamptz not null default now(),
   decided_at timestamptz,
-  decided_by uuid,
-  check ((kind = 'lab_seat' and member_id is not null) or (kind = 'professor' and professor_id is not null))
+  decided_by uuid
 );
-create unique index if not exists account_claims_once on public.account_claims (user_id, kind, coalesce(member_id, professor_id));
+create unique index if not exists account_claims_once on public.account_claims (user_id, member_id);
 alter table public.account_claims enable row level security;
 drop policy if exists "Own claims and coordinator" on public.account_claims;
 create policy "Own claims and coordinator" on public.account_claims for select to authenticated
@@ -10203,10 +10822,11 @@ begin
     end if;
     return new;
   end if;
-  if v_role = 'partner' or public.is_sdu_email(new.email) then
+  -- students and teachers need an SDU e-mail; partners and alumni may use any e-mail (v17)
+  if v_role in ('partner', 'alumni') or public.is_sdu_email(new.email) then
     return new;
   end if;
-  raise exception 'SITAM_EMAIL_DOMAIN: students and professors must register with an @sdu.edu.kz e-mail'
+  raise exception 'SITAM_EMAIL_DOMAIN: students and teachers must register with an @sdu.edu.kz e-mail'
     using errcode = 'P0001';
 end;
 $$;
@@ -10244,7 +10864,38 @@ $$;
 revoke execute on function public.sign_in_email(text, text) from public;
 grant execute on function public.sign_in_email(text, text) to anon, authenticated;
 
-/* ───────────── sign-up: no rights from an unproven e-mail ───────────── */
+/* ───────────── an e-mail that matches a lab seat or a researcher card → request for the coordinator ───────────── */
+-- older e-mails of a researcher (e.g. on papers from a previous university); private: no column grant to the site
+alter table public.professors add column if not exists alt_emails text[] not null default '{}';
+
+create or replace function public.create_account_claims(p_user uuid, p_email text)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_email text := nullif(lower(trim(coalesce(p_email, ''))), ''); v_prof public.professors;
+begin
+  if p_user is null or v_email is null then return; end if;
+  insert into public.account_claims (user_id, member_id, matched_email)
+  select p_user, m.id, v_email
+    from public.lab_members m join public.lab_member_contacts c on c.member_id = m.id
+   where lower(c.email) = v_email and m.user_id is null and m.role::text <> 'former_lead'
+  on conflict do nothing;
+  -- researcher card: the same request the teacher would send with "This is me" (one pending request per person)
+  if not exists (select 1 from public.professors where profile_id = p_user)
+     and not exists (select 1 from public.researcher_profile_requests where user_id = p_user and status = 'pending') then
+    select * into v_prof from public.professors pr
+     where pr.profile_id is null
+       and (lower(pr.email) = v_email or v_email = any (select lower(x) from unnest(pr.alt_emails) x))
+     order by pr.full_name limit 1;
+    if v_prof.id is not null then
+      insert into public.researcher_profile_requests (user_id, professor_id, full_name, title, degree, scholar_url, orcid_url, note)
+      values (p_user, v_prof.id, left(v_prof.full_name, 160), left(v_prof.job_title, 160), left(v_prof.degree, 120), v_prof.scholar_url, v_prof.orcid_url,
+              'Automatic: the account e-mail ' || v_email || ' matches this researcher card. E-mails are not verified — confirm it is really this person.');
+    end if;
+  end if;
+end;
+$$;
+revoke execute on function public.create_account_claims(uuid, text) from anon, authenticated, public;
+
+/* ───────────── sign-up: no rights from an unproven e-mail (v17 handle_new_user + v20 changes) ───────────── */
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer set search_path = public as $$
 declare
@@ -10258,6 +10909,7 @@ declare
 begin
   v_role := case
     when v_meta->>'role' = 'partner' then 'partner'
+    when v_meta->>'role' = 'alumni' then 'alumni'
     when v_meta->>'role' in ('teacher', 'professor') and public.is_sdu_email(new.email) then 'teacher'
     when v_meta->>'role' in ('student', 'phd') and public.is_sdu_email(new.email) then 'student'
     else public.account_type_from_email(new.email)
@@ -10267,7 +10919,7 @@ begin
     v_last := coalesce(v_last, nullif(trim(substr(v_full, char_length(split_part(v_full, ' ', 1)) + 1)), ''));
   end if;
 
-  insert into public.profiles (id, role, first_name, last_name, email, course, major, department, position, phone)
+  insert into public.profiles (id, role, first_name, last_name, email, course, major, department, position, phone, faculty, graduation_year, company)
   values (
     new.id, v_role::public.app_role,
     left(coalesce(v_first, ''), 100), left(coalesce(v_last, ''), 100),
@@ -10275,8 +10927,11 @@ begin
     case when v_role = 'student' and v_meta->>'course' ~ '^[1-6]$' then (v_meta->>'course')::smallint end,
     case when v_role = 'student' then nullif(left(v_meta->>'major', 100), '') end,
     case when v_role = 'teacher' then nullif(left(v_meta->>'department', 100), '') end,
-    case when v_role = 'partner' then nullif(left(v_meta->>'position', 100), '') end,
-    case when v_meta->>'phone' ~ '^[0-9 +()-]{6,24}$' then v_meta->>'phone' end
+    case when v_role in ('partner', 'alumni') then nullif(left(v_meta->>'position', 100), '') end,
+    case when v_meta->>'phone' ~ '^[0-9 +()-]{6,24}$' then v_meta->>'phone' end,
+    case when v_role = 'alumni' then nullif(left(v_meta->>'faculty', 120), '') end,
+    case when v_role = 'alumni' and v_meta->>'graduation_year' ~ '^(19|20)[0-9]{2}$' then (v_meta->>'graduation_year')::int end,
+    case when v_role = 'alumni' then v_company_name end
   )
   on conflict (id) do nothing;
 
@@ -10298,35 +10953,37 @@ begin
     end if;
   end if;
 
-  -- listed in a lab team or on a professor page: the coordinator confirms it is really this person
-  insert into public.account_claims (user_id, kind, member_id)
-  select new.id, 'lab_seat', m.id
-    from public.lab_members m join public.lab_member_contacts c on c.member_id = m.id
-   where c.email = lower(new.email) and m.user_id is null and m.role::text <> 'former_lead'
-  on conflict do nothing;
-  insert into public.account_claims (user_id, kind, professor_id)
-  select new.id, 'professor', pr.id from public.professors pr
-   where lower(pr.email) = lower(new.email) and pr.profile_id is null
-  on conflict do nothing;
+  perform public.create_account_claims(new.id, new.email);
   return new;
 end;
 $$;
 
-/* ───────────── coordinator: confirm or reject claims ───────────── */
-drop function if exists public.account_claims_inbox();  -- v17.2 adds a column; dropping keeps both files re-runnable
+/* Profile → Settings: a new personal e-mail can also match a lab seat or a researcher card */
+create or replace function public.profiles_personal_email_claims()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if new.personal_email is not null and new.personal_email is distinct from old.personal_email then
+    perform public.create_account_claims(new.id, new.personal_email);
+  end if;
+  return new;
+end;
+$$;
+drop trigger if exists profiles_personal_email_claims on public.profiles;
+create trigger profiles_personal_email_claims after update of personal_email on public.profiles
+  for each row execute function public.profiles_personal_email_claims();
+
+/* ───────────── coordinator: confirm or reject lab seat claims ───────────── */
+drop function if exists public.account_claims_inbox();
 create function public.account_claims_inbox()
-returns table (id uuid, kind text, status text, created_at timestamptz, user_id uuid, first_name text, last_name text,
-               email text, role text, target text, target_detail text, lab_slug text, professor_username text)
+returns table (id uuid, status text, created_at timestamptz, user_id uuid, first_name text, last_name text,
+               email text, role text, target text, target_detail text, lab_slug text, matched_email text)
 language sql stable security definer set search_path = public as $$
-  select c.id, c.kind, c.status, c.created_at, p.id, p.first_name, p.last_name, p.email, p.role::text,
-         coalesce(l.name, pr.full_name),
-         case when c.kind = 'lab_seat' then m.full_name || ' · ' || initcap(replace(m.role::text, '_', ' ')) else 'Researcher page' end,
-         l.slug, pr.username
+  select c.id, c.status, c.created_at, p.id, p.first_name, p.last_name, p.email, p.role::text,
+         l.name, m.full_name || ' · ' || initcap(replace(m.role::text, '_', ' ')), l.slug, c.matched_email
     from public.account_claims c
     join public.profiles p on p.id = c.user_id
-    left join public.lab_members m on m.id = c.member_id
-    left join public.labs l on l.id = m.lab_id
-    left join public.professors pr on pr.id = c.professor_id
+    join public.lab_members m on m.id = c.member_id
+    join public.labs l on l.id = m.lab_id
    where public.is_coordinator() and c.status = 'pending'
    order by c.created_at desc
 $$;
@@ -10340,15 +10997,11 @@ begin
   if c.id is null then raise exception 'NOT_FOUND: claim'; end if;
   if c.status <> 'pending' then raise exception 'ALREADY_DECIDED: this request was already decided'; end if;
   if p_approve then
-    if c.kind = 'lab_seat' then
-      if exists (select 1 from public.lab_members x join public.lab_members m on m.id = c.member_id
-                  where x.lab_id = m.lab_id and x.user_id = c.user_id) then
-        raise exception 'DUPLICATE: this person is already in the lab';
-      end if;
-      update public.lab_members set user_id = c.user_id where id = c.member_id and user_id is null;
-    else
-      update public.professors set profile_id = c.user_id where id = c.professor_id and profile_id is null;
+    if exists (select 1 from public.lab_members x join public.lab_members m on m.id = c.member_id
+                where x.lab_id = m.lab_id and x.user_id = c.user_id) then
+      raise exception 'DUPLICATE: this person is already in the lab';
     end if;
+    update public.lab_members set user_id = c.user_id where id = c.member_id and user_id is null;
     get diagnostics n = row_count;
     if n = 0 then raise exception 'TAKEN: this place is already linked to another account'; end if;
   end if;
@@ -10419,10 +11072,9 @@ returns jsonb language sql stable security definer set search_path = public as $
       from public.company_members cm join public.companies c on c.id = cm.company_id
       where cm.user_id = auth.uid() and cm.status = 'pending'), '[]'::jsonb),
     'pending_claims', coalesce((
-      select jsonb_agg(coalesce(l.name, pr.full_name) order by ac.created_at)
+      select jsonb_agg(l.name order by ac.created_at)
       from public.account_claims ac
-      left join public.lab_members m on m.id = ac.member_id left join public.labs l on l.id = m.lab_id
-      left join public.professors pr on pr.id = ac.professor_id
+      join public.lab_members m on m.id = ac.member_id join public.labs l on l.id = m.lab_id
       where ac.user_id = auth.uid() and ac.status = 'pending'), '[]'::jsonb),
     'professor', (select jsonb_build_object('username', username, 'full_name', full_name) from public.professors where profile_id = auth.uid() limit 1),
     'saved_labs', coalesce((select jsonb_agg(lab_id) from public.saved_labs where user_id = auth.uid()), '[]'::jsonb),
@@ -10460,11 +11112,12 @@ insert into public.ai_faq (question, answer) values
   ('When and where are the events?', 'Every SDU event, competition and hackathon is on the Events page with its date, time and room. An event can be hosted by several labs, companies or projects together. Register in one click to get a QR ticket.')
 on conflict (question) do update set answer = excluded.answer;
 
-insert into sitam_meta.applied_migrations (version, name) values ('20261030140000', 'sitam_v17_account_safety') on conflict do nothing;
+insert into sitam_meta.applied_migrations (version, name) values ('20261102200000', 'sitam_v20_account_safety') on conflict do nothing;
 
--- ════════ 20261030150000_sitam_v17_1_researcher_amine_sbai ════════
--- SITAM SPACE v17.1 — researcher Amine Sbai (Statistics lab head): profile + 7 Scopus papers with citations
--- (Scopus author page 57223768105, 2026-10-30: 18 citations, h-index 3). Generated with scripts/build-seed.mjs. Re-runnable.
+-- ════════ 20261102200100_sitam_v20_1_researcher_amine_sbai ════════
+-- SITAM SPACE v20.1 — researcher Amine Sbai (Statistics lab head): profile + 7 Scopus papers with citations
+-- (Scopus author page 57223768105, 2026-10-30: 18 citations, h-index 3) and his older e-mails from the papers.
+-- Generated with scripts/build-seed.mjs. Re-runnable.
 
 -- Amine Sbai
 insert into public.professors (username, first_name, last_name, full_name, job_title, degree, email, photo_url, orcid_url, scopus_id, scholar_url,
@@ -10478,6 +11131,7 @@ on conflict (username) do update set first_name = excluded.first_name, last_name
   orcid_url = excluded.orcid_url, scopus_id = excluded.scopus_id, scholar_url = excluded.scholar_url, h_index = excluded.h_index,
   i10_index = excluded.i10_index, total_citations = excluded.total_citations, total_works = excluded.total_works,
   keywords = excluded.keywords, topics = excluded.topics, updated_at = now();
+update public.professors set alt_emails = array['a.sbai@uhp.ac.ma', 'asbai@correo.ugr.es']::text[] where username = 'amine.sbai';
 insert into public.publications (title, year, type, doi, venue, publisher, citations, is_open_access, url, scopus_eid, keywords)
 select 'Boundary controllability for a coupled system of parabolic equations with singular potentials', 2022, 'Article', 'https://doi.org/10.1007/s00030-022-00792-1', 'Nonlinear Differential Equations and Applications NoDEA',
   'Springer Nature', 1, false, 'https://www.scopus.com/pages/publications/85134416991?origin=resultslist', '2-s2.0-85134416991', array['controllability', 'singular parabolic systems', 'biorthogonal families', 'spectral analysis', 'moment method']::text[]
@@ -10528,139 +11182,7 @@ update public.publications set citations = 0, keywords = array['beam equation', 
 insert into public.publication_authors (publication_id, professor_id)
 select id, (select id from public.professors where username = 'amine.sbai') from public.publications where scopus_eid = '2-s2.0-105032821750' on conflict do nothing;
 
-insert into sitam_meta.applied_migrations (version, name) values ('20261030150000', 'sitam_v17_1_researcher_amine_sbai') on conflict do nothing;
-
--- ════════ 20261030160000_sitam_v17_2_link_by_personal_email ════════
-/* SITAM SPACE v17.2 — link a researcher page (or a lab seat) by the personal e-mail
-   ─────────────────────────────────────────────────────────────────────────────
-   A researcher's papers may carry an older e-mail (a previous university) instead of the SDU one.
-   • professors.alt_emails: other known e-mails of the researcher (private: no column grant to the site).
-   • When someone adds a personal e-mail in Profile → Settings that matches a researcher page (email or alt_emails)
-     or a lab seat, an account claim is created — the same as at sign-up with a listed e-mail. The coordinator
-     confirms it in Admin → "Accounts to confirm"; the e-mail itself is not proven, so nothing is linked before that.
-   • account_claims.matched_email: which e-mail matched (shown to the coordinator).
-   Re-runnable. */
-
-alter table public.professors add column if not exists alt_emails text[] not null default '{}';
-alter table public.account_claims add column if not exists matched_email text;
-
--- Amine Sbai: e-mails on his papers (Hassan First University of Settat, University of Granada)
-update public.professors set alt_emails = array['a.sbai@uhp.ac.ma', 'asbai@correo.ugr.es']
- where username = 'amine.sbai';
-
-/* claims for one account and one e-mail (sign-up e-mail or personal e-mail) */
-create or replace function public.create_account_claims(p_user uuid, p_email text)
-returns void language plpgsql security definer set search_path = public as $$
-declare v_email text := nullif(lower(trim(coalesce(p_email, ''))), '');
-begin
-  if p_user is null or v_email is null then return; end if;
-  insert into public.account_claims (user_id, kind, member_id, matched_email)
-  select p_user, 'lab_seat', m.id, v_email
-    from public.lab_members m join public.lab_member_contacts c on c.member_id = m.id
-   where lower(c.email) = v_email and m.user_id is null and m.role::text <> 'former_lead'
-  on conflict do nothing;
-  insert into public.account_claims (user_id, kind, professor_id, matched_email)
-  select p_user, 'professor', pr.id, v_email from public.professors pr
-   where pr.profile_id is null
-     and (lower(pr.email) = v_email or v_email = any (select lower(x) from unnest(pr.alt_emails) x))
-  on conflict do nothing;
-end;
-$$;
-revoke execute on function public.create_account_claims(uuid, text) from anon, authenticated, public;
-
-/* sign-up: profile first, then claims for the sign-up e-mail (rest of handle_new_user unchanged from v17) */
-create or replace function public.handle_new_user()
-returns trigger language plpgsql security definer set search_path = public as $$
-declare
-  v_meta jsonb := coalesce(new.raw_user_meta_data, '{}'::jsonb);
-  v_role text;
-  v_company uuid;
-  v_company_name text := nullif(trim(left(coalesce(v_meta->>'company', ''), 120)), '');
-  v_full text := trim(coalesce(v_meta->>'full_name', v_meta->>'name', ''));
-  v_first text := nullif(trim(coalesce(v_meta->>'first_name', v_meta->>'given_name', '')), '');
-  v_last text := nullif(trim(coalesce(v_meta->>'last_name', v_meta->>'family_name', '')), '');
-begin
-  v_role := case
-    when v_meta->>'role' = 'partner' then 'partner'
-    when v_meta->>'role' in ('teacher', 'professor') and public.is_sdu_email(new.email) then 'teacher'
-    when v_meta->>'role' in ('student', 'phd') and public.is_sdu_email(new.email) then 'student'
-    else public.account_type_from_email(new.email)
-  end;
-  if v_first is null and v_full <> '' then
-    v_first := split_part(v_full, ' ', 1);
-    v_last := coalesce(v_last, nullif(trim(substr(v_full, char_length(split_part(v_full, ' ', 1)) + 1)), ''));
-  end if;
-
-  insert into public.profiles (id, role, first_name, last_name, email, course, major, department, position, phone)
-  values (
-    new.id, v_role::public.app_role,
-    left(coalesce(v_first, ''), 100), left(coalesce(v_last, ''), 100),
-    lower(coalesce(new.email, '')),
-    case when v_role = 'student' and v_meta->>'course' ~ '^[1-6]$' then (v_meta->>'course')::smallint end,
-    case when v_role = 'student' then nullif(left(v_meta->>'major', 100), '') end,
-    case when v_role = 'teacher' then nullif(left(v_meta->>'department', 100), '') end,
-    case when v_role = 'partner' then nullif(left(v_meta->>'position', 100), '') end,
-    case when v_meta->>'phone' ~ '^[0-9 +()-]{6,24}$' then v_meta->>'phone' end
-  )
-  on conflict (id) do nothing;
-
-  if v_role = 'partner' and v_company_name is not null then
-    select id into v_company from public.companies where lower(name) = lower(v_company_name);
-    if v_company is null then
-      insert into public.companies (name, website)
-      values (v_company_name, case when v_meta->>'website' ~* '^https?://' then left(v_meta->>'website', 200) end)
-      returning id into v_company;
-      insert into public.company_members (company_id, user_id, role, status)
-      values (v_company, new.id, 'owner', 'active')
-      on conflict do nothing;
-    else
-      insert into public.company_members (company_id, user_id, role, status)
-      values (v_company, new.id, 'member', 'pending')
-      on conflict do nothing;
-    end if;
-  end if;
-
-  perform public.create_account_claims(new.id, new.email);
-  return new;
-end;
-$$;
-
-/* Profile → Settings: a new personal e-mail can also match a researcher page or a lab seat */
-create or replace function public.profiles_personal_email_claims()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  if new.personal_email is not null and new.personal_email is distinct from old.personal_email then
-    perform public.create_account_claims(new.id, new.personal_email);
-  end if;
-  return new;
-end;
-$$;
-drop trigger if exists profiles_personal_email_claims on public.profiles;
-create trigger profiles_personal_email_claims after update of personal_email on public.profiles
-  for each row execute function public.profiles_personal_email_claims();
-
-/* the coordinator sees which e-mail matched */
-drop function if exists public.account_claims_inbox();
-create function public.account_claims_inbox()
-returns table (id uuid, kind text, status text, created_at timestamptz, user_id uuid, first_name text, last_name text,
-               email text, role text, target text, target_detail text, lab_slug text, professor_username text, matched_email text)
-language sql stable security definer set search_path = public as $$
-  select c.id, c.kind, c.status, c.created_at, p.id, p.first_name, p.last_name, p.email, p.role::text,
-         coalesce(l.name, pr.full_name),
-         case when c.kind = 'lab_seat' then m.full_name || ' · ' || initcap(replace(m.role::text, '_', ' ')) else 'Researcher page' end,
-         l.slug, pr.username, c.matched_email
-    from public.account_claims c
-    join public.profiles p on p.id = c.user_id
-    left join public.lab_members m on m.id = c.member_id
-    left join public.labs l on l.id = m.lab_id
-    left join public.professors pr on pr.id = c.professor_id
-   where public.is_coordinator() and c.status = 'pending'
-   order by c.created_at desc
-$$;
-revoke execute on function public.account_claims_inbox() from anon, public;
-grant execute on function public.account_claims_inbox() to authenticated;
-
-insert into sitam_meta.applied_migrations (version, name) values ('20261030160000', 'sitam_v17_2_link_by_personal_email') on conflict do nothing;
+insert into sitam_meta.applied_migrations (version, name) values ('20261102200100', 'sitam_v20_1_researcher_amine_sbai') on conflict do nothing;
 
 -- SITAM SPACE — fix "You do not have permission to do this" on a new Supabase project.
 -- New Supabase projects can be created WITHOUT the usual default access for the website roles (anon, authenticated).
@@ -10769,7 +11291,38 @@ grant execute on function public.ai_index_status() to authenticated;
 grant execute on function public.ai_pending_documents(int), public.ai_upsert_document(text, text, text, text, text, text, extensions.vector), public.ai_remove_stale(), public.ai_take_quota(uuid, int), public.match_documents(extensions.vector, int, float, text[]), public.ai_index_status() to service_role;
 revoke execute on function public.match_documents(extensions.vector, int, float, text[]) from anon, public;
 grant execute on function public.match_documents(extensions.vector, int, float, text[]) to authenticated, service_role;
--- v17: account safety (guarded: this file may run before v17 exists)
+grant execute on function public.is_lab_lead(uuid) to authenticated;
+grant update (graduation_year, company) on public.profiles to authenticated;
+revoke all on public.public_people from anon, public;
+grant select on public.public_people to authenticated;
+revoke insert, update, delete on public.help_offers from anon, authenticated;
+grant select on public.help_offers to authenticated;
+grant select (bio, office_hours, interests) on public.professors to anon, authenticated;
+revoke insert, update, delete on public.researcher_profile_requests from anon, authenticated;
+grant select on public.researcher_profile_requests to authenticated;
+revoke execute on function public.offer_help(uuid, text, text) from anon, public;
+revoke execute on function public.respond_help_offer(uuid, text) from anon, public;
+revoke execute on function public.request_researcher_profile(uuid, text, text, text, text, text, text, text, text) from anon, public;
+revoke execute on function public.review_researcher_request(uuid, boolean, text) from anon, public;
+revoke execute on function public.update_my_researcher_profile(text, text, text[], text, text, text) from anon, public;
+grant execute on function public.offer_help(uuid, text, text) to authenticated;
+grant execute on function public.respond_help_offer(uuid, text) to authenticated;
+grant execute on function public.request_researcher_profile(uuid, text, text, text, text, text, text, text, text) to authenticated;
+grant execute on function public.review_researcher_request(uuid, boolean, text) to authenticated;
+grant execute on function public.update_my_researcher_profile(text, text, text[], text, text, text) to authenticated;
+grant select (publications_updated_at) on public.professors to anon, authenticated;
+revoke execute on function public.can_edit_professor(uuid) from anon, public;
+grant execute on function public.can_edit_professor(uuid) to authenticated;
+revoke execute on function public.save_publication(uuid, uuid, text, int, text, text, text, text, int, boolean) from anon, public;
+revoke execute on function public.remove_publication(uuid, uuid) from anon, public;
+revoke execute on function public.import_publications(uuid, jsonb) from anon, public;
+grant execute on function public.save_publication(uuid, uuid, text, int, text, text, text, text, int, boolean) to authenticated;
+grant execute on function public.remove_publication(uuid, uuid) to authenticated;
+grant execute on function public.import_publications(uuid, jsonb) to authenticated;
+grant update (experience) on public.profiles to authenticated;
+revoke all on public.public_people from anon, public;
+grant select on public.public_people to authenticated;
+-- v20: account safety (guarded: this file may run before v20 exists)
 do $$ begin
   if to_regprocedure('public.ai_refund_quota(uuid)') is not null then
     revoke execute on function public.ai_refund_quota(uuid) from anon, authenticated, public;
@@ -10781,6 +11334,9 @@ do $$ begin
   if to_regprocedure('public.decide_account_claim(uuid, boolean)') is not null then
     revoke execute on function public.account_claims_inbox(), public.decide_account_claim(uuid, boolean),
       public.company_join_requests(), public.decide_company_member(uuid, uuid, boolean) from anon, public;
+  end if;
+  if to_regprocedure('public.create_account_claims(uuid, text)') is not null then
+    revoke execute on function public.create_account_claims(uuid, text) from anon, authenticated, public;
   end if;
 end $$;
 revoke insert, update, delete on public.company_members from anon, authenticated;

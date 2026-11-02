@@ -3,11 +3,13 @@ import { z } from 'zod';
 import { ArrowUpRight, CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
-import { humanError, useSubmitBrief, type PartnerRequest } from '@/lib/api';
+import { humanError, useLabs, useSubmitBrief, type PartnerRequest } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 
 const TYPES: { value: PartnerRequest['request_type']; label: string }[] = [
-  { value: 'rnd', label: 'R&D research' },
+  { value: 'rnd', label: 'R&D challenge / research request' },
+  { value: 'internship', label: 'Offer an internship / vacancy' },
+  { value: 'contact_lab', label: 'Contact a lab' },
   { value: 'mvp', label: 'MVP outsourcing' },
   { value: 'hiring', label: 'Hiring' },
   { value: 'sponsorship', label: 'Sponsorship' },
@@ -22,10 +24,14 @@ const schema = z.object({
   description: z.string().trim().min(20, 'Please describe your project in at least 20 characters.').max(2000),
 });
 
-export function PartnerForm() {
+export function PartnerForm({ labSlug }: { labSlug?: string | undefined }) {
   const { user, profile, caps } = useAuth();
   const submit = useSubmitBrief();
-  const [type, setType] = useState<PartnerRequest['request_type']>('rnd');
+  const labs = useLabs();
+  const [type, setType] = useState<PartnerRequest['request_type']>(labSlug ? 'contact_lab' : 'rnd');
+  const [labId, setLabId] = useState('');
+  const presetLab = labSlug ? labs.data?.find((l) => l.slug === labSlug) : undefined;
+  const chosenLab = labId || presetLab?.id || '';
   const [budget, setBudget] = useState<'yes' | 'no'>('yes');
   const [range, setRange] = useState<string>(BUDGETS[1]);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -39,9 +45,10 @@ export function PartnerForm() {
       setErrors(Object.fromEntries(r.error.issues.map((i) => [String(i.path[0]), i.message])));
       return;
     }
+    if (type === 'contact_lab' && !chosenLab) { setErrors({ lab: 'Choose the lab you want to contact.' }); return; }
     setErrors({});
     try {
-      await submit.mutateAsync({ ...r.data, request_type: type, has_budget: budget === 'yes', budget_range: budget === 'yes' ? range : null });
+      await submit.mutateAsync({ ...r.data, request_type: type, has_budget: budget === 'yes', budget_range: budget === 'yes' ? range : null, ...(chosenLab ? { requested_lab_id: chosenLab } : {}) });
       setDone(r.data.company_name);
       toast.success('Brief sent to the SITAM office', { description: r.data.company_name });
     } catch (err) {
@@ -74,6 +81,13 @@ export function PartnerForm() {
           {TYPES.map((t) => <Button key={t.value} type="button" variant="outline" className={type === t.value ? 'request-selected' : ''} onClick={() => setType(t.value)} aria-pressed={type === t.value}>{t.label}</Button>)}
         </div>
       </fieldset>
+      <label>{type === 'contact_lab' ? 'Lab' : 'Lab (optional)'}
+        <select value={chosenLab} onChange={(e) => setLabId(e.target.value)} aria-invalid={!!errors['lab']}>
+          <option value="">{type === 'contact_lab' ? 'Choose a lab' : 'Any lab — the SITAM office suggests one'}</option>
+          {(labs.data ?? []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+        </select>
+        {err('lab')}
+      </label>
       <fieldset>
         <legend>Budget availability</legend>
         <div className="budget-options">

@@ -99,7 +99,7 @@ function CountUp({ value }: { value: number | undefined }) {
   return <span ref={ref}>{value === undefined ? '—' : shown}</span>;
 }
 
-/** Same page for everyone: a cinematic, centred hero and an "About us" section. */
+/** Landing page for everyone (the logo opens it): a cinematic, centred hero and an "About us" section. The personal Home is /home. */
 function Index() {
   const labs = useLabs();
   const projects = useProjects();

@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
+import { OffersPanel } from '@/components/onboarding';
 import { ArrowUpRight, FlaskConical, LogIn, Pencil, UserCog } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -7,8 +8,8 @@ import { LAB_POSITION_LABEL, useInbox, type LabRole } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { pageHead } from '@/lib/hub-data';
 
-type ManageTab = 'inbox' | 'labs' | 'listings' | 'events' | 'moderation' | 'labheads' | 'b2b' | 'admin';
-const TABS: ManageTab[] = ['inbox', 'labs', 'listings', 'events', 'moderation', 'labheads', 'b2b', 'admin'];
+type ManageTab = 'inbox' | 'labs' | 'offers' | 'listings' | 'events' | 'moderation' | 'labheads' | 'b2b' | 'admin';
+const TABS: ManageTab[] = ['inbox', 'labs', 'offers', 'listings', 'events', 'moderation', 'labheads', 'b2b', 'admin'];
 
 export const Route = createFileRoute('/manage')({
   validateSearch: (s: Record<string, unknown>): { tab?: ManageTab; lab?: string } => ({
@@ -49,6 +50,7 @@ function Manage() {
   const available: { value: ManageTab; label: string; show: boolean }[] = [
     { value: 'inbox', label: `Applications${openCount ? ` · ${openCount}` : ''}`, show: caps.canReview },
     { value: 'labs', label: 'My labs', show: caps.managedLabs.length > 0 },
+    { value: 'offers', label: 'Offers of help', show: caps.managedLabs.length > 0 || caps.isAdmin },
     { value: 'listings', label: 'Opportunities', show: caps.companies.length > 0 || caps.managedLabs.length > 0 || caps.isTeacher || caps.isAdmin },
     { value: 'events', label: 'Events', show: caps.isStaff || caps.managedLabs.length > 0 || caps.companies.length > 0 },
     { value: 'moderation', label: `Submissions${caps.pendingModeration ? ` · ${caps.pendingModeration}` : ''}`, show: caps.isAdmin },
@@ -96,6 +98,7 @@ function Manage() {
               ))}
             </div>
           </TabsContent>
+          <TabsContent value="offers"><OffersPanel /></TabsContent>
           <TabsContent value="listings"><ListingsPanel /></TabsContent>
           <TabsContent value="events"><EventsPanel /><p className="small-note mt-3">Attendee lists: open any event on the <Link to="/events">Events</Link> page → “Attendees”.</p></TabsContent>
           <TabsContent value="moderation"><ModerationPanel /></TabsContent>

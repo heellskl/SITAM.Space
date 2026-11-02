@@ -25,8 +25,10 @@ const isHead = (r: LabRole) => HEAD_ROLES.includes(r);
 
 export function LabTeamManager({ lab, onEdit }: { lab: Lab; onEdit: () => void }) {
   const { user, caps, refresh } = useAuth();
-  // Heads are assigned only by the coordinator (Admin page); heads manage members.
+  // The Head is assigned only by the coordinator (Admin page). The Head of this lab appoints / removes Co-Heads
+  // (checked again in the database: lab_members_guard, add_lab_member).
   const canEditHeads = caps.isAdmin;
+  const isLead = caps.managedLabs.some((m) => m.id === lab.id && m.role === 'lead');
   const add = useAddLabMember();
   const update = useUpdateLabMember();
   const remove = useRemoveLabMember();
@@ -35,8 +37,9 @@ export function LabTeamManager({ lab, onEdit }: { lab: Lab; onEdit: () => void }
 
   // Member-level positions (rights = member). Old student-lead labels stay visible on existing rows only.
   const MEMBER_POSITIONS: LabRole[] = ['member', 'mentor', 'project_coordinator', 'research_assistant', 'student_researcher'];
-  const positions = canEditHeads ? LAB_ROLE_ORDER : MEMBER_POSITIONS;
-  const addable = MEMBER_POSITIONS;
+  const positions: LabRole[] = canEditHeads ? LAB_ROLE_ORDER : isLead ? ['co_lead', ...MEMBER_POSITIONS] : MEMBER_POSITIONS;
+  const addable: LabRole[] = canEditHeads || isLead ? ['co_lead', ...MEMBER_POSITIONS] : MEMBER_POSITIONS;
+  const coHeadOk = canEditHeads || isLead;
 
   const team = useMemo(
     () => lab.lab_members.slice().sort((a, b) => LAB_ROLE_ORDER.indexOf(a.role) - LAB_ROLE_ORDER.indexOf(b.role) || a.sort_order - b.sort_order),
@@ -94,7 +97,7 @@ export function LabTeamManager({ lab, onEdit }: { lab: Lab; onEdit: () => void }
         <div className="inline-form mb-3">
           <label className="small-note">Position{' '}
             <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as LabRole })}>
-              {positionOptions(addable).map((r) => <option key={r} value={r}>{LAB_POSITION_LABEL[r]}</option>)}
+              {positionOptions(addable, undefined, coHeadOk).map((r) => <option key={r} value={r}>{LAB_POSITION_LABEL[r]}</option>)}
             </select>
           </label>
           <input value={form.title} maxLength={200} placeholder="Title (optional), e.g. 3rd year, CS" onChange={(e) => setForm({ ...form, title: e.target.value })} aria-label="Title" />
@@ -111,8 +114,9 @@ export function LabTeamManager({ lab, onEdit }: { lab: Lab; onEdit: () => void }
             <thead><tr><th aria-label="Number">#</th><th>Person</th><th>Position</th><th>Title</th><th aria-label="Actions" /></tr></thead>
             <tbody>
               {team.map((m, i) => {
-                const locked = !canEditHeads && isHead(m.role);
                 const self = !!user && m.user_id === user.id;
+                // the Head of the lab can change / remove Co-Heads (not themselves, not the Head)
+                const locked = !canEditHeads && isHead(m.role) && !(isLead && m.role === 'co_lead' && !self);
                 return (
                   <tr key={m.id} className={isHead(m.role) ? 'is-head' : m.is_past || m.role === 'former_lead' ? 'is-past' : undefined}>
                     <td className="team-num-cell">{i + 1}</td>
@@ -133,7 +137,7 @@ export function LabTeamManager({ lab, onEdit }: { lab: Lab; onEdit: () => void }
                         <span className="role-chip">{LAB_POSITION_LABEL[m.role]}</span>
                       ) : (
                         <select aria-label={`Position of ${m.full_name}`} value={m.role} disabled={update.isPending} onChange={(e) => changeRole(m, e.target.value as LabRole)}>
-                          {positionOptions(positions, m.role).map((r) => <option key={r} value={r}>{LAB_POSITION_LABEL[r]}</option>)}
+                          {positionOptions(positions, m.role, coHeadOk).map((r) => <option key={r} value={r}>{LAB_POSITION_LABEL[r]}</option>)}
                         </select>
                       )}
                     </td>

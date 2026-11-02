@@ -4,10 +4,13 @@ import { createFileRoute, Link } from '@tanstack/react-router';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { VIZ, axisProps, tooltipProps } from '@/lib/chart-style';
 import { BackButton } from '@/components/back-button';
+import { useAuth } from '@/lib/auth';
+import { EditMyResearcher } from '@/components/onboarding';
+import { ManagePublications, PublicationsUpdated } from '@/components/publications-editor';
 import { ArrowUpRight, ExternalLink, FlaskConical, Mail, Megaphone } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { PublicationRow } from '@/components/research-publications';
-import { LAB_POSITION_LABEL, formatDate, humanError, opportunityLabel, usePersonOpportunities, useProfessor } from '@/lib/api';
+import { LAB_POSITION_LABEL, formatDate, humanError, opportunityLabel, usePersonOpportunities, useProfessor, useResearcherExtra } from '@/lib/api';
 
 export const Route = createFileRoute('/research/$username')({
   head: () => ({ meta: [{ title: 'Researcher — SITAM SPACE · SDU' }] }),
@@ -17,6 +20,8 @@ export const Route = createFileRoute('/research/$username')({
 function ProfessorPage() {
   const { username } = Route.useParams();
   const { data, isLoading, error } = useProfessor(username);
+  const extra = useResearcherExtra(data?.prof.id);
+  const { user: me, caps } = useAuth();
   const offers = usePersonOpportunities(username);
   const [sort, setSort] = useState<'year' | 'citations'>('year');
 
@@ -56,9 +61,21 @@ function ProfessorPage() {
           <span className="eyebrow">{[prof.job_title, prof.degree].filter(Boolean).join(' · ') || 'Researcher'}</span>
           <h1>{prof.full_name}</h1>
           {data.email && <p className="mt-2"><a className="person-mail" href={gmailCompose(data.email)} target="_blank" rel="noopener noreferrer"><Mail size={15} />{data.email}</a></p>}
-          <div className="social-row">{links.map((l) => <Button key={l.label} asChild size="sm" variant="outline"><a href={l.url} target="_blank" rel="noopener noreferrer"><ExternalLink />{l.label}</a></Button>)}</div>
+          <div className="social-row">
+            {links.map((l) => <Button key={l.label} asChild size="sm" variant="outline"><a href={l.url} target="_blank" rel="noopener noreferrer"><ExternalLink />{l.label}</a></Button>)}
+            {/* only the teacher this card belongs to (the database checks it too) */}
+            {me && extra.data && extra.data.profile_id === me.id && <EditMyResearcher prof={prof} extra={extra.data} />}
+            {me && ((extra.data && extra.data.profile_id === me.id) || caps.isCoordinator || caps.isAdmin) && <ManagePublications prof={prof} pubs={data.pubs} />}
+          </div>
         </div>
       </header>
+      {extra.data && (extra.data.bio || extra.data.office_hours || extra.data.interests.length > 0) && (
+        <section className="panel prof-about">
+          {extra.data.bio && <p className="lab-text">{extra.data.bio}</p>}
+          {extra.data.interests.length > 0 && <div className="stack-list">{extra.data.interests.map((t) => <span key={t}>{t}</span>)}</div>}
+          {extra.data.office_hours && <p className="small-note"><strong>Office hours:</strong> {extra.data.office_hours}</p>}
+        </section>
+      )}
 
       <div className="kpi-grid">
         <div className="kpi"><strong>{prof.total_works}</strong><span>Works</span></div>
@@ -77,6 +94,7 @@ function ProfessorPage() {
                 <Button size="sm" variant="ghost" className={sort === 'citations' ? 'filter active' : 'filter'} onClick={() => setSort('citations')}>Most cited</Button>
               </div>
             </div>
+            <PublicationsUpdated profId={prof.id} />
             <ul className="pub-list">{pubs.map((p) => <PublicationRow key={p.id} p={p} showAuthors={false} />)}</ul>
           </section>
         </div>
