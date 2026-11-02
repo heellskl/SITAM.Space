@@ -11191,9 +11191,10 @@ insert into sitam_meta.applied_migrations (version, name) values ('2026110220010
 update public.professors set scopus_id = '59193748300', orcid_url = 'https://orcid.org/0000-0002-0005-7037',
   total_works = 49, total_citations = 571, h_index = 14, i10_index = 16, updated_at = now()
  where username = 'm.al-hadeethi';
-drop table if exists pg_temp.v_alaa;
-create temp table v_alaa (title text, year int, type text, venue text, citations int, oa boolean);
-insert into v_alaa values
+drop table if exists sitam_meta.v_alaa;
+create schema if not exists sitam_meta;
+create table sitam_meta.v_alaa (title text, year int, type text, venue text, citations int, oa boolean);
+insert into sitam_meta.v_alaa values
 ('Zero trust architecture for industry 5.0 and industrial IoT: A systematic review, taxonomy, and research roadmap', 2026, 'Review', 'Computer Networks', 0, false),
 ('End-to-end optimization based on residual neural networks for improved optical fiber communication', 2026, 'Article', 'ICT Express', 1, true),
 ('Connect-4 AI: A Comprehensive Taxonomy and Critical Review of Methods and Metrics', 2026, 'Review', 'Symmetry', 3, true),
@@ -11244,14 +11245,14 @@ insert into v_alaa values
 ('Load Balancing and Server Consolidation in Cloud Computing Environments: A Meta-Study', 2019, 'Article', 'IEEE Access', 75, true),
 ('Range wise busy checking 2-way imbalanced algorithm for cloudlet allocation in cloud environment', 2018, 'Conference paper', 'Journal of Physics: Conference Series', 21, true);
 insert into public.publications (title, year, type, venue, citations, is_open_access, keywords)
-select v.title, v.year, v.type, v.venue, v.citations, v.oa, '{}'::text[] from v_alaa v
+select v.title, v.year, v.type, v.venue, v.citations, v.oa, '{}'::text[] from sitam_meta.v_alaa v
  where not exists (select 1 from public.publications p where lower(btrim(p.title)) = lower(btrim(v.title)));
 update public.publications p set citations = v.citations, year = coalesce(p.year, v.year), venue = coalesce(nullif(p.venue, ''), v.venue),
        is_open_access = p.is_open_access or v.oa
-  from v_alaa v where lower(btrim(p.title)) = lower(btrim(v.title));
+  from sitam_meta.v_alaa v where lower(btrim(p.title)) = lower(btrim(v.title));
 insert into public.publication_authors (publication_id, professor_id)
 select p.id, (select id from public.professors where username = 'm.al-hadeethi')
-  from public.publications p join v_alaa v on lower(btrim(p.title)) = lower(btrim(v.title))
+  from public.publications p join sitam_meta.v_alaa v on lower(btrim(p.title)) = lower(btrim(v.title))
 on conflict do nothing;
 select public.refresh_professor_metrics((select id from public.professors where username = 'm.al-hadeethi'));
 update public.professors set publications_updated_at = now() where username = 'm.al-hadeethi'
@@ -11326,9 +11327,10 @@ insert into sitam_meta.applied_migrations (version, name) values ('2026110220040
 update public.professors set scopus_id = '57189049749', orcid_url = 'https://orcid.org/0009-0004-2292-2978',
   total_works = 8, total_citations = 50, h_index = 3, i10_index = 2, updated_at = now()
  where username = 'ramis.akhmedov';
-drop table if exists pg_temp.v_ramis;
-create temp table v_ramis (title text, year int, type text, venue text, citations int, oa boolean);
-insert into v_ramis values
+drop table if exists sitam_meta.v_ramis;
+create schema if not exists sitam_meta;
+create table sitam_meta.v_ramis (title text, year int, type text, venue text, citations int, oa boolean);
+insert into sitam_meta.v_ramis values
 ('FEW-SHOT IMAGE CLASSIFICATION: A SURVEY', 2026, 'Article', 'Eurasian Journal of Mathematical and Computer Applications', 0, true),
 ('A Performance Evaluation of Flask (WSGI) and Fastapi (ASGI) under High-Concurrency Workloads', 2026, 'Conference paper', 'Proceedings - 2026 18th International Conference on Electronics, Computer, and Computation, ICECCO 2026', 1, false),
 ('Search Trees: A Review and Comparative Study', 2025, 'Conference paper', 'International Symposium on Wireless Personal Multimedia Communications, WPMC', 3, false),
@@ -11338,18 +11340,18 @@ insert into v_ramis values
 ('Comparative Analysis of Sorting Algorithms: A Review', 2024, 'Conference paper', 'Proceedings of the International Conference on Soft Computing and Machine Intelligence, ISCMI', 12, false),
 ('Social networking to expand brand awareness and influence on purchase intention', 2016, 'Article', 'Actual Problems of Economics', 0, false);
 insert into public.publications (title, year, type, venue, citations, is_open_access, keywords)
-select v.title, v.year, v.type, v.venue, v.citations, v.oa, '{}'::text[] from v_ramis v
+select v.title, v.year, v.type, v.venue, v.citations, v.oa, '{}'::text[] from sitam_meta.v_ramis v
  where not exists (select 1 from public.publications p where lower(btrim(p.title)) = lower(btrim(v.title)));
 update public.publications p set citations = v.citations, year = coalesce(p.year, v.year), venue = coalesce(nullif(p.venue, ''), v.venue),
        is_open_access = p.is_open_access or v.oa
-  from v_ramis v where lower(btrim(p.title)) = lower(btrim(v.title));
+  from sitam_meta.v_ramis v where lower(btrim(p.title)) = lower(btrim(v.title));
 insert into public.publication_authors (publication_id, professor_id)
 select p.id, (select id from public.professors where username = 'ramis.akhmedov')
-  from public.publications p join v_ramis v on lower(btrim(p.title)) = lower(btrim(v.title))
+  from public.publications p join sitam_meta.v_ramis v on lower(btrim(p.title)) = lower(btrim(v.title))
 on conflict do nothing;
 select public.refresh_professor_metrics((select id from public.professors where username = 'ramis.akhmedov'));
 update public.professors set publications_updated_at = now() where username = 'ramis.akhmedov';
-drop table if exists pg_temp.v_ramis;
+drop table if exists sitam_meta.v_ramis;
 
 insert into sitam_meta.applied_migrations (version, name) values ('20261102200500', 'sitam_v20_5_researcher_akhmedov') on conflict do nothing;
 
@@ -11387,9 +11389,10 @@ insert into sitam_meta.applied_migrations (version, name) values ('2026110221000
 update public.professors set scopus_id = '57460291500', orcid_url = 'https://orcid.org/0000-0002-2674-1611',
   total_works = 17, total_citations = 84, h_index = 6, i10_index = 3, updated_at = now()
  where username = 'ualikhan.sadyk';
-drop table if exists pg_temp.v_sadyk;
-create temp table v_sadyk (title text, year int, type text, venue text, citations int, oa boolean);
-insert into v_sadyk values
+drop table if exists sitam_meta.v_sadyk;
+create schema if not exists sitam_meta;
+create table sitam_meta.v_sadyk (title text, year int, type text, venue text, citations int, oa boolean);
+insert into sitam_meta.v_sadyk values
 ('Kazakh banknote image dataset', 2026, 'Article', 'Data in Brief', 0, true),
 ('Physicochemical and Ecotoxicological Characterization of Therapeutic Sulfide–Silt Peloids from Lake Maly Akkol', 2026, 'Article', 'Water (Switzerland)', 2, true),
 ('Interpretable Hybrid CNN-BiLSTM-Attention Model for ECG Arrhythmia Classification', 2026, 'Conference paper', 'SIST 2026 - 2026 IEEE 6th International Conference on Smart Information Systems and Technologies, Conference Proceedings', 0, false),
@@ -11408,18 +11411,18 @@ insert into v_sadyk values
 ('A Comparative Study of the Impact of Electronic Devices on University Students'' Academic Performance', 2023, 'Conference paper', 'Proceedings - 2023 17th International Conference on Electronics Computer and Computation, ICECCO 2023', 1, false),
 ('Effective Ways to Pass Exams in Programming Disciplines and Optimize the Process of Analyzing Results. Case Study: Suleyman Demirel University', 2021, 'Conference paper', 'Proceedings - 2021 16th International Conference on Electronics Computer and Computation, ICECCO 2021', 1, false);
 insert into public.publications (title, year, type, venue, citations, is_open_access, keywords)
-select v.title, v.year, v.type, v.venue, v.citations, v.oa, '{}'::text[] from v_sadyk v
+select v.title, v.year, v.type, v.venue, v.citations, v.oa, '{}'::text[] from sitam_meta.v_sadyk v
  where not exists (select 1 from public.publications p where lower(btrim(p.title)) = lower(btrim(v.title)));
 update public.publications p set citations = v.citations, year = coalesce(p.year, v.year), venue = coalesce(nullif(p.venue, ''), v.venue),
        is_open_access = p.is_open_access or v.oa
-  from v_sadyk v where lower(btrim(p.title)) = lower(btrim(v.title));
+  from sitam_meta.v_sadyk v where lower(btrim(p.title)) = lower(btrim(v.title));
 insert into public.publication_authors (publication_id, professor_id)
 select p.id, (select id from public.professors where username = 'ualikhan.sadyk')
-  from public.publications p join v_sadyk v on lower(btrim(p.title)) = lower(btrim(v.title))
+  from public.publications p join sitam_meta.v_sadyk v on lower(btrim(p.title)) = lower(btrim(v.title))
 on conflict do nothing;
 select public.refresh_professor_metrics((select id from public.professors where username = 'ualikhan.sadyk'));
 update public.professors set publications_updated_at = now() where username = 'ualikhan.sadyk';
-drop table if exists pg_temp.v_sadyk;
+drop table if exists sitam_meta.v_sadyk;
 
 insert into sitam_meta.applied_migrations (version, name) values ('20261102220000', 'sitam_v22_1_researcher_sadyk') on conflict do nothing;
 

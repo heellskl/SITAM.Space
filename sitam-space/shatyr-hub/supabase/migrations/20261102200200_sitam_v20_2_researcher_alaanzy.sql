@@ -4,9 +4,10 @@
 update public.professors set scopus_id = '59193748300', orcid_url = 'https://orcid.org/0000-0002-0005-7037',
   total_works = 49, total_citations = 571, h_index = 14, i10_index = 16, updated_at = now()
  where username = 'm.al-hadeethi';
-drop table if exists pg_temp.v_alaa;
-create temp table v_alaa (title text, year int, type text, venue text, citations int, oa boolean);
-insert into v_alaa values
+drop table if exists sitam_meta.v_alaa;
+create schema if not exists sitam_meta;
+create table sitam_meta.v_alaa (title text, year int, type text, venue text, citations int, oa boolean);
+insert into sitam_meta.v_alaa values
 ('Zero trust architecture for industry 5.0 and industrial IoT: A systematic review, taxonomy, and research roadmap', 2026, 'Review', 'Computer Networks', 0, false),
 ('End-to-end optimization based on residual neural networks for improved optical fiber communication', 2026, 'Article', 'ICT Express', 1, true),
 ('Connect-4 AI: A Comprehensive Taxonomy and Critical Review of Methods and Metrics', 2026, 'Review', 'Symmetry', 3, true),
@@ -57,14 +58,14 @@ insert into v_alaa values
 ('Load Balancing and Server Consolidation in Cloud Computing Environments: A Meta-Study', 2019, 'Article', 'IEEE Access', 75, true),
 ('Range wise busy checking 2-way imbalanced algorithm for cloudlet allocation in cloud environment', 2018, 'Conference paper', 'Journal of Physics: Conference Series', 21, true);
 insert into public.publications (title, year, type, venue, citations, is_open_access, keywords)
-select v.title, v.year, v.type, v.venue, v.citations, v.oa, '{}'::text[] from v_alaa v
+select v.title, v.year, v.type, v.venue, v.citations, v.oa, '{}'::text[] from sitam_meta.v_alaa v
  where not exists (select 1 from public.publications p where lower(btrim(p.title)) = lower(btrim(v.title)));
 update public.publications p set citations = v.citations, year = coalesce(p.year, v.year), venue = coalesce(nullif(p.venue, ''), v.venue),
        is_open_access = p.is_open_access or v.oa
-  from v_alaa v where lower(btrim(p.title)) = lower(btrim(v.title));
+  from sitam_meta.v_alaa v where lower(btrim(p.title)) = lower(btrim(v.title));
 insert into public.publication_authors (publication_id, professor_id)
 select p.id, (select id from public.professors where username = 'm.al-hadeethi')
-  from public.publications p join v_alaa v on lower(btrim(p.title)) = lower(btrim(v.title))
+  from public.publications p join sitam_meta.v_alaa v on lower(btrim(p.title)) = lower(btrim(v.title))
 on conflict do nothing;
 select public.refresh_professor_metrics((select id from public.professors where username = 'm.al-hadeethi'));
 update public.professors set publications_updated_at = now() where username = 'm.al-hadeethi'
