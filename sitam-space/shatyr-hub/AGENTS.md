@@ -145,3 +145,7 @@
 - Events: filters are popover menus like Labs → Focus (`FilterRow` in event-board.tsx); poster cards always fill their column (`.poster-card { width: 100% }` — external events are `<button>`s that used to shrink).
 - Lab head: "New project" → `/labs/$slug?edit=1&section=add-project` (Projects section with a new empty project, title focused). Intro texts in the lab form and on "Your lab" removed; head buttons are one size.
 - Panels inside grids have no extra top margin (profile, Research charts). Logo: same font as before (500, wide letter-spacing), text and emblem ~2% clearer, orange tagline (#D9701E / dark #F5A04E); sidebar links #334155.
+
+## SITAM SPACE v25 — real events
+- Posters can be site files: `public/events/*.jpg`, `poster_url = '/events/…'` (checks `events_poster_url_check`, `external_events_poster_url_check` allow `https://` or `/events/`).
+- Migration `20261103120000_sitam_v25_real_events.sql` (`update-to-v25.sql`, after v23): JANA TALKS (4 Nov), Research Poster Day (13 Nov, time/room TBA), Roblox career talk (7 Sep, past); external: QazTech Meetup Tech Talqy (kind `other` → shown as Industry), Wemathify (olympiad at SDU), DATA CHALLENGE '26 (hackathon, Astana).

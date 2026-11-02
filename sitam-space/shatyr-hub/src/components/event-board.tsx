@@ -110,7 +110,7 @@ function toFeed(events: SitamEvent[], external: ExternalEvent[], now: number): F
   const ext = external.map((x): FeedItem => {
     const start = x.starts_on ? new Date(`${x.starts_on}T09:00:00`) : null;
     return {
-      key: `ext-${x.id}`, type: x.kind === 'conference' ? 'research' : 'competitions', title: x.title,
+      key: `ext-${x.id}`, type: x.kind === 'conference' ? 'research' : x.kind === 'other' ? 'industry' : 'competitions', title: x.title,
       location: x.location_type ?? (ONLINE.test(x.location ?? '') ? 'online' : 'outside'),
       organizer: x.cohosted ? 'cohosted' : 'external',
       host: x.organizer ?? EXTERNAL_KIND_LABEL[x.kind], start, end: x.ends_on ? new Date(`${x.ends_on}T18:00:00`) : null, year: x.year,
