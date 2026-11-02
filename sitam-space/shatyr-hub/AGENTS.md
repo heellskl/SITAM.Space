@@ -144,4 +144,4 @@
 - Research → Overview: the Publications / Citations / Researchers numbers are buttons that open their tab. "Submit your research" removed from Lab & student research.
 - Events: filters are popover menus like Labs → Focus (`FilterRow` in event-board.tsx); poster cards always fill their column (`.poster-card { width: 100% }` — external events are `<button>`s that used to shrink).
 - Lab head: "New project" → `/labs/$slug?edit=1&section=add-project` (Projects section with a new empty project, title focused). Intro texts in the lab form and on "Your lab" removed; head buttons are one size.
-- Panels inside grids have no extra top margin (profile, Research charts). Logo: same font as before (500, wide letter-spacing), text and emblem ~10% clearer, orange tagline (#D9701E / dark #F5A04E); sidebar links #334155.
+- Panels inside grids have no extra top margin (profile, Research charts). Logo: same font as before (500, wide letter-spacing), text and emblem ~2% clearer, orange tagline (#D9701E / dark #F5A04E); sidebar links #334155.

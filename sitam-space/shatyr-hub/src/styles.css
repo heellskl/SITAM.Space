@@ -2722,9 +2722,9 @@ button.kpi.is-link:hover { border-color: color-mix(in srgb, var(--foreground) 25
 .head-tools > [data-slot=button], .head-tools > a[data-slot=button], .head-tools > button { height: 40px; padding: 0 16px; font-size: 14px !important; font-weight: 600; border-radius: 10px; gap: 8px; }
 .head-tools > [data-slot=button] svg { width: 16px; height: 16px; }
 /* v24: clearer logo (darker, crisper emblem and name), warm orange tagline, darker sidebar text */
-.brand-mark2 .logo-day { filter: brightness(.9) contrast(1.1); }
-.brand-name > span.brand-word { color: oklch(0.45 0.035 255); } /* same font as before, about 10% clearer */
-html.dark .brand-name > span.brand-word { color: var(--muted-foreground); filter: brightness(1.12); }
+.brand-mark2 .logo-day { filter: brightness(.98) contrast(1.02); }
+.brand-name > span.brand-word { color: oklch(0.49 0.031 255); } /* same font as before, about 2% clearer */
+html.dark .brand-name > span.brand-word { color: var(--muted-foreground); filter: brightness(1.02); }
 .on-hero .top-bar .brand-name > span.brand-word { color: #fff; }
 html:not(.dark) .on-hero .top-bar .brand-name > span.brand-word { color: #0a1830; }
 .brand-name small.brand-tag { color: #D9701E; opacity: 1; }
