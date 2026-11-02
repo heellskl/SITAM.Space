@@ -2412,3 +2412,69 @@ html.dark .md-table th { background: #111a2e; }
 .home-layout > .lab-main, .home-layout > .lab-aside { display: grid; gap: 16px; align-content: start; }
 .home-layout .panel { padding: 20px 22px; display: grid; gap: 10px; margin: 0; }
 @media (max-width: 1024px) { .home-layout { grid-template-columns: 1fr; } }
+
+/* ---------- v21: one look for every filter button (pill: white with a thin border, active = filled navy) ---------- */
+.filter-list, .chip-filter, .ask-scope, .ev-compact .ev-filters { gap: 8px; }
+.filter, .sub-filters .filter, .chip, .seg button, .ask-scope button, .filter-select, .ev-select {
+  height: 40px; padding: 0 20px; border-radius: 999px; border: 1px solid var(--border); background: var(--card);
+  color: var(--navy); font: 500 14px/1 var(--font-ui); letter-spacing: 0; text-transform: none; box-shadow: none;
+  transition: background-color .15s, border-color .15s, color .15s;
+}
+.filter:hover, .chip:hover, .seg button:hover, .ask-scope button:hover, .filter-select:hover, .ev-select:hover {
+  background: var(--card); border-color: color-mix(in oklab, var(--navy) 35%, var(--border)); color: var(--navy);
+}
+.filter.active, .sub-filters .filter.active, .chip.is-on, .seg button.is-on, .ask-scope button.is-on, .ev-select.is-set {
+  background: var(--btn-bg); border-color: var(--btn-bg); color: var(--btn-fg);
+}
+.filter.active:hover, .chip.is-on:hover, .seg button.is-on:hover, .ask-scope button.is-on:hover { background: var(--btn-bg); color: var(--btn-fg); }
+/* segmented groups become separate pills, like the other filters */
+.seg { padding: 0; gap: 8px; border: 0; background: transparent; }
+.seg button { gap: 6px; }
+.seg button:has(> svg:only-child), .seg button:has(> .sr-only) { padding: 0 14px; }
+/* select pills: room for the arrow; selected value readable on the filled pill */
+.filter-select { padding: 0 34px 0 20px; appearance: none; -webkit-appearance: none; cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 19px) 50%, calc(100% - 14px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+.ev-select { padding: 0 34px 0 20px; }
+.ev-select span { color: inherit; opacity: .7; }
+.ev-select select { color: var(--navy); font: 600 14px/1 var(--font-ui); }
+.ev-select.is-set select { color: var(--btn-fg); }
+.ev-select.is-set select option, .filter-select option { color: var(--foreground); background: var(--card); }
+.ask-scope button { height: 34px; padding: 0 14px; font-size: 13px; }
+.filter .count-badge { margin-left: 6px; }
+@media (max-width: 640px) {
+  .filter, .chip, .seg button, .filter-select, .ev-select { height: 36px; padding-inline: 16px; font-size: 13px; }
+  .filter-select, .ev-select { padding-right: 32px; }
+}
+
+/* ---------- v21: Home — the person's card at the top ---------- */
+.idcard { position: relative; display: flex; align-items: center; gap: 36px; margin-bottom: 20px; padding: 28px 36px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 22px; box-shadow: 0 1px 2px rgb(15 23 42 / .04), 0 8px 24px rgb(15 23 42 / .05); }
+.idcard-avatar { position: relative; flex-shrink: 0; }
+.idcard-photo { width: 144px; height: 144px; border-radius: 50%; display: grid; place-items: center; overflow: hidden;
+  background: linear-gradient(135deg, #23264f 0%, #2e2f5c 45%, #6d5a63 75%, #c08a5c 100%); color: #fff;
+  font: 600 38px/1 var(--font-ui); letter-spacing: .02em; box-shadow: 0 0 0 8px var(--pearl, #eef1f6); }
+.idcard-photo img { width: 100%; height: 100%; object-fit: cover; }
+.idcard-cam { position: absolute; right: 2px; bottom: 6px; width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--card); color: var(--navy); border: 1px solid var(--border); box-shadow: 0 2px 6px rgb(15 23 42 / .12); cursor: pointer; }
+.idcard-cam:hover { border-color: var(--navy); }
+.idcard-cam.is-busy { opacity: .6; cursor: progress; }
+.idcard-cam input { position: absolute; inset: 0; opacity: 0; cursor: inherit; }
+.idcard-main { flex: 1; min-width: 0; }
+.idcard-title { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding-right: 150px; padding-bottom: 18px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+.idcard-title h1 { margin: 0; font: 400 clamp(28px, 3vw, 38px)/1.1 var(--font-head); color: var(--navy); }
+.idcard-role { display: inline-flex; align-items: center; height: 24px; padding: 0 11px; border-radius: 999px; background: var(--btn-bg); color: var(--btn-fg); font: 600 12px/1 var(--font-ui); }
+.idcard-facts { display: flex; flex-wrap: wrap; column-gap: 56px; row-gap: 16px; margin: 0; }
+.idcard-facts dt { font: 500 10.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .14em; text-transform: uppercase; color: var(--muted-foreground); }
+.idcard-facts dd { margin: 8px 0 0; font: 500 14px/1.3 var(--font-ui); color: var(--navy); white-space: nowrap; }
+.idcard-dot { margin: 0 6px; color: var(--muted-foreground); }
+.idcard-edit { position: absolute; top: 24px; right: 24px; }
+@media (max-width: 760px) {
+  .idcard { flex-direction: column; align-items: flex-start; gap: 20px; padding: 22px; }
+  .idcard-photo { width: 104px; height: 104px; font-size: 30px; }
+  .idcard-main { width: 100%; }
+  .idcard-title { padding-right: 0; }
+  .idcard-edit { top: 18px; right: 18px; }
+  .idcard-facts { display: grid; grid-template-columns: 1fr 1fr; column-gap: 20px; }
+  .idcard-facts dd { white-space: normal; overflow-wrap: anywhere; }
+}

@@ -128,3 +128,7 @@
 - professors.json `other_emails` → `professors.alt_emails` (build-seed). Papers without Scopus EID or DOI are matched by title.
 - Database: existing (v19) → `supabase/update-to-v20.sql`; empty → `supabase/setup-new-database.sql`. Tests: `permissions_tests.sql`, then `v20_tests.sql`.
 
+
+## SITAM SPACE v21 — filter pills and the Home card
+- Every filter button (`.filter`, `.chip`, `.seg button`, `.ask-scope button`, `.filter-select`, `.ev-select`) is one pill style: 40px high, white (`--card`) with a thin border, navy text; active = filled `--btn-bg` / `--btn-fg`. `.seg` groups are separate pills. Block "v21" at the end of styles.css.
+- Home (`my-home.tsx`) starts with `.idcard`: round photo (gradient with initials when there is no photo, camera button uploads via `uploadAvatar`), name (display font) + role pill, "Edit details" (→ /profile?settings=true), facts SDU mail / Speciality (Department, Company) / Joined (`profile.createdAt`) / Labs & clubs (memberships · saved labs).
