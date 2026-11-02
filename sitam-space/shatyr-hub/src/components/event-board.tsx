@@ -245,7 +245,7 @@ function PosterList({ items, onOpen, past }: { items: FeedItem[]; onOpen: (i: Fe
   );
 }
 
-/* ───────── v22: "Coming up next" — the nearest event large, the next few as small posters ───────── */
+/* ───────── v22: "Coming up next" — the nearest event as a large card ───────── */
 function whenLine(it: FeedItem) {
   if (it.sdu) { const d = eventDate(it.sdu.starts_at); return `${d.long} · ${d.time}`; }
   return it.external ? externalDates(it.external) : '';
@@ -266,9 +266,8 @@ function PosterImage({ item }: { item: FeedItem }) {
 }
 
 function ComingUpNext({ items, onOpen, onViewAll }: { items: FeedItem[]; onOpen: (i: FeedItem) => void; onViewAll: () => void }) {
-  const [next, ...rest] = items;
+  const next = items[0];
   if (!next) return null;
-  const more = rest.slice(0, 6);
   const open = (e: { preventDefault(): void }, it: FeedItem) => { e.preventDefault(); onOpen(it); };
   return (
     <section className="ev-next" aria-labelledby="ev-next-title">
@@ -289,21 +288,6 @@ function ComingUpNext({ items, onOpen, onViewAll }: { items: FeedItem[]; onOpen:
           <span className="ev-next-link">View event<ArrowRight size={16} /></span>
         </div>
       </a>
-      {more.length > 0 && (
-        <>
-          <hr className="ev-next-rule" />
-          <h3 className="ev-next-sub">More upcoming</h3>
-          <div className="ev-next-row" role="list">
-            {more.map((it) => (
-              <a key={it.key} role="listitem" href={it.sdu ? `/events/${it.sdu.id}` : '#'} className="ev-mini" onClick={(e) => open(e, it)}>
-                <div className={`ev-mini-poster poster-${it.type}`}><PosterImage item={it} /></div>
-                <strong>{it.title}</strong>
-                <small>{shortDay(it.start, it.year)}</small>
-              </a>
-            ))}
-          </div>
-        </>
-      )}
     </section>
   );
 }
