@@ -15158,5 +15158,144 @@
    "confidence": "high",
    "note": "Scopus affiliation: Institute of Mathematics and Mathematical Modeling, Almaty. PhD in Applied Mathematics (Hassan First University of Settat & University of Granada)."
   }
+ },
+ {
+  "username": "yerbol.palzhanov",
+  "first_name": "Yerbol",
+  "last_name": "Palzhanov",
+  "full_name": "Yerbol Palzhanov",
+  "job_title": null,
+  "degree": null,
+  "email": null,
+  "photo_url": null,
+  "external_identifiers": {
+   "orcid": "https://orcid.org/0000-0002-8997-8675",
+   "scopus": "57223905820",
+   "google_scholar_search": "https://scholar.google.com/citations?view_op=search_authors&mauthors=Yerbol+Palzhanov"
+  },
+  "metrics": {
+   "h_index": 4,
+   "i10_index": 2,
+   "total_citations": 46,
+   "total_works": 5
+  },
+  "search_tags": {
+   "keywords": [
+    "finite element methods",
+    "phase-field models",
+    "Cahn–Hilliard equation",
+    "surface PDEs",
+    "two-phase flow",
+    "lipid vesicles",
+    "computational mathematics"
+   ],
+   "coauthors": []
+  },
+  "topics_hierarchy": [],
+  "publications": [
+   {
+    "title": "A Scalar Auxiliary Variable Unfitted FEM for the Surface Cahn–Hilliard Equation",
+    "publication_year": 2023,
+    "type": "Article",
+    "doi": null,
+    "journal_venue": "Journal of Scientific Computing",
+    "publisher": null,
+    "citations_count": 4,
+    "is_open_access": false,
+    "pdf_url": "https://www.scopus.com/pages/publications/85174525693?origin=resultslist",
+    "scopus_eid": "2-s2.0-85174525693",
+    "keywords": [
+     "unfitted finite element method",
+     "scalar auxiliary variable",
+     "Cahn–Hilliard equation",
+     "surface PDEs"
+    ],
+    "_source": "scopus_author_page_2026_11_02"
+   },
+   {
+    "title": "On Fusogenicity of Positively Charged Phased-Separated Lipid Vesicles: Experiments and Computational Simulations",
+    "publication_year": 2023,
+    "type": "Article",
+    "doi": null,
+    "journal_venue": "Biomolecules",
+    "publisher": null,
+    "citations_count": 6,
+    "is_open_access": true,
+    "pdf_url": "https://www.scopus.com/pages/publications/85175066301?origin=resultslist",
+    "scopus_eid": "2-s2.0-85175066301",
+    "keywords": [
+     "lipid vesicles",
+     "fusogenicity",
+     "phase separation",
+     "computational simulation"
+    ],
+    "_source": "scopus_author_page_2026_11_02"
+   },
+   {
+    "title": "A Comparison of Cahn–Hilliard and Navier–Stokes–Cahn–Hilliard Models on Manifolds",
+    "publication_year": 2022,
+    "type": "Article",
+    "doi": null,
+    "journal_venue": "Vietnam Journal of Mathematics",
+    "publisher": null,
+    "citations_count": 5,
+    "is_open_access": false,
+    "pdf_url": "https://www.scopus.com/pages/publications/85130712098?origin=resultslist",
+    "scopus_eid": "2-s2.0-85130712098",
+    "keywords": [
+     "Cahn–Hilliard equation",
+     "Navier–Stokes–Cahn–Hilliard",
+     "manifolds",
+     "phase-field models"
+    ],
+    "_source": "scopus_author_page_2026_11_02"
+   },
+   {
+    "title": "Lipid domain coarsening and fluidity in multicomponent lipid vesicles: A continuum based model and its experimental validation",
+    "publication_year": 2022,
+    "type": "Article",
+    "doi": null,
+    "journal_venue": "Biochimica et Biophysica Acta - Biomembranes",
+    "publisher": null,
+    "citations_count": 11,
+    "is_open_access": true,
+    "pdf_url": "https://www.scopus.com/pages/publications/85126832666?origin=resultslist",
+    "scopus_eid": "2-s2.0-85126832666",
+    "keywords": [
+     "lipid domains",
+     "multicomponent vesicles",
+     "continuum model",
+     "phase separation"
+    ],
+    "_source": "scopus_author_page_2026_11_02"
+   },
+   {
+    "title": "A decoupled, stable, and linear FEM for a phase-field model of variable density two-phase incompressible surface flow",
+    "publication_year": 2021,
+    "type": "Article",
+    "doi": null,
+    "journal_venue": "Computer Methods in Applied Mechanics and Engineering",
+    "publisher": null,
+    "citations_count": 20,
+    "is_open_access": true,
+    "pdf_url": "https://www.scopus.com/pages/publications/85116256299?origin=resultslist",
+    "scopus_eid": "2-s2.0-85116256299",
+    "keywords": [
+     "finite element method",
+     "phase-field model",
+     "two-phase flow",
+     "surface flow"
+    ],
+    "_source": "scopus_author_page_2026_11_02"
+   }
+  ],
+  "_resolution_status": {
+   "status": "scopus_verified",
+   "data_sources": [
+    "scopus_author_page_2026_11_02"
+   ],
+   "confidence": "high",
+   "note": "Scopus affiliation: College of Natural Sciences and Mathematics, University of Houston."
+  }
  }
 ]
