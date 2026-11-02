@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router';
 import { RESEARCH_TABS, ResearchPublications, type ResearchTab } from '@/components/research-publications';
 import { pageHead } from '@/lib/hub-data';
 import { PageHero } from '@/components/page-hero';
+import { SubmitProjectButton } from '@/components/submit-project';
 import { useProfessors, usePublications } from '@/lib/api';
 
 export const Route = createFileRoute('/research/')({
@@ -32,6 +33,7 @@ function Research() {
     <main className="container content-page">
       <PageHero
         title="Research at SITAM"
+        action={<SubmitProjectButton kind="research" label="Submit your research" />}
         text="Researchers, publications and citations of the school, from Scopus. Find a supervisor or a paper."
         stats={[
           { label: 'Researchers', value: profs.data?.length, to: '/research', search: { tab: 'people' } },
