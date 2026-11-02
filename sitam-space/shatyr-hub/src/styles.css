@@ -2541,4 +2541,3 @@ html:not(.dark) .on-hero .top-faq:not(.is-on) { color: #0a1830; }
 
 /* FAQ page: tabs on top, then the content of the tab */
 .faq-page .faq-menu { margin-bottom: 24px; }
-.faq-page .faq-tab > h1 { font-family: var(--font-head); font-weight: 500; font-size: clamp(40px, 5.2vw, 68px); line-height: 1; letter-spacing: -0.01em; text-transform: none; margin: 0; }

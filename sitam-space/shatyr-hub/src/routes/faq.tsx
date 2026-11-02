@@ -25,15 +25,13 @@ function Faq() {
   const audience = persona === 'lab_leader' ? 'leader' : persona === 'teacher' ? 'teacher' : persona === 'student' ? 'student' : 'all';
   return (
     <main className="container content-page faq-page">
-      {/* the tabs come first; the big "FAQ" heading shows only on the FAQ tab */}
+      {/* the page starts with its tabs (no big heading) */}
       <Tabs value={tab} onValueChange={(v) => void navigate({ search: v === 'ask' ? { tab: 'ask' } : {}, replace: true })}>
         <TabsList className="manage-tabs faq-menu">
           <TabsTrigger value="faq">FAQ</TabsTrigger>
           <TabsTrigger value="ask">Ask SITAM AI</TabsTrigger>
         </TabsList>
         <TabsContent value="faq" className="faq-tab">
-          <h1>FAQ</h1>
-          <div className="mt-6" />
           <FaqList prefer={audience} />
           <div className="profile-actions">
             <Button asChild><a href={gmailCompose(BRAND.contactEmail)} target="_blank" rel="noopener noreferrer">Ask the SITAM office<ArrowUpRight /></a></Button>
