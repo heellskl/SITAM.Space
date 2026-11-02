@@ -87,3 +87,9 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 |---|---|---|---|
 | 36 | Add / edit / remove papers on a researcher card, import an own Scopus CSV | the teacher linked to that card; the coordinator for every card | `save_publication`, `remove_publication`, `import_publications` (`can_edit_professor`) |
 | 37 | Import one Scopus export for many researchers (matched by Scopus Author ID) | coordinator | `import_publications` per card |
+
+## v19 additions (approved by the user on 2026-11-02)
+
+| # | Action | Who | Where enforced |
+|---|---|---|---|
+| 38 | Edit own work / internship history (`profiles.experience`); others see it when signed in (as row 2) | the person themselves | column grant + RLS "Update own profile", check `valid_experience`; view `public_people` |

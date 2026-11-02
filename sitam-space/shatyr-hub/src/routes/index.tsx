@@ -5,6 +5,8 @@ import { useLabs, useProjects, usePublications } from '@/lib/api';
 import { pageHead } from '@/lib/hub-data';
 import { BRAND } from '@/lib/sitam-data';
 import { useTheme, type Theme } from '@/components/theme-toggle';
+import { MyHome } from '@/components/my-home';
+import { useAuth } from '@/lib/auth';
 
 export const Route = createFileRoute('/')({
   head: () => pageHead('Science, Industry & Innovation at SDU', 'SITAM SPACE — laboratories, projects, events and research of the School of Information Technologies and Applied Mathematics, SDU University.'),
@@ -99,7 +101,7 @@ function CountUp({ value }: { value: number | undefined }) {
   return <span ref={ref}>{value === undefined ? '—' : shown}</span>;
 }
 
-/** Same page for everyone: a cinematic, centred hero and an "About us" section. */
+/** Signed in: the person's own Home (v19). Guests: a cinematic, centred hero and an "About us" section. */
 function Index() {
   const labs = useLabs();
   const projects = useProjects();
@@ -107,6 +109,9 @@ function Index() {
   // people taking part in labs (heads and members, not former heads)
   const involved = labs.data ? labs.data.reduce((sum, l) => sum + l.lab_members.filter((m) => m.role !== 'former_lead').length, 0) : undefined;
   const toAbout = () => document.getElementById('about')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const { user, loading } = useAuth();
+  if (loading) return <main className="container content-page" aria-busy="true" />;
+  if (user) return <MyHome />;
 
   return (
     <main>

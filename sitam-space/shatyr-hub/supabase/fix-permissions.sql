@@ -133,3 +133,6 @@ revoke execute on function public.import_publications(uuid, jsonb) from anon, pu
 grant execute on function public.save_publication(uuid, uuid, text, int, text, text, text, text, int, boolean) to authenticated;
 grant execute on function public.remove_publication(uuid, uuid) to authenticated;
 grant execute on function public.import_publications(uuid, jsonb) to authenticated;
+grant update (experience) on public.profiles to authenticated;
+revoke all on public.public_people from anon, public;
+grant select on public.public_people to authenticated;

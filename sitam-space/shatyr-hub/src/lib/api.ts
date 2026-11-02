@@ -1531,3 +1531,26 @@ export function useImportPublications() {
     onSuccess: () => invalidatePubs(qc),
   });
 }
+
+/* ───────────── v19: personal Home page — work and internship history ───────────── */
+export type Experience = { kind: 'work' | 'internship'; company: string; role: string; start: string; end: string };
+export function useExperience(userId: string | undefined) {
+  return useQuery({
+    queryKey: ['experience', userId], enabled: !!userId,
+    queryFn: async () => {
+      const { data, error } = await db.from('public_people').select('experience').eq('id', userId!).maybeSingle();
+      if (error) return null; // v19 SQL not run yet
+      return ((data as { experience?: Experience[] } | null)?.experience ?? []) as Experience[];
+    },
+  });
+}
+export function useSaveExperience() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { userId: string; items: Experience[] }) => {
+      const { error } = await db.from('profiles').update({ experience: v.items }).eq('id', v.userId);
+      if (error) fail(error);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['experience'] }),
+  });
+}

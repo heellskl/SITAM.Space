@@ -68,7 +68,7 @@
 - Two e-mails: `profiles.personal_email` (edited in Profile → Settings), shown with the SDU e-mail by `PersonEmails` (lab-page.tsx) on lab teams and /people.
 - Events (`event-board.tsx`): filters Type · Location (At SDU / Outside SDU / Online) · Organized by (SDU / External / Co-hosted). SDU events: Online when the room says online/zoom/meet/teams; co-hosted when a company is a host. External events: `external_events.location_type`, `cohosted` via `set_external_event_place`. 8 cards, then "Show all". Calendar: past days grey, today amber. Colours: Industry #B45309, Research #1D4ED8, Competitions #047857.
 - Industry page: no events. Under the heading two tabs — Opportunities (default, board) and Partners (`?view=partners`, `industry-partners.tsx`, table `industry_partners`, coordinator edits).
-- Database: existing → `supabase/update-to-v18.sql` (includes v12 → v18; re-runnable); empty → `supabase/setup-new-database.sql`.
+- Database: existing → `supabase/update-to-v19.sql` (includes v12 → v19; re-runnable); empty → `supabase/setup-new-database.sql`.
 - Shared tags (v12.1): `src/lib/lab-tags.ts` builds one catalog of research areas / skills / equipment from all labs (most used first, spelling = most common). `TagInput` shows it as a dropdown ("Used by other labs", counts, "Add … as a new tag"). Labs page: Topic filter (`?topic=area:NLP`) + Sort (Name, Most projects, Largest team); chips on the lab page link to that filter. Admin → "Tags of all labs" (`tag-manager.tsx`): rename / merge / remove everywhere via `admin_rename_lab_tag`.
 
 ## SITAM SPACE v13 — current rules (override older notes above)
@@ -111,4 +111,9 @@
 - Researcher page: the linked teacher and the coordinator see "Update publications" (`publications-editor.tsx` → `ManagePublications`): add a paper (DOI → details from the public Crossref API, or by hand), edit (citations etc.), remove from the card, import an own Scopus CSV. "Publications updated {date}" above the list (`professors.publications_updated_at`, read separately by `usePublicationsUpdated` so the site works before the SQL is run).
 - Admin → "Researchers' publications" (`ScopusBulkImport`): one Scopus CSV for many SITAM authors, matched by `professors.scopus_id` against "Author(s) ID"; list of cards not updated for 6+ months.
 - DB: `can_edit_professor`, `save_publication`, `remove_publication`, `import_publications` (match by EID, DOI, or title + year; citations never go down on import). Totals keep coming from `refresh_professor_metrics`.
-- Database: existing → `supabase/update-to-v18.sql`.
+- Database: existing → `supabase/update-to-v19.sql` (v18 is included).
+
+## SITAM SPACE v19 — personal Home (PERMISSIONS row 38)
+- `/` for signed-in users = `MyHome` (`components/my-home.tsx`); guests keep the video hero + About us. The "Home" sidebar item and the logo both go to `/`.
+- Sections: KPI row (h-index / citations / publications from the linked researcher card, else applications; labs; events attended) · Research (card metrics, latest papers, keywords; CTA when no card) · My labs (`caps.labMemberships`) · My events (upcoming with ticket, "Took part") · Industry: Work & internships (`profiles.experience`, edited in a dialog; accepted industrial applications are added automatically "via SITAM SPACE"), My applications, Industry events (kind industrial or a company host), Partner companies of my labs (`labs.current_partners`).
+- `/people/$id` shows "Work & internships". `useExperience` reads `public_people.experience` and returns null before the v19 SQL is run.

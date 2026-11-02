@@ -2387,3 +2387,23 @@ html.dark .md-table th { background: #111a2e; }
 .pubs-stale summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 .pubs-form .editor-actions { position: static; background: none; padding: 4px 0 0; margin-top: 4px; }
 .mini-empty { padding: 22px 24px; }
+
+/* ---------- v19: personal Home ---------- */
+.my-home .home-hero { display: flex; align-items: center; gap: 18px; margin-bottom: 20px; }
+.my-home .home-hero h1 { margin: 2px 0 4px; }
+.my-home .home-hero-btn { margin-left: auto; align-self: flex-start; }
+.home-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 18px; align-items: start; }
+.home-grid > .panel { padding: 20px 22px; display: grid; gap: 10px; }
+.home-sub { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; font: 700 11px/1.2 var(--font-ui); letter-spacing: .08em; text-transform: uppercase; color: var(--muted-foreground); }
+.home-empty { margin: 0; padding: 12px 14px; border: 1px dashed var(--border); border-radius: 10px; }
+.home-empty a, .home-grid .rows a { text-decoration: none; }
+.home-empty a { text-decoration: underline; text-underline-offset: 2px; }
+.home-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.home-metrics div { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
+.home-metrics dt { font-size: 12px; color: var(--muted-foreground); }
+.home-metrics dd { margin: 2px 0 0; font: 700 20px/1.1 var(--font-ui); }
+.exp-row { position: relative; margin: 0; padding: 12px 44px 12px 12px; border: 1px solid var(--border); border-radius: 10px; display: grid; gap: 10px; }
+.exp-remove { position: absolute; top: 8px; right: 6px; }
+.exp-actions { position: static; background: none; padding: 4px 0 0; }
+@media (max-width: 900px) { .home-grid { grid-template-columns: 1fr; } .home-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .my-home .home-hero { flex-wrap: wrap; } .my-home .home-hero-btn { margin-left: 0; } }

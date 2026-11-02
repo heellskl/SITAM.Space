@@ -452,3 +452,22 @@ select pg_temp.as_user('00000000-0000-0000-0000-00000000c002');
 select public.remove_publication(current_setting('sitam.newprof')::uuid, current_setting('sitam.pub')::uuid);
 select pg_temp.as_super();
 select 'the teacher removes a paper (deleted when nobody else has it): ' || case when not exists (select 1 from publications where id = current_setting('sitam.pub')::uuid) then 'PASS' else 'FAIL' end;
+
+\echo '── v19: work and internship history on the personal Home page'
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c005');
+do $$ declare n int; begin
+  update profiles set experience = '[{"kind":"internship","company":"Kaspi.kz","role":"Data intern","start":"2026-06","end":"2026-08"}]' where id = auth.uid();
+  get diagnostics n = row_count;
+  raise notice '% a person saves their own work / internship history', case when n = 1 then 'PASS' else 'FAIL' end;
+end $$;
+do $$ begin
+  update profiles set experience = '[{"kind":"party","company":""}]' where id = auth.uid();
+  raise notice 'FAIL a broken history entry was saved';
+exception when others then raise notice 'PASS history entries are checked (%)', sqlerrm; end $$;
+do $$ declare n int; begin
+  update profiles set experience = '[{"kind":"work","company":"Hacked"}]' where id = '00000000-0000-0000-0000-00000000c002';
+  get diagnostics n = row_count;
+  raise notice '% nobody edits another person''s history', case when n = 0 then 'PASS' else 'FAIL' end;
+end $$;
+select 'signed-in users see the history: ' || case when (select experience->0->>'company' from public_people where id = '00000000-0000-0000-0000-00000000c005') = 'Kaspi.kz' then 'PASS' else 'FAIL' end;
+select pg_temp.as_super();
