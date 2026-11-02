@@ -142,7 +142,7 @@ export function ManagePublications({ prof, pubs }: { prof: Professor; pubs: Publ
         <DialogContent className="hub-dialog wide pubs-dialog">
           <span className="eyebrow">Publications</span>
           <DialogTitle>{prof.full_name}</DialogTitle>
-          <DialogDescription>Add new papers, update citations or import your Scopus export. Totals and the h-index update by themselves.</DialogDescription>
+          <DialogDescription>Add new papers, update citations or import your Scopus export. Changes show in your list of papers; the h-index and citation totals come from Scopus and are updated by the coordinator.</DialogDescription>
 
           <div className="pubs-actions">
             <Button size="sm" onClick={startAdd}><BookPlus />Add a paper</Button>
