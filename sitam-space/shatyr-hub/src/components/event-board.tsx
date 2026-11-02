@@ -122,11 +122,22 @@ function toFeed(events: SitamEvent[], external: ExternalEvent[], now: number): F
 }
 
 /** Poster card in the spirit of SDU Life: a picture (or a designed cover), host chip, title, categories. */
+/** Every poster is shown in one 3:4 frame (like the QazTech poster): the whole image is visible, nothing is cut;
+ *  wide posters sit on a blurred copy of themselves instead of empty bars. */
+function PosterPhoto({ src }: { src: string }) {
+  return (
+    <span className="poster-photo">
+      <img className="poster-photo-bg" src={src} alt="" aria-hidden loading="lazy" referrerPolicy="no-referrer" />
+      <img className="poster-photo-img" src={src} alt="" loading="lazy" referrerPolicy="no-referrer" />
+    </span>
+  );
+}
+
 function PosterCard({ item, onOpen }: { item: FeedItem; onOpen: (i: FeedItem) => void }) {
   const results = item.external?.external_event_labs.filter((x) => x.result) ?? [];
   const cover = (
     <div className={`poster poster-${item.type}`}>
-      {item.poster ? <img src={item.poster} alt="" loading="lazy" referrerPolicy="no-referrer" /> : (
+      {item.poster ? <PosterPhoto src={item.poster} /> : (
         <div className="poster-cover" aria-hidden>
           <span className="poster-cover-type">{TYPE_LABEL[item.type]}</span>
           <strong className="poster-cover-title">{item.title}</strong>
@@ -268,7 +279,7 @@ function placeLine(it: FeedItem) {
 const shortDay = (d: Date | null, year: number | null) => (d ? d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : year ? String(year) : '');
 
 function PosterImage({ item }: { item: FeedItem }) {
-  return item.poster ? <img src={item.poster} alt="" loading="lazy" referrerPolicy="no-referrer" /> : (
+  return item.poster ? <PosterPhoto src={item.poster} /> : (
     <div className="poster-cover" aria-hidden>
       <span className="poster-cover-type">{TYPE_LABEL[item.type]}</span>
       <strong className="poster-cover-title">{item.title}</strong>
