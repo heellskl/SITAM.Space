@@ -7,7 +7,7 @@ import { EXTERNAL_KIND_LABEL, eventDate, externalDates, hostNames, humanError, i
 import { mineFirst, useMyLabs } from '@/lib/my-labs';
 import { type Capabilities } from '@/lib/auth';
 import { EVENT_META } from '@/lib/sitam-data';
-import { ExternalEventDialog, ExternalEventSheet, useExternalRights } from '@/components/external-events';
+import { ExternalEventSheet } from '@/components/external-events';
 
 /** Mirrors can_manage_event() in the database (for showing buttons only; the DB decides). */
 export function canManageEvent(e: Pick<SitamEvent, 'organizer_id' | 'event_hosts'>, userId: string | undefined, caps: Capabilities) {
@@ -247,30 +247,27 @@ function PosterList({ items, onOpen, past }: { items: FeedItem[]; onOpen: (i: Fe
 
 /**
  * Events feed. `fixedType` (Industry page) shows one type only and hides the Type filter;
- * the Location and Organized by filters work the same everywhere, for upcoming and past events.
+ * the Location filter works the same everywhere, for upcoming and past events.
  */
-export function EventBoard({ query = '', fixedType, allowAdd = true }: { query?: string; fixedType?: FeedType; allowAdd?: boolean }) {
+export function EventBoard({ query = '', fixedType }: { query?: string; fixedType?: FeedType }) {
   const { data, isLoading, error } = useEvents();
   const ext = useExternalEvents();
   const navigate = useNavigate();
-  const rights = useExternalRights();
   const [typeSel, setType] = useState<FeedType | 'all'>('all');
   const type = fixedType ?? typeSel;
   const [location, setLocation] = useState<FeedLocation | 'all'>('all');
-  const [organizer, setOrganizer] = useState<FeedOrganizer | 'all'>('all');
   const [view, setView] = useState<'list' | 'calendar'>('list');
   const [when, setWhen] = useState<'all' | 'upcoming' | 'past'>('all');
   const [open, setOpen] = useState<ExternalEvent | null>(null);
-  const [adding, setAdding] = useState(false);
   const my = useMyLabs();
 
   const term = query.trim().toLowerCase();
   const items = useMemo(() => {
     const all = toFeed(data ?? [], ext.data ?? [], Date.now());
     return all.filter((it) =>
-      (type === 'all' || it.type === type) && (location === 'all' || it.location === location) && (organizer === 'all' || it.organizer === organizer)
+      (type === 'all' || it.type === type) && (location === 'all' || it.location === location)
       && (!term || `${it.title} ${it.host} ${it.sdu?.speaker ?? ''} ${it.sdu?.tags.join(' ') ?? ''}`.toLowerCase().includes(term)));
-  }, [data, ext.data, type, location, organizer, term]);
+  }, [data, ext.data, type, location, term]);
   const mineFirstItem = (it: FeedItem) => !!it.sdu?.event_hosts.some((h) => my.isMineLab(h.lab_id)) || !!it.external?.external_event_labs.some((x) => my.isMineLab(x.lab_id));
   const upcoming = mineFirst(items.filter((i) => i.upcoming).sort((a, b) => (a.start?.getTime() ?? Infinity) - (b.start?.getTime() ?? Infinity)), mineFirstItem);
   const past = items.filter((i) => !i.upcoming).sort((a, b) => (b.start?.getTime() ?? (b.year ?? 0) * 1e11) - (a.start?.getTime() ?? (a.year ?? 0) * 1e11));
@@ -280,7 +277,7 @@ export function EventBoard({ query = '', fixedType, allowAdd = true }: { query?:
   };
   const loading = isLoading || ext.isLoading;
   // remount the lists when filters change, so "Show all" starts collapsed again
-  const listKey = `${type}-${location}-${organizer}-${term}`;
+  const listKey = `${type}-${location}-${term}`;
 
   return (
     <>
@@ -295,10 +292,8 @@ export function EventBoard({ query = '', fixedType, allowAdd = true }: { query?:
           </div>
           {!fixedType && <FilterRow label="Type" options={['industry', 'research', 'competitions'] as const} labels={TYPE_LABEL} value={typeSel} onChange={setType} />}
           <FilterRow label="Location" options={['sdu', 'outside', 'online'] as const} labels={LOCATION_LABEL} value={location} onChange={setLocation} />
-          <FilterRow label="Organized by" options={['sdu', 'external', 'cohosted'] as const} labels={ORGANIZER_LABEL} value={organizer} onChange={setOrganizer} />
         </div>
         <div className="ev-actions">
-          {allowAdd && rights.canAdd && <Button size="sm" variant="outline" onClick={() => setAdding(true)}><Trophy />Add external event</Button>}
           <div className="seg" role="group" aria-label="View">
             <button type="button" className={view === 'list' ? 'is-on' : ''} aria-pressed={view === 'list'} onClick={() => setView('list')} title="List"><LayoutGrid size={15} /><span className="sr-only">List</span></button>
             <button type="button" className={view === 'calendar' ? 'is-on' : ''} aria-pressed={view === 'calendar'} onClick={() => setView('calendar')} title="Calendar"><CalendarDays size={15} /><span className="sr-only">Calendar</span></button>
@@ -327,7 +322,6 @@ export function EventBoard({ query = '', fixedType, allowAdd = true }: { query?:
       )}
 
       {open && <ExternalEventSheet event={open} all={ext.data ?? []} onClose={() => setOpen(null)} />}
-      {adding && <ExternalEventDialog event={null} onClose={() => setAdding(false)} />}
     </>
   );
 }

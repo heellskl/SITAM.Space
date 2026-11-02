@@ -4,13 +4,17 @@
 // • Answers are short lists with [1] [2] citations; the cards below show the pages the answer used.
 // • The conversation is kept while the person browses (sessionStorage): open a page from the chat, then come
 //   back to the chat with the "Ask SITAM" button — everything is still there. "New chat" starts over.
+// • Every answered question is saved to the person's archive (public.ask_questions, v22): FAQ → "Ask SITAM AI"
+//   shows the same chat on the page with the archive next to it (open an old answer, delete a question).
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { useRouter } from '@tanstack/react-router';
+import { Link, useRouter } from '@tanstack/react-router';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  ArrowUp, BookOpen, Briefcase, CalendarDays, ChevronDown, CircleHelp, FlaskConical, Loader2, Maximize2, Minimize2, Minus, PanelRight, RotateCcw, Rocket, Sparkles, UserRound,
+  ArrowUp, BookOpen, Briefcase, CalendarDays, ChevronDown, CircleHelp, FlaskConical, History, Loader2, Maximize2, Minimize2, Minus, PanelRight, RotateCcw, Rocket, Sparkles, Trash2, UserRound,
 } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
+import { db } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { Markdown } from '@/components/ask-markdown';
 
@@ -84,15 +88,83 @@ function SourceCards({ sources, onOpen }: { sources: Source[]; onOpen: (s: Sourc
   );
 }
 
+/* ───────── archive: the person's answered questions (only they can see them) ───────── */
+export type ArchivedQuestion = { id: string; question: string; answer: string; sources: Source[]; scope: Scope; created_at: string };
+const ARCHIVE_KEY = ['ask-archive'] as const;
+
+export function useAskArchive(enabled: boolean) {
+  return useQuery({
+    queryKey: ARCHIVE_KEY,
+    enabled,
+    queryFn: async () => {
+      const { data, error } = await db.from('ask_questions').select('id, question, answer, sources, scope, created_at').order('created_at', { ascending: false }).limit(200);
+      if (error) throw error;
+      return (data ?? []) as ArchivedQuestion[];
+    },
+  });
+}
+
+/** Sends a question to the ask-sitam function and saves answered questions to the archive. */
+function useAskChat(initial: Msg[], initialScope: Scope) {
+  const qc = useQueryClient();
+  const [msgs, setMsgs] = useState<Msg[]>(initial);
+  const [scope, setScope] = useState<Scope>(initialScope);
+  const [busy, setBusy] = useState(false);
+
+  async function ask(text: string, sc: Scope = scope) {
+    const question = text.trim();
+    if (question.length < 3 || busy) return false;
+    // only answered questions: a question whose answer failed is left out together with the error
+    const history = msgs
+      .filter((m, i) => !m.error && !(m.role === 'user' && msgs[i + 1]?.error))
+      .map((m) => ({ role: m.role, content: m.content }))
+      .slice(-6);
+    setMsgs((m) => [...m, { role: 'user', content: question }]);
+    setBusy(true);
+    const { data, error } = await supabase.functions.invoke('ask-sitam', { body: { question, history, scope: sc } });
+    setBusy(false);
+    if (error || data?.error) {
+      let msg = data?.error as string | undefined;
+      try { msg ??= (await (error as { context?: Response })?.context?.json())?.error; } catch { /* not JSON */ }
+      setMsgs((m) => [...m, { role: 'assistant', content: msg ?? 'Ask SITAM is not available right now.', error: true }]);
+      return true;
+    }
+    const sources = (data?.sources ?? []) as Source[];
+    const content = data?.answer ?? (sources.length ? 'These pages on SITAM SPACE match your question:' : 'Nothing found on SITAM SPACE for this question.');
+    setMsgs((m) => [...m, { role: 'assistant', content, sources }]);
+    // archive: best effort — the chat works even if saving fails
+    const { error: saveError } = await db.from('ask_questions').insert({ question, answer: content.slice(0, 20000), sources, scope: sc });
+    if (!saveError) void qc.invalidateQueries({ queryKey: ARCHIVE_KEY });
+    return true;
+  }
+  return { msgs, setMsgs, scope, setScope, busy, ask };
+}
+
+function ChatMessages({ msgs, busy, onOpenUrl }: { msgs: Msg[]; busy: boolean; onOpenUrl: (url: string) => void }) {
+  return (
+    <>
+      {msgs.map((m, i) => {
+        const known = new Set((m.sources ?? []).map((s) => s.n));
+        const cite = (n: number) => { const s = m.sources?.find((x) => x.n === n); if (s) onOpenUrl(s.url); };
+        return (
+          <div key={i} className={`ask-msg ${m.role}${m.error ? ' is-error' : ''}`}>
+            {m.role === 'assistant' && !m.error ? <div className="ask-rich"><Markdown text={m.content} onCite={cite} known={known} onLink={onOpenUrl} /></div> : <p>{m.content}</p>}
+            {!!m.sources?.length && <SourceCards sources={m.sources} onOpen={(s) => onOpenUrl(s.url)} />}
+          </div>
+        );
+      })}
+      {busy && <div className="ask-msg assistant"><p className="ask-typing"><Loader2 size={14} className="animate-spin" />Searching SITAM SPACE…</p></div>}
+    </>
+  );
+}
+
 export function AskSitam() {
   const { user } = useAuth();
   const router = useRouter();
   const [state] = useState(load);
   const [open, setOpen] = useState(state.open);
-  const [msgs, setMsgs] = useState<Msg[]>(state.msgs);
-  const [scope, setScope] = useState<Scope>(state.scope);
+  const { msgs, setMsgs, scope, setScope, busy, ask: send } = useAskChat(state.msgs, state.scope);
   const [q, setQ] = useState('');
-  const [busy, setBusy] = useState(false);
   const end = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
   // size: floating window, docked side panel (page shifts left — split screen) or full screen; width by dragging the edge
@@ -128,28 +200,9 @@ export function AskSitam() {
   if (!user) return null;
 
   async function ask(text: string, sc: Scope = scope) {
-    const question = text.trim();
-    if (question.length < 3 || busy) return;
-    // only answered questions: a question whose answer failed is left out together with the error
-    const history = msgs
-      .filter((m, i) => !m.error && !(m.role === 'user' && msgs[i + 1]?.error))
-      .map((m) => ({ role: m.role, content: m.content }))
-      .slice(-6);
-    setMsgs((m) => [...m, { role: 'user', content: question }]);
-    setQ('');
-    setBusy(true);
-    const { data, error } = await supabase.functions.invoke('ask-sitam', { body: { question, history, scope: sc } });
-    setBusy(false);
-    if (error || data?.error) {
-      let msg = data?.error as string | undefined;
-      try { msg ??= (await (error as { context?: Response })?.context?.json())?.error; } catch { /* not JSON */ }
-      setMsgs((m) => [...m, { role: 'assistant', content: msg ?? 'Ask SITAM is not available right now.', error: true }]);
-      return;
-    }
-    const sources = (data?.sources ?? []) as Source[];
-    const content = data?.answer ?? (sources.length ? 'These pages on SITAM SPACE match your question:' : 'Nothing found on SITAM SPACE for this question.');
-    setMsgs((m) => [...m, { role: 'assistant', content, sources }]);
+    if (await send(text, sc) === false) return;
   }
+  const askNow = (text: string, sc: Scope = scope) => { if (text.trim().length >= 3 && !busy) setQ(''); void ask(text, sc); };
 
   // open a page and keep the chat: on a computer the panel stays open, on a phone it folds into the button
   const openUrl = (url: string) => {
@@ -158,7 +211,7 @@ export function AskSitam() {
     router.history.push(url);
   };
   const openPage = (s: Source) => openUrl(s.url);
-  const submit = (e: FormEvent) => { e.preventDefault(); void ask(q); };
+  const submit = (e: FormEvent) => { e.preventDefault(); askNow(q); };
   const reset = () => { setMsgs([]); setQ(''); input.current?.focus(); };
   const asked = msgs.filter((m) => m.role === 'user').length;
 
@@ -201,7 +254,7 @@ export function AskSitam() {
                 <h3>What are you looking for?</h3>
                 <p>Labs, supervisors, papers, events, internships or how SITAM SPACE works. Answers show the pages they come from.</p>
                 <div className="ask-examples">
-                  {EXAMPLES.map((x) => <button key={x.q} type="button" onClick={() => { setScope(x.scope); void ask(x.q, x.scope); }}>{x.q}</button>)}
+                  {EXAMPLES.map((x) => <button key={x.q} type="button" onClick={() => { setScope(x.scope); askNow(x.q, x.scope); }}>{x.q}</button>)}
                 </div>
               </div>
             )}
@@ -227,5 +280,100 @@ export function AskSitam() {
         </section>
       )}
     </>
+  );
+}
+
+/* ───────── FAQ → "Ask SITAM AI": the chat on the page, with the person's archive of questions ───────── */
+export function AskSitamPage() {
+  const { user } = useAuth();
+  const router = useRouter();
+  const { msgs, setMsgs, scope, setScope, busy, ask } = useAskChat([], 'auto');
+  const archive = useAskArchive(!!user);
+  const qc = useQueryClient();
+  const [q, setQ] = useState('');
+  const [openId, setOpenId] = useState<string | null>(null);
+  const end = useRef<HTMLDivElement>(null);
+  const first = useRef(true);
+  useEffect(() => { if (first.current) { first.current = false; return; } end.current?.scrollIntoView({ block: 'nearest' }); }, [msgs, busy]);
+
+  const go = (text: string, sc: Scope = scope) => {
+    if (text.trim().length < 3 || busy) return;
+    setQ(''); setOpenId(null);
+    void ask(text, sc);
+  };
+  const openSaved = (a: ArchivedQuestion) => {
+    setOpenId(a.id);
+    setScope(a.scope ?? 'auto');
+    setMsgs([{ role: 'user', content: a.question }, { role: 'assistant', content: a.answer, sources: Array.isArray(a.sources) ? a.sources : [] }]);
+  };
+  const remove = async (id: string) => {
+    const { error } = await db.from('ask_questions').delete().eq('id', id);
+    if (!error) {
+      if (openId === id) { setOpenId(null); setMsgs([]); }
+      void qc.invalidateQueries({ queryKey: ARCHIVE_KEY });
+    }
+  };
+  const openUrl = (url: string) => router.history.push(url);
+
+  if (!user) {
+    return (
+      <div className="ask-page-signin">
+        <Sparkles size={20} />
+        <p>Sign in to ask SITAM AI. Your questions and answers are saved here, in your archive.</p>
+        <Link className="filter active" to="/login">Sign in</Link>
+      </div>
+    );
+  }
+  const saved = archive.data ?? [];
+  return (
+    <div className="ask-page">
+      <section className="ask-page-chat" aria-label="Ask SITAM AI">
+        <div className="ask-scope" role="radiogroup" aria-label="Search in">
+          {SCOPES.map((s) => (
+            <button key={s.id} type="button" role="radio" aria-checked={scope === s.id} className={scope === s.id ? 'is-on' : ''} onClick={() => setScope(s.id)}>{s.label}</button>
+          ))}
+        </div>
+        <div className="ask-body" aria-live="polite">
+          {msgs.length === 0 && (
+            <div className="ask-empty">
+              <span className="ask-empty-ic"><Sparkles size={22} /></span>
+              <h3>What are you looking for?</h3>
+              <p>Labs, supervisors, papers, events, internships or how SITAM SPACE works. Answers show the pages they come from.</p>
+              <div className="ask-examples">
+                {EXAMPLES.map((x) => <button key={x.q} type="button" onClick={() => { setScope(x.scope); go(x.q, x.scope); }}>{x.q}</button>)}
+              </div>
+            </div>
+          )}
+          <ChatMessages msgs={msgs} busy={busy} onOpenUrl={openUrl} />
+          <div ref={end} />
+        </div>
+        <form className="ask-form" onSubmit={(e) => { e.preventDefault(); go(q); }}>
+          {msgs.length > 0 && <button type="button" className="ask-new" onClick={() => { setMsgs([]); setOpenId(null); }} title="New chat" aria-label="New chat"><RotateCcw size={16} /></button>}
+          <input value={q} onChange={(e) => setQ(e.target.value)} maxLength={600} aria-label="Your question"
+            placeholder={scope === 'auto' ? 'Ask a question…' : `Ask about ${SCOPES.find((s) => s.id === scope)?.label.toLowerCase()}…`} />
+          <button type="submit" disabled={busy || q.trim().length < 3} aria-label="Send"><ArrowUp size={16} /></button>
+        </form>
+      </section>
+
+      <aside className="ask-archive" aria-label="Your questions">
+        <h2><History size={16} />Your questions{saved.length > 0 && <span className="ask-archive-n">{saved.length}</span>}</h2>
+        {archive.isLoading ? <p className="small-note">Loading…</p>
+          : archive.error ? <p className="small-note">The archive is not available right now.</p>
+          : saved.length === 0 ? <p className="small-note">Questions you ask SITAM AI are saved here.</p>
+          : (
+            <ul>
+              {saved.map((a) => (
+                <li key={a.id} className={openId === a.id ? 'is-on' : ''}>
+                  <button type="button" className="ask-archive-q" onClick={() => openSaved(a)}>
+                    <strong>{a.question}</strong>
+                    <small>{new Date(a.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</small>
+                  </button>
+                  <button type="button" className="ask-icon" onClick={() => void remove(a.id)} title="Delete from archive" aria-label={`Delete “${a.question}”`}><Trash2 size={15} /></button>
+                </li>
+              ))}
+            </ul>
+          )}
+      </aside>
+    </div>
   );
 }

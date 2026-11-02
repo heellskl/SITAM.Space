@@ -4,13 +4,13 @@
 
 import { useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from '@tanstack/react-router';
-import { ArrowUpRight, Briefcase, Building2, CalendarDays, Camera, FlaskConical, GraduationCap, Pencil, Plus, Ticket, Trash2, X } from 'lucide-react';
+import { ArrowUpRight, Briefcase, Building2, CalendarDays, FlaskConical, GraduationCap, Pencil, Plus, Ticket, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { ROLE_LABEL, isSduEmail, useAuth } from '@/lib/auth';
 import {
-  INDUSTRIAL_LABEL, LAB_POSITION_LABEL, STATUS_LABEL, STATUS_TONE, formatDate, hostNames, humanError, opportunityLabel, uploadAvatar,
+  INDUSTRIAL_LABEL, LAB_POSITION_LABEL, STATUS_LABEL, STATUS_TONE, formatDate, hostNames, humanError, opportunityLabel,
   useEvents, useExperience, useLabs, useMyApplications, useMyRegistrations, useProfessor, useSaveExperience,
   type Experience, type LabRole, type SitamEvent,
 } from '@/lib/api';
@@ -74,9 +74,8 @@ function ExperienceDialog({ userId, items, open, onOpenChange }: { userId: strin
 
 /* ───────────── the page ───────────── */
 export function MyHome() {
-  const { user, profile, caps, refresh } = useAuth();
+  const { user, profile, caps } = useAuth();
   const uid = user?.id;
-  const [photoBusy, setPhotoBusy] = useState(false);
   const card = useProfessor(caps.professorUsername ?? '');
   const labs = useLabs();
   const events = useEvents();
@@ -110,7 +109,6 @@ export function MyHome() {
 
   if (!profile || !uid) return null;
   const name = `${profile.firstName} ${profile.lastName}`.trim() || user?.email || 'You';
-  const initials = name.split(/[\s@]+/).filter(Boolean).slice(0, 2).map((p) => p[0]?.toUpperCase()).join('');
   const prof = card.data?.prof;
   // the second fact: what the person studies / teaches / where they work
   const speciality =
@@ -119,31 +117,10 @@ export function MyHome() {
     : { label: 'Company', value: [profile.company, profile.position].filter(Boolean).join(' · ') || undefined };
   const joined = profile.createdAt ? new Date(profile.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '—';
 
-  async function changePhoto(file: File | undefined) {
-    if (!file || !uid) return;
-    setPhotoBusy(true);
-    try {
-      await uploadAvatar(uid, file);
-      await refresh();
-      toast.success('Photo updated');
-    } catch (e) {
-      toast.error(humanError(e));
-    } finally {
-      setPhotoBusy(false);
-    }
-  }
-
   return (
     <main className="container content-page my-home">
-      {/* who the person is: photo, name, role and four short facts */}
+      {/* who the person is: name, role and short facts */}
       <header className="idcard">
-        <div className="idcard-avatar">
-          <span className="idcard-photo" aria-hidden>{profile.avatarUrl ? <img src={profile.avatarUrl} alt="" referrerPolicy="no-referrer" /> : initials}</span>
-          <label className={photoBusy ? 'idcard-cam is-busy' : 'idcard-cam'} title="Change photo">
-            <Camera size={15} />
-            <input type="file" accept="image/png,image/jpeg,image/webp" disabled={photoBusy} onChange={(e) => { void changePhoto(e.target.files?.[0]); e.target.value = ''; }} aria-label="Change profile photo" />
-          </label>
-        </div>
         <div className="idcard-main">
           <div className="idcard-title">
             <h1>{name}</h1>
