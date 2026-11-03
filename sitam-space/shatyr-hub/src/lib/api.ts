@@ -136,6 +136,8 @@ export type Project = {
   professors?: { full_name: string; username: string } | null;
   /** v23: startup stage (kind = 'startup') */
   stage?: StartupStage | null;
+  /** v28: startup logo or photo */
+  logo_url?: string | null;
 };
 
 export type OpportunityCategory = 'industrial' | 'lab' | 'research';
@@ -1620,8 +1622,12 @@ export const STARTUP_STAGE_LABEL: Record<StartupStage, string> = { idea: 'Idea',
 export function useSubmitStartup() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (d: { title: string; summary: string; demo_url: string; stage: StartupStage; tags: string[] }) => {
-      const { data, error } = await db.rpc('submit_startup', { p_title: d.title, p_summary: d.summary, p_demo_url: d.demo_url, p_stage: d.stage, p_tags: d.tags });
+    mutationFn: async (d: { title: string; summary: string; demo_url: string; stage: StartupStage; github_url: string; logo_url: string; people: string[] }) => {
+      // v28: no technologies; GitHub link, logo and the mentors / trackers who work with the team
+      const { data, error } = await db.rpc('submit_startup', {
+        p_title: d.title, p_summary: d.summary, p_demo_url: d.demo_url, p_stage: d.stage,
+        p_github_url: d.github_url, p_logo_url: d.logo_url, p_people: d.people,
+      });
       if (error) fail(error);
       return data as Project;
     },
@@ -1629,6 +1635,7 @@ export function useSubmitStartup() {
       void qc.invalidateQueries({ queryKey: qk.mySubmissions });
       void qc.invalidateQueries({ queryKey: qk.projects });
       void qc.invalidateQueries({ queryKey: qk.moderation });
+      void qc.invalidateQueries({ queryKey: ['startup-links'] });
     },
   });
 }
@@ -1666,5 +1673,30 @@ export function useDeleteStartupPerson() {
       if (error) fail(error);
     },
     onSuccess: () => void qc.invalidateQueries({ queryKey: STARTUP_PEOPLE_KEY }),
+  });
+}
+
+/* ───────────── v28: startup logo + mentors / trackers of each startup ───────────── */
+/** Upload a startup logo or photo to the author's own folder; returns its public link. */
+export async function uploadStartupLogo(userId: string, file: File) {
+  if (!/^image\/(png|jpeg|webp)$/.test(file.type)) throw new Error('BAD_FILE: use a PNG, JPG or WebP image');
+  if (file.size > 3 * 1024 * 1024) throw new Error('TOO_BIG: the image must be 3 MB or smaller');
+  const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg';
+  const path = `${userId}/startup-${Date.now()}.${ext}`;
+  const { error } = await db.storage.from('avatars').upload(path, file, { upsert: false, contentType: file.type });
+  if (error) fail(error);
+  return db.storage.from('avatars').getPublicUrl(path).data.publicUrl as string;
+}
+/** project id → ids of its mentors / trackers */
+export function useStartupLinks() {
+  return useQuery({
+    queryKey: ['startup-links'],
+    queryFn: async () => {
+      const { data, error } = await db.from('project_startup_people').select('project_id, person_id');
+      if (error) return new Map<string, string[]>(); // v28 SQL not run yet: no links
+      const m = new Map<string, string[]>();
+      for (const r of data as { project_id: string; person_id: string }[]) m.set(r.project_id, [...(m.get(r.project_id) ?? []), r.person_id]);
+      return m;
+    },
   });
 }

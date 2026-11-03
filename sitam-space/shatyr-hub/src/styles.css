@@ -2753,3 +2753,35 @@ html.dark .side-link:hover, html.dark .side-link.side-active, html.dark .side-li
 .su-person .su-text { margin: 0; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .su-contact { align-self: flex-start; margin-top: auto; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px; border: 1px solid var(--border); border-radius: 999px; color: var(--navy); font: 500 13px/1 var(--font-ui); text-decoration: none; }
 .su-contact:hover { border-color: color-mix(in oklab, var(--navy) 35%, var(--border)); }
+
+/* v28: startup cards open a details window; logo in the card; proposal form with logo and mentors / trackers */
+.labcard.su-card { width: 100%; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.labcard-icon.has-logo img { width: 100%; height: 100%; object-fit: cover; border-radius: 8px; }
+.su-detail { max-width: 520px; gap: 16px; }
+.su-detail-head { display: flex; align-items: center; gap: 14px; padding-right: 28px; }
+.su-detail-head h2 { margin: 0; font: 600 22px/1.2 var(--font-ui) !important; letter-spacing: -0.01em; }
+.su-detail-head p { margin: 2px 0 0; }
+.su-detail-logo { width: 56px; height: 56px; flex-shrink: 0; border-radius: 50%; overflow: hidden; display: grid; place-items: center;
+  background: color-mix(in oklch, var(--tone, #64748b) 16%, white); color: color-mix(in oklch, var(--tone, #64748b) 80%, black); border: 2px solid var(--border); }
+.su-detail-logo img { width: 100%; height: 100%; object-fit: cover; }
+.su-detail-block { display: grid; gap: 8px; }
+.su-detail-label { font: 600 11px/1 var(--font-ui); letter-spacing: .12em; text-transform: uppercase; color: var(--muted-foreground); }
+.su-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.su-chip { padding: 7px 14px; border-radius: 999px; font: 500 13.5px/1 var(--font-ui); border: 1px solid; }
+.su-chip.is-builder { background: #ecfdf3; border-color: #a7e3bf; color: #14532d; }
+.su-chip.is-mentor { background: #eef4ff; border-color: #bcd2fb; color: #1e3a8a; }
+.su-chip.is-tracker { background: #fff6e8; border-color: #f5cf8f; color: #7c4a03; }
+html.dark .su-chip.is-builder { background: rgba(74, 222, 155, .12); border-color: rgba(74, 222, 155, .35); color: #bbf7d0; }
+html.dark .su-chip.is-mentor { background: rgba(133, 183, 235, .14); border-color: rgba(133, 183, 235, .35); color: #dbeafe; }
+html.dark .su-chip.is-tracker { background: rgba(245, 185, 66, .14); border-color: rgba(245, 185, 66, .35); color: #fde7b0; }
+.su-detail-about { margin: 0; font-size: 15px; line-height: 1.6; color: var(--foreground); white-space: pre-line; max-height: 260px; overflow-y: auto; }
+.su-detail-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 4px; }
+.su-detail-actions a { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 46px; border-radius: 999px; }
+.su-logo-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.su-logo-preview { width: 52px; height: 52px; border-radius: 50%; overflow: hidden; display: grid; place-items: center; border: 1px dashed var(--border); color: var(--muted-foreground); }
+.su-logo-preview img { width: 100%; height: 100%; object-fit: cover; }
+.su-logo-btn { position: relative; display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 14px; border: 1px solid var(--border); border-radius: 999px; font: 500 13px/1 var(--font-ui); color: var(--navy); cursor: pointer; }
+.su-logo-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.su-pick-group { display: grid; gap: 6px; margin-top: 4px; }
+.su-pick-group small { color: var(--muted-foreground); font-size: 12px; }
+.su-stage-pick button.su-person-on { background: var(--btn-bg); color: var(--btn-fg); }

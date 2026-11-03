@@ -182,3 +182,15 @@ do $$ begin
     grant select, insert, delete on public.ask_questions to authenticated;
   end if;
 end $$;
+
+-- v28: mentors / trackers of a startup (guarded)
+do $$ begin
+  if to_regclass('public.project_startup_people') is not null then
+    revoke all on public.project_startup_people from anon, authenticated, public;
+    grant select on public.project_startup_people to anon, authenticated;
+  end if;
+  if to_regprocedure('public.submit_startup(text, text, text, text, text, text, uuid[])') is not null then
+    revoke execute on function public.submit_startup(text, text, text, text, text, text, uuid[]) from anon, public;
+    grant execute on function public.submit_startup(text, text, text, text, text, text, uuid[]) to authenticated;
+  end if;
+end $$;

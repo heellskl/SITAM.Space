@@ -161,3 +161,9 @@
 - `/startups?tab=mentors|trackers` (default Projects). Projects = the startups with stage filters All / Idea / Prototype / MVP and "Your proposals". One search bar above the tabs searches the open tab.
 - Mentors / Trackers: `public.startup_people` (kind `mentor` | `tracker`, full_name, role, bio, expertise[], photo_url https, contact_url https or mailto, sort_order). Everyone reads; only `is_admin()` adds / edits / removes — on the tab itself ("Add a mentor", pencil, trash = click twice).
 - Database: migration `20261103140000_sitam_v27_startup_people.sql`, `supabase/update-to-v27.sql` (after update-to-v25.sql); fix-permissions.sql re-applies its grants (and the v22 ask_questions grants).
+
+## SITAM SPACE v28 — startup details, logo, mentors / trackers of a project
+- A startup card opens a details window (logo, name, stage · year, Builders / Mentors / Trackers chips, About, "Visit website" and "GitHub").
+- Propose a project: no technologies; optional logo or photo (uploaded to the author's folder in `avatars`, `uploadStartupLogo`), GitHub link, and the team's mentors / trackers chosen from Startups → Mentors / Trackers.
+- DB: `projects.logo_url`, `project_startup_people (project_id, person_id)` (visible with the project), new `submit_startup(p_title, p_summary, p_demo_url, p_stage, p_github_url, p_logo_url, p_people uuid[])` (the old 5-argument version stays). Migration `20261103150000_sitam_v28_startup_details.sql`, `update-to-v28.sql` (after v27).
+- Add a mentor / tracker: no photo link field any more (people show initials).
