@@ -1632,3 +1632,39 @@ export function useSubmitStartup() {
     },
   });
 }
+
+/* ───────────── v27: Startups → Mentors and Trackers (public.startup_people; the coordinator manages them) ───────────── */
+export type StartupPersonKind = 'mentor' | 'tracker';
+export type StartupPerson = {
+  id: string; kind: StartupPersonKind; full_name: string; role: string | null; bio: string | null;
+  expertise: string[]; photo_url: string | null; contact_url: string | null; sort_order: number;
+};
+export type StartupPersonInput = Omit<StartupPerson, 'id' | 'sort_order'> & { id?: string };
+const STARTUP_PEOPLE_KEY = ['startup-people'] as const;
+export function useStartupPeople() {
+  return useQuery({
+    queryKey: STARTUP_PEOPLE_KEY,
+    queryFn: () => rows<StartupPerson[]>(db.from('startup_people').select('id, kind, full_name, role, bio, expertise, photo_url, contact_url, sort_order').order('sort_order').order('full_name')),
+  });
+}
+export function useSaveStartupPerson() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, ...row }: StartupPersonInput) => {
+      const clean = { ...row, role: row.role || null, bio: row.bio || null, photo_url: row.photo_url || null, contact_url: row.contact_url || null };
+      const { error } = id ? await db.from('startup_people').update({ ...clean, updated_at: new Date().toISOString() }).eq('id', id) : await db.from('startup_people').insert(clean);
+      if (error) fail(error);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: STARTUP_PEOPLE_KEY }),
+  });
+}
+export function useDeleteStartupPerson() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await db.from('startup_people').delete().eq('id', id);
+      if (error) fail(error);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: STARTUP_PEOPLE_KEY }),
+  });
+}

@@ -156,3 +156,8 @@
 - Startups (`routes/startups.tsx`): PageHero (Startups / MVPs + "Propose a project") → search → stage pills (`.filter`) → lab-style cards (`labcard`, stage chip in the corner, card opens the demo link).
 - Ask SITAM: ONE chat. The floating window (small or side panel) and the page `/ask` (`AskSitamPage`: chat + "Your questions" archive) share the conversation via sessionStorage `sitam-ask-v1`. The expand button in the floating chat opens `/ask`; the floating chat is hidden on `/ask`. No full-screen overlay any more. FAQ has no AI tab (`/faq?tab=ask` → `/ask`); FAQ ends with "Ask SITAM" (signed in) and "Ask the SITAM office".
 - v26.2: Research banner has "Submit your research" (`SubmitProjectButton kind="research"`) as its action, like "Propose a project" on Startups.
+
+## SITAM SPACE v27 — Startups tabs: Projects · Mentors · Trackers
+- `/startups?tab=mentors|trackers` (default Projects). Projects = the startups with stage filters All / Idea / Prototype / MVP and "Your proposals". One search bar above the tabs searches the open tab.
+- Mentors / Trackers: `public.startup_people` (kind `mentor` | `tracker`, full_name, role, bio, expertise[], photo_url https, contact_url https or mailto, sort_order). Everyone reads; only `is_admin()` adds / edits / removes — on the tab itself ("Add a mentor", pencil, trash = click twice).
+- Database: migration `20261103140000_sitam_v27_startup_people.sql`, `supabase/update-to-v27.sql` (after update-to-v25.sql); fix-permissions.sql re-applies its grants (and the v22 ask_questions grants).

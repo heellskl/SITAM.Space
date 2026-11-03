@@ -162,3 +162,23 @@ do $$ begin
     grant execute on function public.submit_startup(text, text, text, text, text[]) to authenticated;
   end if;
 end $$;
+
+-- v27: Startups mentors and trackers (guarded)
+do $$ begin
+  if to_regclass('public.startup_people') is not null then
+    revoke all on public.startup_people from anon, public;
+    grant select on public.startup_people to anon, authenticated;
+    revoke all on public.startup_people from authenticated;
+    grant select, insert, delete on public.startup_people to authenticated;
+    grant update on public.startup_people to authenticated;
+  end if;
+end $$;
+
+-- v22: Ask SITAM archive (guarded)
+do $$ begin
+  if to_regclass('public.ask_questions') is not null then
+    revoke all on public.ask_questions from anon, public;
+    revoke update on public.ask_questions from authenticated;
+    grant select, insert, delete on public.ask_questions to authenticated;
+  end if;
+end $$;

@@ -11557,6 +11557,43 @@ select 'olympiad', 'FAIO International AI Olympiad: final at SDU University', 'F
  where not exists (select 1 from public.external_events where lower(title) = lower('FAIO International AI Olympiad: final at SDU University'));
 insert into sitam_meta.applied_migrations (version, name) values ('20261103130000', 'sitam_v25_1_faio') on conflict do nothing;
 
+-- ════════ 20261103140000_sitam_v27_startup_people ════════
+/* ════════════════════════════════════════════════════════════════════════════
+   SITAM SPACE v27 — Startups: Mentors and Trackers tabs (requested 2026-11-03)
+   • public.startup_people: people who help student startups — mentors (advice from experience) and trackers
+     (guide a team step by step through the stages). Everyone can see them; only the coordinator / admin
+     adds, edits and removes them (Startups → Mentors / Trackers → "Add …").
+   Safe to run more than once.
+   ════════════════════════════════════════════════════════════════════════════ */
+create table if not exists public.startup_people (
+  id uuid primary key default gen_random_uuid(),
+  kind text not null check (kind in ('mentor', 'tracker')),
+  full_name text not null check (char_length(btrim(full_name)) between 2 and 120),
+  role text check (role is null or char_length(role) <= 160),
+  bio text check (bio is null or char_length(bio) <= 1500),
+  expertise text[] not null default '{}' check (cardinality(expertise) <= 12),
+  photo_url text check (photo_url is null or photo_url ~* '^https://'),
+  contact_url text check (contact_url is null or contact_url ~* '^(https://|mailto:)'),
+  sort_order int not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists startup_people_kind_idx on public.startup_people (kind, sort_order, full_name);
+alter table public.startup_people enable row level security;
+drop policy if exists "Startup people: everyone reads" on public.startup_people;
+drop policy if exists "Startup people: coordinator adds" on public.startup_people;
+drop policy if exists "Startup people: coordinator edits" on public.startup_people;
+drop policy if exists "Startup people: coordinator removes" on public.startup_people;
+create policy "Startup people: everyone reads" on public.startup_people for select to anon, authenticated using (true);
+create policy "Startup people: coordinator adds" on public.startup_people for insert to authenticated with check (public.is_admin());
+create policy "Startup people: coordinator edits" on public.startup_people for update to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "Startup people: coordinator removes" on public.startup_people for delete to authenticated using (public.is_admin());
+revoke all on public.startup_people from anon, public;
+grant select on public.startup_people to anon, authenticated;
+grant insert, update, delete on public.startup_people to authenticated;
+
+insert into sitam_meta.applied_migrations (version, name) values ('20261103140000', 'sitam_v27_startup_people') on conflict do nothing;
+
 -- SITAM SPACE — fix "You do not have permission to do this" on a new Supabase project.
 -- New Supabase projects can be created WITHOUT the usual default access for the website roles (anon, authenticated).
 -- Then the site cannot read labs, research, events… and shows "You do not have permission to do this".
@@ -11727,5 +11764,16 @@ do $$ begin
   if to_regprocedure('public.submit_startup(text, text, text, text, text[])') is not null then
     revoke execute on function public.submit_startup(text, text, text, text, text[]) from anon, public;
     grant execute on function public.submit_startup(text, text, text, text, text[]) to authenticated;
+  end if;
+end $$;
+
+-- v27: Startups mentors and trackers (guarded)
+do $$ begin
+  if to_regclass('public.startup_people') is not null then
+    revoke all on public.startup_people from anon, public;
+    grant select on public.startup_people to anon, authenticated;
+    revoke all on public.startup_people from authenticated;
+    grant select, insert, delete on public.startup_people to authenticated;
+    grant update on public.startup_people to authenticated;
   end if;
 end $$;
