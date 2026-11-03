@@ -44,16 +44,19 @@ export async function embed(text: string): Promise<number[]> {
   return Array.from(out);
 }
 
-/* ───────────── answer generation: Anthropic (Claude), OpenAI, Gemini or DeepSeek — whichever key is set ───────────── */
+/* ───────────── answer generation: Amazon Bedrock (Nova Lite), Anthropic, OpenAI, Gemini or DeepSeek — whichever key is set ───────────── */
 export type ChatTurn = { role: 'user' | 'assistant'; content: string };
-export type Provider = 'anthropic' | 'openai' | 'gemini' | 'deepseek';
+export type Provider = 'bedrock' | 'anthropic' | 'openai' | 'gemini' | 'deepseek';
 
 export function provider(): Provider | null {
   const forced = env('AI_PROVIDER').toLowerCase();
+  if (forced === 'bedrock' && env('AWS_BEARER_TOKEN_BEDROCK')) return 'bedrock';
   if (forced === 'anthropic' && env('ANTHROPIC_API_KEY')) return 'anthropic';
   if (forced === 'openai' && env('OPENAI_API_KEY')) return 'openai';
   if (forced === 'gemini' && env('GEMINI_API_KEY')) return 'gemini';
   if (forced === 'deepseek' && env('DEEPSEEK_API_KEY')) return 'deepseek';
+  // a Bedrock API key wins when no provider is forced
+  if (env('AWS_BEARER_TOKEN_BEDROCK')) return 'bedrock';
   if (env('DEEPSEEK_API_KEY')) return 'deepseek';
   if (env('ANTHROPIC_API_KEY')) return 'anthropic';
   if (env('OPENAI_API_KEY')) return 'openai';
@@ -63,6 +66,7 @@ export function provider(): Provider | null {
 
 // Default model names; override any of them with the secret AI_MODEL (check the provider's current model list).
 const DEFAULT_MODEL: Record<Provider, string> = {
+  bedrock: 'us.amazon.nova-lite-v1:0', // Amazon Nova Lite (cross-region inference profile; region from AWS_REGION, default us-east-1)
   anthropic: 'claude-haiku-4-5',
   openai: 'gpt-4o-mini',
   gemini: 'gemini-2.0-flash',
@@ -73,6 +77,27 @@ export async function generate(system: string, turns: ChatTurn[], maxTokens = 70
   const p = provider();
   if (!p) throw new Error('NO_PROVIDER');
   const model = env('AI_MODEL') || DEFAULT_MODEL[p];
+
+  if (p === 'bedrock') {
+    // Bedrock Converse API with a Bedrock API key (secret AWS_BEARER_TOKEN_BEDROCK). The conversation must start with
+    // the user and alternate, so leading assistant turns are dropped and turns of the same role are joined.
+    const region = env('AWS_REGION') || 'us-east-1';
+    const msgs: { role: 'user' | 'assistant'; content: { text: string }[] }[] = [];
+    for (const t of turns) {
+      if (!t.content.trim() || (!msgs.length && t.role !== 'user')) continue;
+      const last = msgs[msgs.length - 1];
+      if (last && last.role === t.role) last.content[0]!.text += `\n\n${t.content}`;
+      else msgs.push({ role: t.role, content: [{ text: t.content }] });
+    }
+    const r = await fetch(`https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(model)}/converse`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env('AWS_BEARER_TOKEN_BEDROCK')}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ system: [{ text: system }], messages: msgs, inferenceConfig: { maxTokens, temperature: 0.3 } }),
+    });
+    if (!r.ok) throw new Error(`Bedrock ${r.status}: ${(await r.text()).slice(0, 300)}`);
+    const d = await r.json();
+    return (d.output?.message?.content ?? []).map((c: { text?: string }) => c.text ?? '').join('').trim();
+  }
 
   if (p === 'anthropic') {
     const r = await fetch('https://api.anthropic.com/v1/messages', {

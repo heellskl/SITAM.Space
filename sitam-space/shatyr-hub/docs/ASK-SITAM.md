@@ -24,11 +24,13 @@ Never indexed: CVs, phone numbers, e-mails, applications, registrations, lab "In
    the same thing as `process.env.NAME` in Node:
    | Secret | Needed | Meaning |
    |---|---|---|
-   | `ANTHROPIC_API_KEY` | one of the four | Claude (console.anthropic.com) |
-   | `OPENAI_API_KEY` | one of the four | OpenAI |
-   | `GEMINI_API_KEY` | one of the four | Google Gemini (aistudio.google.com) |
-   | `DEEPSEEK_API_KEY` | one of the four | DeepSeek (platform.deepseek.com), model `deepseek-chat` |
-   | `AI_PROVIDER` | optional | `anthropic` / `openai` / `gemini` / `deepseek` when several keys are set |
+   | `AWS_BEARER_TOKEN_BEDROCK` | one of the five (used first) | Amazon Bedrock API key; default model Amazon Nova Lite `us.amazon.nova-lite-v1:0` |
+   | `AWS_REGION` | optional | Bedrock region, default `us-east-1` (the key must be from the same region) |
+   | `ANTHROPIC_API_KEY` | one of the five | Claude (console.anthropic.com) |
+   | `OPENAI_API_KEY` | one of the five | OpenAI |
+   | `GEMINI_API_KEY` | one of the five | Google Gemini (aistudio.google.com) |
+   | `DEEPSEEK_API_KEY` | one of the five | DeepSeek (platform.deepseek.com), model `deepseek-chat` |
+   | `AI_PROVIDER` | optional | `bedrock` / `anthropic` / `openai` / `gemini` / `deepseek` when several keys are set |
    | `AI_MODEL` | optional | model name; defaults: `claude-haiku-4-5`, `gpt-4o-mini`, `gemini-2.0-flash` — check the provider's current list |
    | `AI_DAILY_LIMIT` | optional | questions per person per day (default 30) |
    | `AI_CRON_SECRET` | optional | lets a scheduled job call `ai-index` with header `x-cron-secret` |
