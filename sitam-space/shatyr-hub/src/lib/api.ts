@@ -1266,6 +1266,8 @@ export type LabPassport = {
   official_name: string | null; room: string | null; head: string | null; equipment: string | null; software: string | null;
   projects_grants: string | null; kpi_outcomes: string | null;
   status: 'draft' | 'submitted' | 'approved'; updated_at: string; submitted_at: string | null; approved_at: string | null;
+  /** v30: the whole passport in the official template (lab-passport-template.ts) */
+  doc?: import('@/lib/lab-passport-template').PassportDoc | null;
 };
 export type LabPassportDraft = Pick<LabPassport, 'official_name' | 'room' | 'head' | 'equipment' | 'software' | 'projects_grants' | 'kpi_outcomes'>;
 export const PASSPORT_YEAR = 2026;
@@ -1286,7 +1288,7 @@ export function useLabPassports(year = PASSPORT_YEAR, enabled = true) {
   return useQuery({
     queryKey: ['lab-passports', year], enabled,
     queryFn: async () => {
-      const { data, error } = await db.from('lab_passports').select('*').eq('year', year);
+      const { data, error } = await db.from('lab_passports').select('lab_id, year, official_name, status, updated_at, submitted_at, approved_at').eq('year', year);
       return error ? [] : (data as LabPassport[]);
     },
   });
@@ -1302,6 +1304,18 @@ export function useSaveLabPassport() {
         p_equipment: d.equipment ?? '', p_software: d.software ?? '', p_projects_grants: d.projects_grants ?? '', p_kpi_outcomes: d.kpi_outcomes ?? '',
         p_submit: v.submit,
       });
+      if (error) fail(error);
+    },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['lab-passport'] }); void qc.invalidateQueries({ queryKey: ['lab-passports'] }); },
+  });
+}
+
+/** v30: save the passport document (official template); submit = send to the dean's office. */
+export function useSaveLabPassportDoc() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { labId: string; year: number; doc: import('@/lib/lab-passport-template').PassportDoc; submit: boolean }) => {
+      const { error } = await db.rpc('save_lab_passport_doc', { p_lab: v.labId, p_year: v.year, p_doc: v.doc, p_submit: v.submit });
       if (error) fail(error);
     },
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ['lab-passport'] }); void qc.invalidateQueries({ queryKey: ['lab-passports'] }); },

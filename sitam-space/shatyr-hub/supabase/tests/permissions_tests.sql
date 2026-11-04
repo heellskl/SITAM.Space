@@ -182,6 +182,24 @@ select public.approve_lab_passport((select id from labs where slug='fortinet'), 
 update labs set center='math' where slug='algebra';
 select 'v29 the coordinator approves and moves a lab: ' || case when (select status from lab_passports where lab_id=(select id from labs where slug='fortinet'))='approved' and (select center from labs where slug='algebra')='math' then 'PASS' else 'FAIL' end;
 select pg_temp.as_super();
+\echo '── v30: official lab passports'
+select 'v30 the 12 official passports are seeded as submitted: ' || case when (select count(*) from lab_passports where year=2026 and doc->>'source' like 'official%')=12 then 'PASS' else 'FAIL' end;
+select 'v30 the other labs get a draft from the dean list: ' || case when (select count(*) from lab_passports p join labs l on l.id=p.lab_id where p.year=2026 and p.status='draft' and p.doc->>'source' like 'dean%')=8 then 'PASS' else 'FAIL' end;
+select 'v30 cybersecurity passport keeps its 13 equipment rows and the plan: ' || case when (select jsonb_array_length(doc->'tables'->'equipment'->'rows') from lab_passports p join labs l on l.id=p.lab_id where l.slug='cybersecurity-laboratory')=13
+  and (select doc->>'plan_image' like 'data:image/jpeg;base64,%' from lab_passports p join labs l on l.id=p.lab_id where l.slug='cybersecurity-laboratory') then 'PASS' else 'FAIL' end;
+select 'v30 an empty lab location gets the room from the dean list: ' || case when (select location from labs where slug='distributed-systems-and-computing-lab') is not null and (select location from labs where slug='fortinet')='Room F104' then 'PASS' else 'FAIL' end;
+select pg_temp.as_user((select id from profiles where email='s.manbay@sdu.edu.kz'));
+select (public.save_lab_passport_doc((select id from labs where slug='cloud-computing'), 2026, '{"v":1,"lang":"kk","general":{"name":"Cloud Lab X"},"tables":{},"approver":[],"prepared":{},"agreed":{}}'::jsonb, false)).status;
+select 'v30 a lead saves the passport document of own lab: ' || case when (select doc->'general'->>'name' from lab_passports p join labs l on l.id=p.lab_id where l.slug='cloud-computing')='Cloud Lab X' then 'PASS' else 'FAIL' end;
+do $$ begin perform public.save_lab_passport_doc((select id from labs where slug='robotics-lab'), 2026, '{"v":1}'::jsonb, false); raise notice 'v30 lead cannot save another lab passport: FAIL'; exception when others then null; end $$;
+do $$ begin perform public.save_lab_passport_doc((select id from labs where slug='cloud-computing'), 2026, '[1]'::jsonb, false); exception when others then null; end $$;
+select 'v30 the passport must be an object: ' || case when (select jsonb_typeof(doc) from lab_passports p join labs l on l.id=p.lab_id where l.slug='cloud-computing')='object' then 'PASS' else 'FAIL' end;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000d003');
+select 'v30 a student reads no passport: ' || case when (select count(*) from lab_passports)=0 then 'PASS' else 'FAIL' end;
+select pg_temp.as_super();
+\i ../migrations/20261104120000_sitam_v30_lab_passports_official.sql
+select 'v30 a lead cannot overwrite another lab passport: ' || case when (select doc->'general'->>'name' from lab_passports p join labs l on l.id=p.lab_id where l.slug='robotics-lab')='Robotics Lab' then 'PASS' else 'FAIL' end;
+select 'v30 running the migration again keeps the edits: ' || case when (select doc->'general'->>'name' from lab_passports p join labs l on l.id=p.lab_id where l.slug='cloud-computing')='Cloud Lab X' then 'PASS' else 'FAIL' end;
 -- the v10 / v17 checks below register s.manbay and dilnaz.suleimenova from scratch, so the v29 accounts are removed first
 update lab_members set user_id = null where user_id in (select id from auth.users where email in ('s.manbay@sdu.edu.kz', 'dilnaz.suleimenova@sdu.edu.kz'));
 delete from auth.identities where user_id in (select id from auth.users where email in ('s.manbay@sdu.edu.kz', 'dilnaz.suleimenova@sdu.edu.kz'));

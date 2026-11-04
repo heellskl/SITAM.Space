@@ -117,4 +117,4 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 |---|---|---|---|
 | 44 | Move a lab to a research center (Center of AI Research / Center of Mathematics) | coordinator | trigger `labs_center_guard` |
 | 45 | Lab leads 2026 get their head seats and an account created by SITAM with a shared first password (`SduLab2026!`); they must set their own password at the first sign-in. The user chose this knowing that a shared first password is weaker than invariant 8 (accounts are seeded only for the SDU e-mails on the official list) | seeded by the v29 migration (SQL editor) | `sitam_meta.lab_leads_2026`, `profiles.must_change_password`, `clear_must_change_password` |
-| 46 | Fill / submit the Lab Passport of a lab; approve it | fill + submit: heads of that lab and the coordinator; approve: coordinator | RLS `lab_passports` (select), `save_lab_passport`, `approve_lab_passport` |
+| 46 | Fill / submit the Lab Passport of a lab; approve it | fill + submit: heads of that lab and the coordinator; approve: coordinator | RLS `lab_passports` (select), `save_lab_passport`, `save_lab_passport_doc` (v30), `approve_lab_passport` |

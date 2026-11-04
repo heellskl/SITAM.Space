@@ -210,3 +210,11 @@ do $$ begin
     grant execute on function public.clear_must_change_password() to authenticated;
   end if;
 end $$;
+
+-- v30: lab passport document (guarded)
+do $$ begin
+  if to_regprocedure('public.save_lab_passport_doc(uuid, integer, jsonb, boolean)') is not null then
+    revoke execute on function public.save_lab_passport_doc(uuid, integer, jsonb, boolean) from anon, public;
+    grant execute on function public.save_lab_passport_doc(uuid, integer, jsonb, boolean) to authenticated;
+  end if;
+end $$;

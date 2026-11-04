@@ -2797,28 +2797,54 @@ html.dark .su-chip.is-tracker { background: rgba(245, 185, 66, .14); border-colo
 .center-head-initials { display: grid; place-items: center; background: var(--muted); font-weight: 700; font-size: 14px; }
 .center-head-person small { display: block; font-size: 12px; color: var(--muted-foreground); }
 .center-head-person strong { display: block; font-size: 14px; }
-.passport-form { display: grid; gap: 14px; max-width: 880px; }
-.passport-form label > span { display: block; margin-bottom: 6px; font-size: 13.5px; }
+.passport-form { display: grid; gap: 18px; max-width: 1100px; }
+.passport-form label > span { display: block; margin-bottom: 6px; font-size: 13.5px; font-weight: 600; }
 .passport-form textarea, .passport-form input { width: 100%; }
+.pp-lang { display: flex; gap: 8px; }
+.partner-form .pp-section { border: 1px solid var(--border); border-radius: 8px; padding: 16px; display: grid; gap: 14px; background: var(--card); min-width: 0; }
+.partner-form .pp-section legend { margin-bottom: 0; padding: 0 6px; font-weight: 700; font-size: 14px; letter-spacing: .02em; }
+.pp-block { display: grid; gap: 8px; min-width: 0; }
+.pp-block h3 { margin: 0; font-family: var(--font-ui, inherit); font-size: 14px; font-weight: 600; }
+.pp-table-wrap { overflow-x: auto; display: grid; gap: 6px; justify-items: start; }
+.pp-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.pp-table th { text-align: left; font-weight: 600; padding: 6px; border-bottom: 1px solid var(--border); color: var(--muted-foreground); vertical-align: bottom; min-width: 90px; }
+.pp-table td { padding: 3px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.pp-table td textarea { min-height: 34px; padding: 6px 8px; font-size: 13px; resize: vertical; field-sizing: content; }
+.pp-table .pp-no { width: 36px; min-width: 36px; color: var(--muted-foreground); text-align: center; padding-top: 10px; }
+.pp-del { background: none; border: 0; color: var(--muted-foreground); padding: 8px; cursor: pointer; border-radius: 6px; }
+.pp-del:hover { color: var(--destructive); background: var(--muted); }
+.pp-plan { display: grid; gap: 6px; justify-items: start; }
+.pp-plan img { max-width: min(100%, 520px); border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+.pp-sign { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 720px) { .pp-sign { grid-template-columns: 1fr; } }
+.pp-actions { flex-wrap: wrap; }
 .passport-doc { display: none; }
 @media print {
+  html:has(body.printing-passport), body.printing-passport { background: #fff !important; }
   body.printing-passport * { visibility: hidden !important; }
-  body.printing-passport .passport-doc, body.printing-passport .passport-doc * { visibility: visible !important; }
-  body.printing-passport .passport-doc { display: block; position: absolute; left: 0; top: 0; width: 100%; color: #000; background: #fff; font: 11pt/1.45 'Times New Roman', Times, serif; }
-  .passport-doc header { text-align: center; margin-bottom: 14pt; }
-  body.printing-passport .passport-doc * { color: #000 !important; }
-  .passport-doc header p { margin: 0 0 8pt; font-size: 10pt; }
-  .passport-doc header h1 { margin: 0; font: 700 15pt 'Times New Roman', Times, serif; letter-spacing: .04em; }
-  .passport-doc header h2 { margin: 2pt 0 0; font: 400 11pt 'Times New Roman', Times, serif; }
-  .passport-doc table { width: 100%; border-collapse: collapse; }
-  .passport-doc th, .passport-doc td { border: 1px solid #000; padding: 6pt 8pt; vertical-align: top; text-align: left; }
-  .passport-doc th { width: 34%; font-weight: 700; }
-  .passport-doc th small { display: block; font-weight: 400; font-style: italic; font-size: 9.5pt; }
-  .passport-doc tr { break-inside: avoid; }
-  .passport-doc footer { display: grid; gap: 14pt; margin-top: 28pt; }
-  .passport-doc footer div { display: flex; gap: 10pt; align-items: flex-end; }
-  .passport-doc footer span { min-width: 150pt; }
-  .passport-doc footer i { flex: 1; border-bottom: 1px solid #000; height: 12pt; }
-  @page { size: A4; margin: 18mm 16mm; }
+  body.printing-passport .passport-doc, body.printing-passport .passport-doc * { visibility: visible !important; color: #000 !important; }
+  body.printing-passport .passport-doc { display: block; position: absolute; left: 0; top: 0; width: 100%; background: #fff; font: 12pt/1.4 'Times New Roman', Times, serif; }
+  .passport-doc .pd-approve { margin-left: 55%; margin-bottom: 18pt; }
+  .passport-doc .pd-approve strong { display: block; font-weight: 700; margin-bottom: 2pt; }
+  .passport-doc .pd-sign-line { margin-top: 4pt; }
+  .passport-doc .pd-note { text-align: center; font-size: 10.5pt; margin-bottom: 8pt; }
+  .passport-doc h1 { text-align: center; font: 700 14pt 'Times New Roman', Times, serif; margin: 10pt 0 12pt; }
+  .passport-doc h2 { font: 700 12pt 'Times New Roman', Times, serif; margin: 14pt 0 6pt; break-after: avoid; }
+  .passport-doc .pd-item { margin: 0 0 8pt; }
+  .passport-doc .pd-item > b { font-weight: 700; break-after: avoid; }
+  .passport-doc .pd-item > b + .pd-table, .passport-doc .pd-item > b + img { break-before: avoid; }
+  .passport-doc .pd-text p { margin: 2pt 0; text-indent: 1.25cm; text-align: justify; }
+  .passport-doc .pd-table { width: 100%; border-collapse: collapse; margin-top: 4pt; font-size: 10.5pt; }
+  .passport-doc .pd-table th, .passport-doc .pd-table td { border: 1px solid #000; padding: 3pt 5pt; vertical-align: top; text-align: left; }
+  .passport-doc .pd-table th { font-weight: 700; text-align: center; }
+  .passport-doc .pd-no { width: 24pt; text-align: center !important; }
+  .passport-doc .pd-table tr { break-inside: avoid; }
+  .passport-doc .pd-plan { display: block; max-width: 100%; max-height: 13cm; margin: 6pt auto; }
+  .passport-doc .pd-signs { margin-top: 22pt; display: grid; gap: 16pt; break-inside: avoid; }
+  .passport-doc .pd-sign-row { display: flex; align-items: flex-end; gap: 12pt; margin-top: 6pt; }
+  .passport-doc .pd-sign-row span:first-child { min-width: 170pt; }
+  .passport-doc .pd-sign-row i { width: 110pt; border-bottom: 1px solid #000; height: 12pt; }
+  .passport-doc .pd-sign small { display: block; margin-left: 200pt; font-size: 9pt; }
+  @page { size: A4; margin: 20mm 15mm 20mm 25mm; }
 }
 .first-password > button.absolute { display: none; }
