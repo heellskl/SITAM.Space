@@ -22,12 +22,12 @@ export function ResearchCenters({ terms }: { terms: string[] }) {
     return m;
   }, [projects.data]);
 
-  const inCenter = useMemo(() => (labs.data ?? []).filter((l) => (l.kind ?? 'lab') === 'lab' && (l.center ?? 'ai') === center), [labs.data, center]);
+  const inCenter = useMemo(() => (labs.data ?? []).filter((l) => (l.kind ?? 'lab') === 'lab' && l.center === center), [labs.data, center]);
   const found = useMemo(() => (!terms.length ? inCenter : inCenter.filter((l) => {
     const hay = `${l.name} ${l.tags.join(' ')} ${(l.skills ?? []).join(' ')} ${l.lab_members.map((m) => m.full_name).join(' ')}`.toLowerCase();
     return terms.every((t) => hay.includes(t));
   })), [inCenter, terms]);
-  const count = (id: LabCenter) => (labs.data ?? []).filter((l) => (l.kind ?? 'lab') === 'lab' && (l.center ?? 'ai') === id).length;
+  const count = (id: LabCenter) => (labs.data ?? []).filter((l) => (l.kind ?? 'lab') === 'lab' && l.center === id).length;
 
   return (
     <div className="centers">
@@ -55,7 +55,7 @@ export function ResearchCenters({ terms }: { terms: string[] }) {
         {found.map((l) => <LabCard key={l.id} lab={l} projects={projectCount.get(l.id) ?? 0} mine={my.isMineLab(l.id)} />)}
       </div>
       {!labs.isLoading && found.length === 0 && (
-        <p className="small-note">{terms.length ? 'Nothing found.' : 'No labs in this center yet. The SITAM coordinator assigns labs to a center.'}</p>
+        <p className="small-note">{terms.length ? 'Nothing found.' : 'No labs in this center yet.'}</p>
       )}
     </div>
   );

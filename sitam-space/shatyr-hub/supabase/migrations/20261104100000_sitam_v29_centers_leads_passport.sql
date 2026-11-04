@@ -1,7 +1,7 @@
 /* ════════════════════════════════════════════════════════════════════════════
    SITAM SPACE v29 — Center of Research, lab leads 2026 with their own accounts, Lab Passport (approved by the user 2026-11-04)
-   1. labs.center: 'ai' (Center of AI Research) or 'math' (Center of Mathematics). For now every lab is in the AI center
-      (the user: no labs in the Center of Mathematics yet). Only the coordinator moves a lab (trigger labs_center_guard).
+   1. labs.center: 'ai' (Center of AI Research), 'math' (Center of Mathematics) or empty. For now no lab is in a center
+      (the user, 2026-11-04). Only the coordinator puts a lab into a center (trigger labs_center_guard).
    2. Lab leads 2026 (list from the user, e-mails from the SITAM staff list): each one is the Head of their labs.
       Accounts that do not exist yet are created with the first password SduLab2026! and must change it at the first
       sign-in (profiles.must_change_password). Existing accounts keep their password and are only linked to the lab.
@@ -12,7 +12,6 @@
 
 /* ───────────── 1. centers ───────────── */
 alter table public.labs add column if not exists center text;
-alter table public.labs alter column center set default 'ai';
 alter table public.labs drop constraint if exists labs_center_check;
 alter table public.labs add constraint labs_center_check check (center is null or center in ('ai', 'math'));
 
@@ -28,7 +27,6 @@ $$;
 drop trigger if exists labs_center_guard on public.labs;
 create trigger labs_center_guard before update of center on public.labs for each row execute function public.labs_center_guard();
 
-update public.labs set center = 'ai' where center is null and coalesce(kind, 'lab') = 'lab';
 
 /* ───────────── 2. lab leads 2026 ───────────── */
 alter table public.profiles add column if not exists must_change_password boolean not null default false;

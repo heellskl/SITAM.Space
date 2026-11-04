@@ -105,8 +105,9 @@ function Admin() {
                   {l.kind === 'community' ? 'Make it a lab' : 'Make it a community'}
                 </Button>
                 {l.kind !== 'community' && (
-                  <select className="filter-select" aria-label={`Research center of ${l.name}`} value={l.center ?? 'ai'} disabled={setCenter.isPending}
-                    onChange={(e) => setCenter.mutate({ id: l.id, center: e.target.value as LabCenter }, { onError: (err) => toast.error(humanError(err)) })}>
+                  <select className="filter-select" aria-label={`Research center of ${l.name}`} value={l.center ?? ''} disabled={setCenter.isPending}
+                    onChange={(e) => setCenter.mutate({ id: l.id, center: (e.target.value || null) as LabCenter | null }, { onError: (err) => toast.error(humanError(err)) })}>
+                    <option value="">No research center</option>
                     {LAB_CENTERS.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
                 )}

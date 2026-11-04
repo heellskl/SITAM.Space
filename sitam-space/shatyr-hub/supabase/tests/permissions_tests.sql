@@ -158,7 +158,7 @@ select pg_temp.as_super();
 select 'coordinator e-mails stored trimmed and lower-case: ' || case when exists (select 1 from public.coordinator_emails where email = '250000095@sdu.edu.kz') then 'PASS' else 'FAIL' end;
 
 \echo '── v29: centers, lab leads 2026, lab passports'
-select 'v29 every lab is in the AI center: ' || case when not exists (select 1 from labs where kind='lab' and center is distinct from 'ai') then 'PASS' else 'FAIL' end;
+select 'v29 no lab is in a center yet: ' || case when not exists (select 1 from labs where center is not null) then 'PASS' else 'FAIL' end;
 select 'v29 one account per lead, first password to change: ' || case when (select count(*) from auth.users u join profiles p on p.id=u.id where u.email in (select email from sitam_meta.lab_leads_2026) and p.must_change_password and u.encrypted_password is not null)=(select count(distinct email) from sitam_meta.lab_leads_2026) then 'PASS' else 'FAIL' end;
 select 'v29 s.manbay heads 5 labs, Kavokin and Duisen head applied mathematics: ' || case when (select count(*) from lab_members m join profiles p on p.id=m.user_id where p.email='s.manbay@sdu.edu.kz' and m.can_edit)=5
   and (select count(*) from lab_members m join labs l on l.id=m.lab_id where l.slug='applied-mathematics' and m.user_id is not null and m.can_edit)>=2 then 'PASS' else 'FAIL' end;
@@ -172,7 +172,7 @@ select 'v29 a lead fills and submits the passport of own lab: ' || case when exi
 do $$ begin perform public.save_lab_passport((select id from labs where slug='algebra'), 2026, 'x', null, null, null, null, null, null, false); raise notice 'v29 lead cannot fill another lab passport: FAIL'; exception when others then raise notice 'ok'; end $$;
 select 'v29 lead cannot fill another lab passport: ' || case when not exists (select 1 from lab_passports where lab_id=(select id from labs where slug='algebra')) then 'PASS' else 'FAIL' end;
 do $$ begin update labs set center='math' where slug='fortinet'; exception when others then null; end $$;
-select 'v29 a lead cannot move a lab to another center: ' || case when (select center from labs where slug='fortinet')='ai' then 'PASS' else 'FAIL' end;
+select 'v29 a lead cannot move a lab to another center: ' || case when (select center from labs where slug='fortinet') is null then 'PASS' else 'FAIL' end;
 do $$ begin perform public.approve_lab_passport((select id from labs where slug='fortinet'), 2026); exception when others then null; end $$;
 select 'v29 a lead cannot approve: ' || case when (select status from lab_passports where year=2026 and lab_id=(select id from labs where slug='fortinet'))='submitted' then 'PASS' else 'FAIL' end;
 select public.clear_must_change_password();

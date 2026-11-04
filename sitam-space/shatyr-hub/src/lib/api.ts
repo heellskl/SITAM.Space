@@ -1256,7 +1256,7 @@ export const LAB_CENTERS: { id: LabCenter; name: string; head: string; headUsern
 export function useSetLabCenter() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (v: { id: string; center: LabCenter }) => { const { error } = await db.from('labs').update({ center: v.center }).eq('id', v.id); if (error) fail(error); },
+    mutationFn: async (v: { id: string; center: LabCenter | null }) => { const { error } = await db.from('labs').update({ center: v.center }).eq('id', v.id); if (error) fail(error); },
     onSuccess: () => void qc.invalidateQueries({ queryKey: qk.labs }),
   });
 }
