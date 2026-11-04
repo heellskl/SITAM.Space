@@ -194,3 +194,19 @@ do $$ begin
     grant execute on function public.submit_startup(text, text, text, text, text, text, uuid[]) to authenticated;
   end if;
 end $$;
+
+-- v29: lab passports are read through RLS and written only through save_lab_passport / approve_lab_passport (guarded)
+do $$ begin
+  if to_regclass('public.lab_passports') is not null then
+    revoke all on public.lab_passports from anon, authenticated, public;
+    grant select on public.lab_passports to authenticated;
+  end if;
+  if to_regprocedure('public.save_lab_passport(uuid, integer, text, text, text, text, text, text, text, boolean)') is not null then
+    revoke execute on function public.save_lab_passport(uuid, integer, text, text, text, text, text, text, text, boolean) from anon, public;
+    grant execute on function public.save_lab_passport(uuid, integer, text, text, text, text, text, text, text, boolean) to authenticated;
+    revoke execute on function public.approve_lab_passport(uuid, integer) from anon, public;
+    grant execute on function public.approve_lab_passport(uuid, integer) to authenticated;
+    revoke execute on function public.clear_must_change_password() from anon, public;
+    grant execute on function public.clear_must_change_password() to authenticated;
+  end if;
+end $$;

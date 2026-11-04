@@ -14,7 +14,7 @@ import { ResearcherRequestsAdmin } from '@/components/onboarding';
 import { ScopusBulkImport } from '@/components/publications-editor';
 import { AiIndexPanel } from '@/components/ai-index-panel';
 import { AccountClaimsPanel, CompanyRequestsPanel } from '@/components/manage-panels';
-import { HEAD_ROLES, humanError, useAdminLabActions, useLabs, useSetLabKind, type Lab } from '@/lib/api';
+import { HEAD_ROLES, LAB_CENTERS, humanError, useAdminLabActions, useLabPassports, useLabs, useSetLabCenter, useSetLabKind, type Lab, type LabCenter } from '@/lib/api';
 
 const COMMUNITY = '__community__';
 import { useAuth } from '@/lib/auth';
@@ -32,6 +32,8 @@ function Admin() {
   const labs = useLabs();
   const actions = useAdminLabActions();
   const setKind = useSetLabKind();
+  const setCenter = useSetLabCenter();
+  const passports = useLabPassports(undefined, caps.isCoordinator);
   const [q, setQ] = useState('');
   const [name, setName] = useState('');
   const [focus, setFocus] = useState<string>(LAB_FOCUS[0]);
@@ -102,6 +104,16 @@ function Admin() {
                   onClick={() => setKind.mutate({ id: l.id, kind: l.kind === 'community' ? 'lab' : 'community' }, { onError: (err) => toast.error(humanError(err)) })}>
                   {l.kind === 'community' ? 'Make it a lab' : 'Make it a community'}
                 </Button>
+                {l.kind !== 'community' && (
+                  <select className="filter-select" aria-label={`Research center of ${l.name}`} value={l.center ?? 'ai'} disabled={setCenter.isPending}
+                    onChange={(e) => setCenter.mutate({ id: l.id, center: e.target.value as LabCenter }, { onError: (err) => toast.error(humanError(err)) })}>
+                    {LAB_CENTERS.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                )}
+                {(() => {
+                  const pp = (passports.data ?? []).find((x) => x.lab_id === l.id);
+                  return pp ? <Link to="/labs/$slug" params={{ slug: l.slug }} search={{ passport: true }} className="small-note">Passport: {pp.status === 'submitted' ? 'to approve' : pp.status}</Link> : null;
+                })()}
                 <Button asChild size="sm" variant="outline"><Link to="/labs/$slug" params={{ slug: l.slug }} search={{ edit: true }}><Pencil />Edit</Link></Button>
                 <Button size="sm" variant="ghost" onClick={() => setToDelete(l)} aria-label={`Delete ${l.name}`}><Trash2 /></Button>
               </div>

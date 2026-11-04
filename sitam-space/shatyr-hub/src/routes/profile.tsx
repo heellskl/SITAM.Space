@@ -13,6 +13,7 @@ import {
   KIND_LABEL, MODERATION_LABEL, STATUS_LABEL, STATUS_TONE, cvProblem, db, eventDate, formatDate, hostNames, humanError, opportunityLabel, signedUrl, uploadAvatar, uploadCv, useEvents, useLabs,
   useManagedOpportunities, useMyApplications, useMyRegistrations, useMySubmissions, useProfessor, useWithdrawApplication, useWithdrawSubmission,
   type MyApplication, type Registration, type SitamEvent,
+  clearMustChangePassword,
 } from '@/lib/api';
 import { MAJORS, ROLE_LABEL, useAuth } from '@/lib/auth';
 import { MyOffers } from '@/components/onboarding';
@@ -460,6 +461,7 @@ function PasswordPanel() {
     const { error: err } = await supabase.auth.updateUser({ password: pw });
     setBusy(false);
     if (err) return setError(/reauth|recent/i.test(err.message) ? 'For safety, sign in again with an e-mail link and then set the password.' : humanError(err));
+    void clearMustChangePassword().catch(() => {});
     setPw('');
     setPw2('');
     toast.success('Password saved', { description: 'Next time sign in with your e-mail and this password.' });

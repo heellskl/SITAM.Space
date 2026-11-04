@@ -157,6 +157,37 @@ select 'coordinator e-mail typed with spaces/capitals still works: ' || case whe
 select pg_temp.as_super();
 select 'coordinator e-mails stored trimmed and lower-case: ' || case when exists (select 1 from public.coordinator_emails where email = '250000095@sdu.edu.kz') then 'PASS' else 'FAIL' end;
 
+\echo '── v29: centers, lab leads 2026, lab passports'
+select 'v29 every lab is in the AI center: ' || case when not exists (select 1 from labs where kind='lab' and center is distinct from 'ai') then 'PASS' else 'FAIL' end;
+select 'v29 one account per lead, first password to change: ' || case when (select count(*) from auth.users u join profiles p on p.id=u.id where u.email in (select email from sitam_meta.lab_leads_2026) and p.must_change_password and u.encrypted_password is not null)=(select count(distinct email) from sitam_meta.lab_leads_2026) then 'PASS' else 'FAIL' end;
+select 'v29 s.manbay heads 5 labs, Kavokin and Duisen head applied mathematics: ' || case when (select count(*) from lab_members m join profiles p on p.id=m.user_id where p.email='s.manbay@sdu.edu.kz' and m.can_edit)=5
+  and (select count(*) from lab_members m join labs l on l.id=m.lab_id where l.slug='applied-mathematics' and m.user_id is not null and m.can_edit)>=2 then 'PASS' else 'FAIL' end;
+select 'v29 no duplicate head rows (Kalieva matched): ' || case when (select count(*) from lab_members m join labs l on l.id=m.lab_id where l.slug='physics-lab' and m.role in ('lead','co_lead'))=1 then 'PASS' else 'FAIL' end;
+select 'v29 no pending claims left for the leads: ' || case when not exists (select 1 from account_claims a join profiles p on p.id=a.user_id join lab_members m on m.id=a.member_id join labs l on l.id=m.lab_id join sitam_meta.lab_leads_2026 x on x.slug=l.slug and x.email=p.email where a.status='pending') then 'PASS' else 'FAIL' end;
+select set_config('sitam.lead', (select id::text from profiles where email='s.manbay@sdu.edu.kz'), false);
+select pg_temp.as_user(current_setting('sitam.lead')::uuid);
+select 'v29 a lead sees own context with must_change_password: ' || case when (public.my_context()->'profile'->>'must_change_password')::boolean then 'PASS' else 'FAIL' end;
+select (public.save_lab_passport((select id from labs where slug='fortinet'), 2026, 'Fortinet Lab', 'F 101', 'Manbay', 'FortiGate', null, null, null, true)).status;
+select 'v29 a lead fills and submits the passport of own lab: ' || case when exists (select 1 from lab_passports where year=2026 and status='submitted') then 'PASS' else 'FAIL' end;
+do $$ begin perform public.save_lab_passport((select id from labs where slug='algebra'), 2026, 'x', null, null, null, null, null, null, false); raise notice 'v29 lead cannot fill another lab passport: FAIL'; exception when others then raise notice 'ok'; end $$;
+select 'v29 lead cannot fill another lab passport: ' || case when not exists (select 1 from lab_passports where lab_id=(select id from labs where slug='algebra')) then 'PASS' else 'FAIL' end;
+do $$ begin update labs set center='math' where slug='fortinet'; exception when others then null; end $$;
+select 'v29 a lead cannot move a lab to another center: ' || case when (select center from labs where slug='fortinet')='ai' then 'PASS' else 'FAIL' end;
+do $$ begin perform public.approve_lab_passport((select id from labs where slug='fortinet'), 2026); exception when others then null; end $$;
+select 'v29 a lead cannot approve: ' || case when (select status from lab_passports where year=2026 and lab_id=(select id from labs where slug='fortinet'))='submitted' then 'PASS' else 'FAIL' end;
+select public.clear_must_change_password();
+select 'v29 the flag clears after the new password: ' || case when not (select must_change_password from profiles where id=current_setting('sitam.lead')::uuid) then 'PASS' else 'FAIL' end;
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c095');
+select public.approve_lab_passport((select id from labs where slug='fortinet'), 2026);
+update labs set center='math' where slug='algebra';
+select 'v29 the coordinator approves and moves a lab: ' || case when (select status from lab_passports where lab_id=(select id from labs where slug='fortinet'))='approved' and (select center from labs where slug='algebra')='math' then 'PASS' else 'FAIL' end;
+select pg_temp.as_super();
+-- the v10 / v17 checks below register s.manbay and dilnaz.suleimenova from scratch, so the v29 accounts are removed first
+update lab_members set user_id = null where user_id in (select id from auth.users where email in ('s.manbay@sdu.edu.kz', 'dilnaz.suleimenova@sdu.edu.kz'));
+delete from auth.identities where user_id in (select id from auth.users where email in ('s.manbay@sdu.edu.kz', 'dilnaz.suleimenova@sdu.edu.kz'));
+delete from profiles where email in ('s.manbay@sdu.edu.kz', 'dilnaz.suleimenova@sdu.edu.kz');
+delete from auth.users where email in ('s.manbay@sdu.edu.kz', 'dilnaz.suleimenova@sdu.edu.kz');
+
 \echo '── v10: heads from the coordinator list, competitions & hackathons'
 -- a head on the list registers → becomes head of every lab where the list names them (5 labs for s.manbay)
 insert into auth.users (id, email, raw_user_meta_data) values

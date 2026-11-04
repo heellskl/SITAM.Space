@@ -4,13 +4,14 @@ import { Button } from '@/components/ui/button';
 import { LabEditor } from '@/components/lab-editor';
 import { LabTeamManager } from '@/components/lab-team';
 import { LabPage } from '@/components/lab-page';
+import { LabPassportForm } from '@/components/lab-passport';
 import { humanError, useLab } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 
 export const Route = createFileRoute('/labs/$slug')({
-  validateSearch: (s: Record<string, unknown>): { edit?: boolean; team?: boolean; section?: string } => {
+  validateSearch: (s: Record<string, unknown>): { edit?: boolean; team?: boolean; passport?: boolean; section?: string } => {
     const on = (v: unknown) => v === true || v === '1' || v === 1 || v === 'true';
-    return { ...(on(s['edit']) ? { edit: true } : {}), ...(on(s['team']) ? { team: true } : {}), ...(typeof s['section'] === 'string' ? { section: s['section'].slice(0, 20) } : {}) };
+    return { ...(on(s['edit']) ? { edit: true } : {}), ...(on(s['team']) ? { team: true } : {}), ...(on(s['passport']) ? { passport: true } : {}), ...(typeof s['section'] === 'string' ? { section: s['section'].slice(0, 20) } : {}) };
   },
   head: () => ({ meta: [{ title: 'Lab — SITAM SPACE · SDU' }] }),
   component: LabRoute,
@@ -18,7 +19,7 @@ export const Route = createFileRoute('/labs/$slug')({
 
 function LabRoute() {
   const { slug } = Route.useParams();
-  const { edit, team, section } = Route.useSearch();
+  const { edit, team, passport, section } = Route.useSearch();
   const navigate = useNavigate();
   const { caps, loading } = useAuth();
   const { data: lab, isLoading, error, refetch } = useLab(slug);
@@ -42,5 +43,6 @@ function LabRoute() {
   const openTeam = () => navigate({ to: '/labs/$slug', params: { slug }, search: { team: true } });
   if (edit && !loading && canEdit) return <LabEditor lab={lab} section={section} onDone={() => { void refetch(); void close(); }} />;
   if (team && !loading && canEdit) return <LabTeamManager lab={lab} onEdit={openEditor} />;
+  if (passport && !loading && canEdit) return <LabPassportForm lab={lab} />;
   return <LabPage lab={lab} onEdit={openEditor} onTeam={openTeam} />;
 }

@@ -11,6 +11,7 @@ import { mineFirst, personKey, useMyLabs } from '@/lib/my-labs';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { humanError, useProfessors, useProjects, usePublications, type Professor, type Publication } from '@/lib/api';
 import { ProjectCard } from '@/components/projects-showcase';
+import { ResearchCenters } from '@/components/research-centers';
 
 
 const kindOf = (t: string | null) => (/article/i.test(t ?? '') ? 'article' : /conference/i.test(t ?? '') ? 'conference' : 'other');
@@ -68,12 +69,13 @@ export function ProfessorCard({ p }: { p: Professor }) {
   );
 }
 
-export const RESEARCH_TABS = ['overview', 'people', 'search', 'community'] as const;
+export const RESEARCH_TABS = ['overview', 'people', 'search', 'centers', 'community'] as const;
 export type ResearchTab = (typeof RESEARCH_TABS)[number];
 const PLACEHOLDER: Record<ResearchTab, string> = {
   overview: 'Search papers — the numbers and charts follow',
   people: 'Search researchers by name or by the papers they wrote',
   search: 'Search papers by keywords, title, venue or author',
+  centers: 'Search labs of the research centers',
   community: 'Search lab and student research',
 };
 
@@ -210,6 +212,7 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
         <TabsTrigger value="overview">Overview</TabsTrigger>
         <TabsTrigger value="people">Researchers</TabsTrigger>
         <TabsTrigger value="search">Publications</TabsTrigger>
+        <TabsTrigger value="centers">Center of Research</TabsTrigger>
         <TabsTrigger value="community">{my.any ? 'Lab & student research' : 'Student research'}</TabsTrigger>
       </TabsList>
 
@@ -293,6 +296,10 @@ export function ResearchPublications({ query, tab, onQuery, onTab }: { query: st
         </div>
         <ul className="pub-list">{found.map((p) => <PublicationRow key={p.id} p={p} terms={terms} onKeyword={searchFor} />)}</ul>
         {terms.length > 0 && found.length === 0 && <p className="small-note">No papers found.</p>}
+      </TabsContent>
+
+      <TabsContent value="centers">
+        <ResearchCenters terms={terms} />
       </TabsContent>
 
       <TabsContent value="community">

@@ -16,6 +16,7 @@ import { AppSidebar, HubFooter, TopBar } from "@/components/hub-shell";
 import { StarSky } from "@/components/star-sky";
 import { THEME_INIT_SCRIPT } from "@/components/theme-toggle";
 import { AuthProvider, useAuth } from "@/lib/auth";
+import { FirstPasswordDialog } from "@/components/first-password";
 import { Toaster } from "@/components/ui/sonner";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
@@ -142,6 +143,7 @@ function Shell({ isHome }: { isHome: boolean }) {
       </div>
       {/* on /ask the chat is the page itself, so the floating one is hidden (it reloads the same chat when you leave) */}
       {!onAsk && <AskSitam />}
+      {!guest && <FirstPasswordDialog />}
     </div>
   );
 }

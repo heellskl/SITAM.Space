@@ -44,6 +44,29 @@ function MenuFilter<T extends string>({ label, options, value, onChange }: { lab
   );
 }
 
+/** One lab card (Labs page, Research → Center of Research). Opens the lab page. */
+export function LabCard({ lab: l, projects: n, mine }: { lab: Lab; projects: number; mine?: boolean }) {
+  const pr = labProfile(l);
+  const Icon = ICONS[pr.icon];
+  return (
+    <Link to="/labs/$slug" params={{ slug: l.slug }} className="labcard">
+      <div className="labcard-top">
+        <span className={`labcard-icon tone-${pr.tone}${l.logo_url ? ' has-logo' : ''}`} aria-hidden>
+          {l.logo_url ? <LabLogo lab={l} size={18} /> : <Icon size={18} strokeWidth={1.75} />}
+        </span>
+        {mine && <span className="labcard-mine">Your lab</span>}
+        <span className="labcard-count">{n} {n === 1 ? 'project' : 'projects'}</span>
+        <ArrowUpRight className="labcard-arrow" size={16} aria-hidden />
+      </div>
+      <div className="labcard-bottom">
+        <h3>{l.name}</h3>
+        <p title={pr.line}>{pr.line}</p>
+        {pr.tags.length > 0 && <div className="labcard-tags">{pr.tags.map((t) => <span key={t}>{t}</span>)}</div>}
+      </div>
+    </Link>
+  );
+}
+
 /** kind = 'lab' (laboratories) or 'community' (student communities: same page, same tools). */
 
 export function LabsFeed({ kind = 'lab' }: { kind?: 'lab' | 'community' }) {
@@ -74,28 +97,7 @@ export function LabsFeed({ kind = 'lab' }: { kind?: 'lab' | 'community' }) {
   const mine = labs.filter((l) => my.isMineLab(l.id));
   const others = labs.filter((l) => !my.isMineLab(l.id));
 
-  const card = (l: Lab) => {
-    const pr = labProfile(l);
-    const Icon = ICONS[pr.icon];
-    const n = projectCount.get(l.id) ?? 0;
-    return (
-      <Link key={l.id} to="/labs/$slug" params={{ slug: l.slug }} className="labcard">
-        <div className="labcard-top">
-          <span className={`labcard-icon tone-${pr.tone}${l.logo_url ? ' has-logo' : ''}`} aria-hidden>
-            {l.logo_url ? <LabLogo lab={l} size={18} /> : <Icon size={18} strokeWidth={1.75} />}
-          </span>
-          {my.isMineLab(l.id) && <span className="labcard-mine">Your lab</span>}
-          <span className="labcard-count">{n} {n === 1 ? 'project' : 'projects'}</span>
-          <ArrowUpRight className="labcard-arrow" size={16} aria-hidden />
-        </div>
-        <div className="labcard-bottom">
-          <h3>{l.name}</h3>
-          <p title={pr.line}>{pr.line}</p>
-          {pr.tags.length > 0 && <div className="labcard-tags">{pr.tags.map((t) => <span key={t}>{t}</span>)}</div>}
-        </div>
-      </Link>
-    );
-  };
+  const card = (l: Lab) => <LabCard key={l.id} lab={l} projects={projectCount.get(l.id) ?? 0} mine={my.isMineLab(l.id)} />;
 
   return (
     <>

@@ -93,6 +93,8 @@ export type Lab = {
   upcoming_activities?: string[];
   /** v12: 'lab' (laboratory) or 'community' (student community, e.g. AWS Student Builders Group) */
   kind?: 'lab' | 'community';
+  /** v29: research center — 'ai' (Center of AI Research) or 'math' (Center of Mathematics); coordinator only */
+  center?: LabCenter | null;
   updated_at: string;
   lab_members: LabMember[];
 };
@@ -1240,6 +1242,84 @@ export function useSetLabKind() {
     mutationFn: async (v: { id: string; kind: 'lab' | 'community' }) => { const { error } = await db.from('labs').update({ kind: v.kind }).eq('id', v.id); if (error) fail(error); },
     onSuccess: () => void qc.invalidateQueries({ queryKey: qk.labs }),
   });
+}
+
+/* ───────────────────────────── v29: research centers, Lab Passport ───────────────────────────── */
+
+export type LabCenter = 'ai' | 'math';
+/** The two SITAM research centers; `head` is the researcher page (/research/$username) of the head of the center. */
+export const LAB_CENTERS: { id: LabCenter; name: string; head: string; headUsername: string; scope: string }[] = [
+  { id: 'ai', name: 'Center of AI Research', head: 'Yerbol Palzhanov', headUsername: 'yerbol.palzhanov', scope: 'Artificial intelligence, machine learning, robotics, cloud, networks, distributed systems, multimedia' },
+  { id: 'math', name: 'Center of Mathematics', head: 'Bayan Bekbolat', headUsername: 'bayan.bekbolat', scope: 'Applied mathematics, analysis, algebra, statistics and theoretical work' },
+];
+
+export function useSetLabCenter() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { id: string; center: LabCenter }) => { const { error } = await db.from('labs').update({ center: v.center }).eq('id', v.id); if (error) fail(error); },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.labs }),
+  });
+}
+
+export type LabPassport = {
+  lab_id: string; year: number;
+  official_name: string | null; room: string | null; head: string | null; equipment: string | null; software: string | null;
+  projects_grants: string | null; kpi_outcomes: string | null;
+  status: 'draft' | 'submitted' | 'approved'; updated_at: string; submitted_at: string | null; approved_at: string | null;
+};
+export type LabPassportDraft = Pick<LabPassport, 'official_name' | 'room' | 'head' | 'equipment' | 'software' | 'projects_grants' | 'kpi_outcomes'>;
+export const PASSPORT_YEAR = 2026;
+
+/** The saved passport of a lab for a year (heads of the lab and the coordinator). null = not saved yet or the v29 SQL is not run. */
+export function useLabPassport(labId: string | undefined, year = PASSPORT_YEAR) {
+  return useQuery({
+    queryKey: ['lab-passport', labId, year], enabled: !!labId,
+    queryFn: async () => {
+      const { data, error } = await db.from('lab_passports').select('*').eq('lab_id', labId).eq('year', year).maybeSingle();
+      return error ? null : (data as LabPassport | null);
+    },
+  });
+}
+
+/** Coordinator: every passport of the year (to approve submitted ones). */
+export function useLabPassports(year = PASSPORT_YEAR, enabled = true) {
+  return useQuery({
+    queryKey: ['lab-passports', year], enabled,
+    queryFn: async () => {
+      const { data, error } = await db.from('lab_passports').select('*').eq('year', year);
+      return error ? [] : (data as LabPassport[]);
+    },
+  });
+}
+
+export function useSaveLabPassport() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { labId: string; year: number; draft: LabPassportDraft; submit: boolean }) => {
+      const d = v.draft;
+      const { error } = await db.rpc('save_lab_passport', {
+        p_lab: v.labId, p_year: v.year, p_official_name: d.official_name ?? '', p_room: d.room ?? '', p_head: d.head ?? '',
+        p_equipment: d.equipment ?? '', p_software: d.software ?? '', p_projects_grants: d.projects_grants ?? '', p_kpi_outcomes: d.kpi_outcomes ?? '',
+        p_submit: v.submit,
+      });
+      if (error) fail(error);
+    },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['lab-passport'] }); void qc.invalidateQueries({ queryKey: ['lab-passports'] }); },
+  });
+}
+
+export function useApproveLabPassport() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { labId: string; year: number }) => { const { error } = await db.rpc('approve_lab_passport', { p_lab: v.labId, p_year: v.year }); if (error) fail(error); },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['lab-passport'] }); void qc.invalidateQueries({ queryKey: ['lab-passports'] }); },
+  });
+}
+
+/** v29: clears the "set a new password" flag after the first password was changed. */
+export async function clearMustChangePassword() {
+  const { error } = await db.rpc('clear_must_change_password');
+  if (error) fail(error);
 }
 
 /* ───────────────────────────── Research publications ───────────────────────────── */

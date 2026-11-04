@@ -5,7 +5,7 @@ import { PhotoGallery } from '@/components/photo-gallery';
 import { OfferHelpButton } from '@/components/onboarding';
 import {
   ArrowLeft, ArrowUpRight, Award, Bookmark, BookmarkCheck, BriefcaseBusiness, CalendarDays, Crown, ExternalLink, FlaskConical, History,
-  CalendarPlus, GraduationCap, Inbox, Landmark, Lock, Mail, MapPin, Pencil, Plus, Rocket, Trophy, UserCog, Users,
+  CalendarPlus, GraduationCap, Inbox, Landmark, Lock, Mail, MapPin, Pencil, Plus, Rocket, Trophy, UserCog, Users, FileText,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { LabLogo, useSavedLabs } from '@/components/lab-browser';
@@ -131,6 +131,7 @@ export function LabPage({ lab, onEdit, onTeam }: { lab: Lab; onEdit: () => void;
             <>
               <Button variant="outline" onClick={onEdit}><Pencil />Edit lab</Button>
               <Button variant="outline" onClick={onTeam}><UserCog />Manage members</Button>
+              <Button asChild variant="outline"><Link to="/labs/$slug" params={{ slug: lab.slug }} search={{ passport: true }}><FileText />Lab Passport</Link></Button>
               <Button asChild variant="secondary"><Link to="/manage" search={{ tab: 'inbox' }}><Inbox />Applications{pending ? ` · ${pending} new` : ''}</Link></Button>
             </>
           )}
