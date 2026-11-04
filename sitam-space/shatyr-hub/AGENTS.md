@@ -179,3 +179,7 @@
 - Form and print layout: `components/lab-passport.tsx` (`LabPassportForm`, `PassportDocument`). Only sections with content are printed and numbered. Save → `save_lab_passport_doc(p_lab, p_year, p_doc, p_submit)` (heads of the lab + coordinator, object, max 3 MB); approve → `approve_lab_passport`.
 - Seed (migration `20261104120000_sitam_v30_lab_passports_official.sql`, `update-to-v30.sql` after v29): the 12 official 2026 passports from the dean office folder (status submitted) and drafts for the other 8 labs from "Зертхана (лаборатория).xlsx" (name, room, responsible person, Research / Teaching in `general.type`). Texts are base64 with "." for "/" in the SQL. Never overwrites a passport that already has a document. Empty `labs.location` ← room from the list. Parser used: python-docx (kept out of the repo).
 - The dean office Drive folder is read-only for the SITAM account, so the site does not upload PDFs there; heads download the PDF ("Download Passport as PDF" = print → Save as PDF).
+
+## SITAM SPACE v31 — AWS Student Community Day
+- Event "AWS Student Community Day Kaskelen" (27 Nov 2026, 10:00, Blue Hall, SDU Life; host = community `aws-student-builders-group`; poster `public/events/aws-student-community-day.jpg`; capacity 300; registration on Meetup, link in the description). Migration `20261104130000_sitam_v31_aws_community_day.sql`, `update-to-v31.sql` (after v30).
+- Event page: web addresses in the description are clickable (`withLinks` in routes/events.$eventId.tsx).

@@ -165,7 +165,7 @@ function EventPage() {
         <span><Users size={15} />{event.registered} registered · {event.capacity} seats</span>
       </div>
       {event.speaker && <p className="speaker mt-3"><strong>{event.speaker}</strong>{event.speaker_role && <span> · {event.speaker_role}</span>}</p>}
-      {event.description && <p className="page-intro">{event.description}</p>}
+      {event.description && <p className="page-intro">{withLinks(event.description)}</p>}
       {event.event_hosts.length > 0 && <div className="mb-6"><span className="sub-title">Hosted by</span><HostPills hosts={event.event_hosts} /></div>}
       {event.poster_url && <img className="event-poster" src={event.poster_url} alt={`Poster: ${event.title}`} referrerPolicy="no-referrer" />}
       {canManage && <PosterPanel eventId={event.id} current={event.poster_url ?? null} folder={event.event_hosts.find((h) => h.lab_id && caps.managedLabs.some((m) => m.id === h.lab_id))?.lab_id ?? user?.id ?? ''} />}
@@ -247,4 +247,12 @@ function EventPage() {
       )}
     </main>
   );
+}
+
+/** Event descriptions are plain text; web addresses in them become links (e.g. the registration page). */
+function withLinks(text: string) {
+  return text.split(/(https?:\/\/[^\s]+)/g).map((part, i) =>
+    /^https?:\/\//.test(part)
+      ? <a key={i} href={part.replace(/[.,)]+$/, '')} target="_blank" rel="noreferrer noopener" className="text-link">{part.replace(/[.,)]+$/, '')}</a>
+      : part);
 }

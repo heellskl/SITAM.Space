@@ -2848,3 +2848,4 @@ html.dark .su-chip.is-tracker { background: rgba(245, 185, 66, .14); border-colo
   @page { size: A4; margin: 20mm 15mm 20mm 25mm; }
 }
 .first-password > button.absolute { display: none; }
+.page-intro a.text-link { color: inherit; text-decoration: underline; text-underline-offset: 3px; word-break: break-all; }
