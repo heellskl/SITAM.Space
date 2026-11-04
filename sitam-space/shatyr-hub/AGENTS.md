@@ -183,3 +183,6 @@
 ## SITAM SPACE v31 — AWS Student Community Day
 - Event "AWS Student Community Day Kaskelen" (27 Nov 2026, 10:00, Blue Hall, SDU Life; host = community `aws-student-builders-group`; poster `public/events/aws-student-community-day.jpg`; capacity 300; registration on Meetup, link in the description). Migration `20261104130000_sitam_v31_aws_community_day.sql`, `update-to-v31.sql` (after v30).
 - Event page: web addresses in the description are clickable (`withLinks` in routes/events.$eventId.tsx).
+
+## SITAM SPACE v32 — Akniyet Mussakhan
+- Co-Head of Analysis (akniyet.mussakhan@sdu.edu.kz) added to `sitam_meta.lab_leads_2026` with the same v29 steps (seat e-mail, account with the first password if missing, link, confirm). `update-to-v32.sql` (after v29).
