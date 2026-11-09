@@ -2849,3 +2849,25 @@ html.dark .su-chip.is-tracker { background: rgba(245, 185, 66, .14); border-colo
 }
 .first-password > button.absolute { display: none; }
 .page-intro a.text-link { color: inherit; text-decoration: underline; text-underline-offset: 3px; word-break: break-all; }
+
+/* ---------- v33: Home tabs (Personal info · Awards), Research at half width, certificates ---------- */
+.my-home .home-tabs { margin: 20px 0 16px; }
+.home-halves { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.home-halves > .panel { padding: 20px 22px; display: grid; gap: 10px; margin: 0; }
+.home-halves + .home-layout { margin-top: 16px; }
+.home-halves .home-metrics { grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); }
+@media (max-width: 900px) { .home-halves { grid-template-columns: 1fr; } }
+
+.awards-panel { padding: 20px 22px; display: grid; gap: 14px; margin: 0; }
+.cert-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 12px; }
+.cert-card { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px 14px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
+.cert-icon { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; background: color-mix(in oklab, var(--navy) 8%, var(--card)); color: var(--navy); }
+.cert-body { display: grid; gap: 3px; min-width: 0; }
+.cert-body strong { font: 600 15px/1.35 var(--font-ui); overflow-wrap: anywhere; }
+.cert-body small { color: var(--muted-foreground); font-size: 12.5px; }
+.cert-lab { justify-self: start; margin-top: 6px; padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; color: var(--navy); text-decoration: none; }
+.cert-lab:hover { border-color: color-mix(in oklab, var(--navy) 35%, var(--border)); }
+.cert-lab.is-none { color: var(--muted-foreground); }
+.cert-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 4px; border-top: 1px solid var(--border); padding-top: 10px; }
+.cert-actions > :first-child { margin-right: auto; }
+.cert-actions .is-danger { color: var(--destructive); }

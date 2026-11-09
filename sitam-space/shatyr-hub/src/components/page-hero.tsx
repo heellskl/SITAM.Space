@@ -1,4 +1,4 @@
-// Dark banner at the top of Labs, Industry and Research: title, one line of text and two live numbers.
+// Banner at the top of Labs, Industry and Research: title, one line of text and a few live numbers.
 // A number can be a link (opens the matching tab / page).
 import { Link } from '@tanstack/react-router';
 import type { ReactNode } from 'react';

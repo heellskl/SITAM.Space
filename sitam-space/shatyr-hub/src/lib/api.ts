@@ -1794,3 +1794,81 @@ export function useStartupLinks() {
     },
   });
 }
+
+/* ───────────── v33: certificates on the personal page (Home → Awards) ───────────── */
+export type Certificate = {
+  id: string; user_id: string; title: string; issuer: string | null; issued_on: string | null;
+  lab_id: string | null; file_path: string; file_name: string | null; created_at: string;
+  labs: { name: string; slug: string } | null;
+};
+const CERT_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
+
+/** Own certificates, newest first. `null` = the v33 SQL has not been run yet. */
+export function useMyCertificates(userId: string | undefined) {
+  return useQuery({
+    queryKey: ['certificates', userId], enabled: !!userId,
+    queryFn: async () => {
+      const { data, error } = await db.from('certificates').select('*, labs(name, slug)').eq('user_id', userId!)
+        .order('issued_on', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false });
+      if (error) { if (isMissingSchema(error)) return null; fail(error); }
+      return (data ?? []) as Certificate[];
+    },
+  });
+}
+
+export type CertificateDraft = { title: string; issuer: string; issued_on: string; lab_id: string };
+
+/** Upload the file into certificates/{uid}/… and save the row; the file is removed again if the row cannot be saved. */
+export function useAddCertificate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { userId: string; file: File; draft: CertificateDraft }) => {
+      if (!CERT_TYPES.includes(v.file.type)) throw new Error('BAD_FILE: use a PDF, JPG, PNG or WebP file');
+      if (v.file.size > 5 * 1024 * 1024) throw new Error('TOO_BIG: the file must be 5 MB or smaller');
+      const ext = v.file.type === 'application/pdf' ? 'pdf' : v.file.type === 'image/png' ? 'png' : v.file.type === 'image/webp' ? 'webp' : 'jpg';
+      const path = `${v.userId}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
+      const up = await db.storage.from('certificates').upload(path, v.file, { contentType: v.file.type, upsert: false });
+      if (up.error) fail(up.error);
+      const { error } = await db.from('certificates').insert({
+        user_id: v.userId, title: v.draft.title.trim(), issuer: v.draft.issuer.trim() || null,
+        issued_on: v.draft.issued_on || null, lab_id: v.draft.lab_id || null,
+        file_path: path, file_name: v.file.name.slice(0, 160),
+      });
+      if (error) { await db.storage.from('certificates').remove([path]); fail(error); }
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['certificates'] }),
+  });
+}
+
+export function useUpdateCertificate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { id: string; draft: CertificateDraft }) => {
+      const { error } = await db.from('certificates').update({
+        title: v.draft.title.trim(), issuer: v.draft.issuer.trim() || null,
+        issued_on: v.draft.issued_on || null, lab_id: v.draft.lab_id || null,
+      }).eq('id', v.id);
+      if (error) fail(error);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['certificates'] }),
+  });
+}
+
+export function useDeleteCertificate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (c: Certificate) => {
+      const { error } = await db.from('certificates').delete().eq('id', c.id);
+      if (error) fail(error);
+      await db.storage.from('certificates').remove([c.file_path]);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['certificates'] }),
+  });
+}
+
+/** A short-lived link to open a certificate file (private bucket). */
+export async function certificateUrl(path: string) {
+  const { data, error } = await db.storage.from('certificates').createSignedUrl(path, 120);
+  if (error || !data?.signedUrl) fail(error ?? { message: 'File not found' });
+  return data.signedUrl as string;
+}

@@ -1,13 +1,15 @@
 // v19: the Home page of a signed-in person — their research, labs, events and industry experience in one place.
+// v33: two tabs under the ID card — Personal info (Research | My labs, then My events | Industry) and Awards (certificates).
 // Everything is read from data the person already has (researcher card, lab memberships, registrations,
 // applications, lab partners). Only the work / internship history is new (profiles.experience, own row).
 
 import { useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from '@tanstack/react-router';
-import { ArrowUpRight, Briefcase, Building2, CalendarDays, FlaskConical, GraduationCap, Pencil, Plus, Ticket, Trash2, X } from 'lucide-react';
+import { ArrowUpRight, Award, Briefcase, Building2, CalendarDays, FlaskConical, GraduationCap, Pencil, Plus, Ticket, Trash2, UserRound, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+import { MyAwards } from '@/components/my-awards';
 import { ROLE_LABEL, isSduEmail, useAuth } from '@/lib/auth';
 import {
   INDUSTRIAL_LABEL, LAB_POSITION_LABEL, STATUS_LABEL, STATUS_TONE, formatDate, hostNames, humanError, opportunityLabel,
@@ -17,7 +19,6 @@ import {
 
 const month = (ym: string) => (ym ? new Date(`${ym}-01T00:00:00`).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) : '');
 const period = (e: Experience) => `${month(e.start) || '…'} – ${e.end ? month(e.end) : 'present'}`;
-const isIndustry = (ev: SitamEvent) => ev.kind === 'industrial' || ev.event_hosts.some((h) => h.company_id);
 
 function Empty({ children }: { children: ReactNode }) {
   return <p className="small-note home-empty">{children}</p>;
@@ -73,7 +74,9 @@ function ExperienceDialog({ userId, items, open, onOpenChange }: { userId: strin
 }
 
 /* ───────────── the page ───────────── */
-export function MyHome() {
+export type HomeTab = 'info' | 'awards';
+
+export function MyHome({ tab = 'info', onTab }: { tab?: HomeTab; onTab: (t: HomeTab) => void }) {
   const { user, profile, caps } = useAuth();
   const uid = user?.id;
   const card = useProfessor(caps.professorUsername ?? '');
@@ -93,7 +96,6 @@ export function MyHome() {
       attended: list.filter((x) => new Date(x.ev.starts_at).getTime() < now).sort((a, b) => b.ev.starts_at.localeCompare(a.ev.starts_at)),
     };
   }, [events.data, regs.data]);
-  const industryEvents = [...myEvents.upcoming, ...myEvents.attended].filter((x) => isIndustry(x.ev));
 
   const myLabIds = new Set(caps.labMemberships.map((m) => m.id));
   const partners = useMemo(() => {
@@ -135,37 +137,14 @@ export function MyHome() {
         <Button asChild variant="outline" size="sm" className="idcard-edit"><Link to="/profile" search={{ settings: true }}><Pencil />Edit details</Link></Button>
       </header>
 
-      <div className="kpi-grid">
-        {prof ? (
-          <>
-            <div className="kpi"><strong>{prof.h_index}</strong><span>h-index</span></div>
-            <div className="kpi"><strong>{prof.total_citations}</strong><span>Citations</span></div>
-            <div className="kpi"><strong>{prof.total_works}</strong><span>Publications</span></div>
-          </>
-        ) : (
-          <div className="kpi"><strong>{(apps.data ?? []).length}</strong><span>Applications</span></div>
-        )}
-        <div className="kpi"><strong>{caps.labMemberships.length}</strong><span>Labs</span></div>
-        <div className="kpi"><strong>{myEvents.attended.length}</strong><span>Events attended</span></div>
+      <div className="view-switch labs-switch home-tabs" role="tablist" aria-label="Show">
+        <button type="button" role="tab" aria-selected={tab === 'info'} className={tab === 'info' ? 'is-on' : ''} onClick={() => onTab('info')}><UserRound size={15} />Personal info</button>
+        <button type="button" role="tab" aria-selected={tab === 'awards'} className={tab === 'awards' ? 'is-on' : ''} onClick={() => onTab('awards')}><Award size={15} />Awards</button>
       </div>
 
-      <div className="lab-layout home-layout">
-        <div className="lab-main">
-          {/* ── labs ── */}
-          <section className="panel">
-            <div className="panel-head"><h3 className="panel-title"><FlaskConical size={15} />My labs</h3></div>
-            {caps.labMemberships.length ? (
-              <ul className="rows">
-                {caps.labMemberships.map((m) => (
-                  <li key={m.id}>
-                    <div><strong><Link to="/labs/$slug" params={{ slug: m.slug }}>{m.name}</Link></strong><small>{m.title ?? LAB_POSITION_LABEL[m.role as LabRole] ?? m.role}</small></div>
-                    {m.isHead && <span className="pill pill-gold">Head</span>}
-                  </li>
-                ))}
-              </ul>
-            ) : <Empty>You are not in a lab yet. <Link to="/labs">Browse the labs</Link>.</Empty>}
-          </section>
-
+      {tab === 'awards' ? <MyAwards userId={uid} /> : <>
+      {/* Research right after the personal info, half of the width; My labs beside it */}
+      <div className="home-halves">
           {/* ── research ── */}
           <section className="panel">
             <div className="panel-head">
@@ -196,6 +175,25 @@ export function MyHome() {
             )}
           </section>
 
+          {/* ── labs ── */}
+          <section className="panel">
+            <div className="panel-head"><h3 className="panel-title"><FlaskConical size={15} />My labs</h3></div>
+            {caps.labMemberships.length ? (
+              <ul className="rows">
+                {caps.labMemberships.map((m) => (
+                  <li key={m.id}>
+                    <div><strong><Link to="/labs/$slug" params={{ slug: m.slug }}>{m.name}</Link></strong><small>{m.title ?? LAB_POSITION_LABEL[m.role as LabRole] ?? m.role}</small></div>
+                    {m.isHead && <span className="pill pill-gold">Head</span>}
+                  </li>
+                ))}
+              </ul>
+            ) : <Empty>You are not in a lab yet. <Link to="/labs">Browse the labs</Link>.</Empty>}
+          </section>
+
+      </div>
+
+      <div className="lab-layout home-layout">
+        <div className="lab-main">
           {/* ── events ── */}
           <section className="panel">
             <div className="panel-head"><h3 className="panel-title"><CalendarDays size={15} />My events</h3><Button asChild size="sm" variant="ghost"><Link to="/events">All events<ArrowUpRight /></Link></Button></div>
@@ -262,15 +260,6 @@ export function MyHome() {
               </ul>
             ) : <Empty>No applications yet. <Link to="/opportunities">See open vacancies and internships</Link>.</Empty>}
 
-            <p className="home-sub">Industry events</p>
-            {industryEvents.length ? (
-              <ul className="rows">
-                {industryEvents.slice(0, 4).map(({ r, ev }) => (
-                  <li key={r.id}><div><strong><Link to="/events/$eventId" params={{ eventId: ev.id }}>{ev.title}</Link></strong><small>{formatDate(ev.starts_at)}{hostNames(ev.event_hosts) ? ` · ${hostNames(ev.event_hosts)}` : ''}</small></div></li>
-                ))}
-              </ul>
-            ) : <Empty>No industry events yet.</Empty>}
-
             <p className="home-sub"><Building2 size={13} />Partner companies of my labs</p>
             {partners.length ? (
               <div className="stack-list">{partners.map(([p, ls]) => <span key={p} title={ls.join(', ')}>{p}</span>)}</div>
@@ -278,6 +267,7 @@ export function MyHome() {
           </section>
         </aside>
       </div>
+      </>}
 
       {exp.data !== null && exp.data !== undefined && <ExperienceDialog userId={uid} items={exp.data} open={editExp} onOpenChange={setEditExp} />}
     </main>

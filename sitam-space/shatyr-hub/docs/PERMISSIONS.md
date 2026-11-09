@@ -118,3 +118,11 @@ Legend: ✅ allowed · ❌ not allowed · 🔒 only for own items · — not app
 | 44 | Move a lab to a research center (Center of AI Research / Center of Mathematics) | coordinator | trigger `labs_center_guard` |
 | 45 | Lab leads 2026 get their head seats and an account created by SITAM with a shared first password (`SduLab2026!`); they must set their own password at the first sign-in. The user chose this knowing that a shared first password is weaker than invariant 8 (accounts are seeded only for the SDU e-mails on the official list) | seeded by the v29 migration (SQL editor) | `sitam_meta.lab_leads_2026`, `profiles.must_change_password`, `clear_must_change_password` |
 | 46 | Fill / submit the Lab Passport of a lab; approve it | fill + submit: heads of that lab and the coordinator; approve: coordinator | RLS `lab_passports` (select), `save_lab_passport`, `save_lab_passport_doc` (v30), `approve_lab_passport` |
+
+## v33 additions (asked for by the user on 2026-11-09)
+
+| # | Action | Who | Where enforced |
+|---|---|---|---|
+| 47 | Upload own certificates (PDF / image, private bucket `certificates`, own folder) and say which lab each belongs to; edit or remove them | the person themselves | RLS `certificates` (`user_id = auth.uid()`), check `certificates_own_folder`, column grant (title, issuer, issued_on, lab_id), storage policies "Own certificate files …" |
+| 48 | See a person's certificates and open the files | the owner; heads of the lab the certificate is linked to; the coordinator | RLS `certificates` select, `can_view_certificate_file` (storage policy "Shared certificate files read") |
+| 49 | Teacher accounts 2026 (Aitimov, Saimassay, Galiyev, Telman, Zhunis; Yunush and Yermekbayeva when their e-mails are known): account with the first password `SduLab2026!` as in row 45, verified teacher, researcher card with the same e-mail linked. No coordinator or lab-head rights | seeded by the v33 migration (SQL editor) | `sitam_meta.staff_accounts_2026`, `profiles.must_change_password`, `profiles.staff_verified`, `professors.profile_id` |

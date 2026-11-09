@@ -218,3 +218,17 @@ do $$ begin
     grant execute on function public.save_lab_passport_doc(uuid, integer, jsonb, boolean) to authenticated;
   end if;
 end $$;
+
+-- v33: certificates (guarded): no guests; the owner may change only title, issuer, date and lab
+do $$ begin
+  if to_regclass('public.certificates') is not null then
+    revoke all on public.certificates from anon, public;
+    revoke update on public.certificates from authenticated;
+    grant select, insert, delete on public.certificates to authenticated;
+    grant update (title, issuer, issued_on, lab_id) on public.certificates to authenticated;
+  end if;
+  if to_regprocedure('public.can_view_certificate_file(text)') is not null then
+    revoke execute on function public.can_view_certificate_file(text) from anon, public;
+    grant execute on function public.can_view_certificate_file(text) to authenticated;
+  end if;
+end $$;

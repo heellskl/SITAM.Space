@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { ArrowUpRight, Briefcase, Building2, FlaskConical, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ListingDialog } from '@/components/manage-panels';
 import { useMyLabs } from '@/components/my-labs';
-import { eventDate, opportunityLabel, useIndustryPartners, useOpportunities } from '@/lib/api';
+import { eventDate, opportunityLabel, useIndustryPartners, useLabs, useOpportunities, useProjects } from '@/lib/api';
 import { PageHero } from '@/components/page-hero';
 import { OpportunityBoard, type OppTab } from '@/components/opportunity-board';
 import { pageHead } from '@/lib/hub-data';
@@ -62,6 +62,17 @@ function Opportunities() {
   const navigate = Route.useNavigate();
   const opps = useOpportunities();
   const partners = useIndustryPartners();
+  const labs = useLabs();
+  const projects = useProjects();
+  // v33: projects in industry = industrial cases of the type Project + projects of labs with the
+  // "Commercial Projects" focus + approved startups (each project counted once)
+  const industryProjects = useMemo(() => {
+    if (!opps.data || !labs.data || !projects.data) return undefined;
+    const commercial = new Set(labs.data.filter((l) => (l.focus ?? []).some((f) => /commercial/i.test(f))).map((l) => l.id));
+    const cases = opps.data.filter((o) => o.category === 'industrial' && o.industrial_type === 'project').length;
+    const own = projects.data.filter((p) => p.kind === 'startup' || (p.lab_id && commercial.has(p.lab_id))).length;
+    return cases + own;
+  }, [opps.data, labs.data, projects.data]);
   const go = (v: 'opportunities' | 'partners') => navigate({ search: v === 'partners' ? { view: 'partners' } : {}, replace: true });
   return (
     <main className="container content-page">
@@ -71,6 +82,7 @@ function Opportunities() {
         stats={[
           { label: 'Open opportunities', value: opps.data?.length, to: '/opportunities' },
           { label: 'Partner companies', value: partners.data?.length, to: '/opportunities', search: { view: 'partners' } },
+          { label: 'Industry projects', value: industryProjects },
         ]}
       />
       <div className="view-switch labs-switch" role="tablist" aria-label="Show">

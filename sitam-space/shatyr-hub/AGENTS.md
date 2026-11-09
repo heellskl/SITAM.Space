@@ -186,3 +186,10 @@
 
 ## SITAM SPACE v32 — Akniyet Mussakhan
 - Co-Head of Analysis (akniyet.mussakhan@sdu.edu.kz) added to `sitam_meta.lab_leads_2026` with the same v29 steps (seat e-mail, account with the first password if missing, link, confirm). `update-to-v32.sql` (after v29).
+
+## SITAM SPACE v33 — Home tabs, certificates, teacher accounts 2026 (PERMISSIONS rows 47–49)
+- Home (`/home`, `my-home.tsx`): under the ID card two tabs — Personal info (default) and Awards (`?tab=awards`, `components/my-awards.tsx`). The KPI row is gone (it repeated the Research block). Personal info = `.home-halves` (Research | My labs, 50 % each), then My events | Industry. Industry no longer has "Industry events"; My events is unchanged.
+- Awards = own certificates: `public.certificates` (title, issuer, issued_on, lab_id, file_path in the private bucket `certificates/{uid}/…`, PDF / JPG / PNG / WebP ≤ 5 MB). The owner adds / edits (title, issuer, date, lab) / removes; heads of the linked lab and the coordinator can read them (`can_view_certificate_file` for the files). Hooks: `useMyCertificates` (null before the SQL is run), `useAddCertificate`, `useUpdateCertificate`, `useDeleteCertificate`, `certificateUrl`.
+- Industry banner: third number "Industry projects" = industrial cases of the type Project + projects of labs with a Commercial focus + approved startups.
+- Teacher accounts 2026: `sitam_meta.staff_accounts_2026` (Aitimov, Saimassay, Galiyev, Telman, Zhunis — Yunush and Yermekbayeva once their e-mails are known): account with the first password `SduLab2026!` (as v29), `staff_verified = true`, researcher card with the same e-mail linked. No coordinator / head rights.
+- Database: `supabase/update-to-v33.sql` (after update-to-v32.sql). Tests: `supabase/tests/v33_tests.sql`.
