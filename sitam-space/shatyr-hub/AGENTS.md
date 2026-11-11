@@ -186,3 +186,7 @@
 
 ## SITAM SPACE v32 — Akniyet Mussakhan
 - Co-Head of Analysis (akniyet.mussakhan@sdu.edu.kz) added to `sitam_meta.lab_leads_2026` with the same v29 steps (seat e-mail, account with the first password if missing, link, confirm). `update-to-v32.sql` (after v29).
+
+## SITAM SPACE v33 — Lab Passport of Computer Vision
+- From the CV Lab passport document (uploaded 2026-11-11): lab_passports (computer-vision, 2026), status submitted. General information, basic and additional equipment, staff, courses, students, area 7 m², room plan (redrawn as a small SVG data URL), developed by / agreed by.
+- Plain JSON in dollar quotes (no base64). Written only when the lab has no saved passport doc for 2026. Migration `20261111190000_sitam_v33_cv_lab_passport.sql`, `update-to-v33.sql` (after v32).
