@@ -15,6 +15,7 @@ import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as AskRouteImport } from './routes/ask'
 import { Route as FaqRouteImport } from './routes/faq'
 import { Route as StartupsRouteImport } from './routes/startups'
+import { Route as AwardsRouteImport } from './routes/awards'
 import { Route as HomeRouteImport } from './routes/home'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ManageRouteImport } from './routes/manage'
@@ -61,6 +62,12 @@ const FaqRoute = FaqRouteImport.update({
 const StartupsRoute = StartupsRouteImport.update({
   id: '/startups',
   path: '/startups',
+  getParentRoute: () => rootRouteImport,
+} as any)
+
+const AwardsRoute = AwardsRouteImport.update({
+  id: '/awards',
+  path: '/awards',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HomeRoute = HomeRouteImport.update({
@@ -156,6 +163,7 @@ export interface FileRoutesByFullPath {
   '/ask': typeof AskRoute
   '/faq': typeof FaqRoute
   '/startups': typeof StartupsRoute
+  '/awards': typeof AwardsRoute
   '/home': typeof HomeRoute
   '/login': typeof LoginRoute
   '/manage': typeof ManageRoute
@@ -181,6 +189,7 @@ export interface FileRoutesByTo {
   '/ask': typeof AskRoute
   '/faq': typeof FaqRoute
   '/startups': typeof StartupsRoute
+  '/awards': typeof AwardsRoute
   '/home': typeof HomeRoute
   '/login': typeof LoginRoute
   '/manage': typeof ManageRoute
@@ -207,6 +216,7 @@ export interface FileRoutesById {
   '/ask': typeof AskRoute
   '/faq': typeof FaqRoute
   '/startups': typeof StartupsRoute
+  '/awards': typeof AwardsRoute
   '/home': typeof HomeRoute
   '/login': typeof LoginRoute
   '/manage': typeof ManageRoute
@@ -234,6 +244,7 @@ export interface FileRouteTypes {
     | '/ask'
     | '/faq'
     | '/startups'
+    | '/awards'
     | '/home'
     | '/login'
     | '/manage'
@@ -259,6 +270,7 @@ export interface FileRouteTypes {
     | '/ask'
     | '/faq'
     | '/startups'
+    | '/awards'
     | '/home'
     | '/login'
     | '/manage'
@@ -284,6 +296,7 @@ export interface FileRouteTypes {
     | '/ask'
     | '/faq'
     | '/startups'
+    | '/awards'
     | '/home'
     | '/login'
     | '/manage'
@@ -310,6 +323,7 @@ export interface RootRouteChildren {
   AskRoute: typeof AskRoute
   FaqRoute: typeof FaqRoute
   StartupsRoute: typeof StartupsRoute
+  AwardsRoute: typeof AwardsRoute
   HomeRoute: typeof HomeRoute
   LoginRoute: typeof LoginRoute
   ManageRoute: typeof ManageRoute
@@ -371,6 +385,13 @@ declare module '@tanstack/react-router' {
       path: '/startups'
       fullPath: '/startups'
       preLoaderRoute: typeof StartupsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/awards': {
+      id: '/awards'
+      path: '/awards'
+      fullPath: '/awards'
+      preLoaderRoute: typeof AwardsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/home': {
@@ -502,6 +523,7 @@ const rootRouteChildren: RootRouteChildren = {
   AskRoute: AskRoute,
   FaqRoute: FaqRoute,
   StartupsRoute: StartupsRoute,
+  AwardsRoute: AwardsRoute,
   HomeRoute: HomeRoute,
   LoginRoute: LoginRoute,
   ManageRoute: ManageRoute,

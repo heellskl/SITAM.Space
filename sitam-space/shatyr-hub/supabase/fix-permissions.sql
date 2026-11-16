@@ -218,3 +218,12 @@ do $$ begin
     grant execute on function public.save_lab_passport_doc(uuid, integer, jsonb, boolean) to authenticated;
   end if;
 end $$;
+
+-- v34: awards (guarded)
+do $$ begin
+  if to_regclass('public.awards') is not null then
+    revoke all on public.awards from anon, public;
+    grant select on public.awards to anon, authenticated;
+    grant insert, update, delete on public.awards to authenticated;
+  end if;
+end $$;

@@ -190,3 +190,8 @@
 ## SITAM SPACE v33 — Lab Passport of Computer Vision
 - From the CV Lab passport document (uploaded 2026-11-11): lab_passports (computer-vision, 2026), status submitted. General information, basic and additional equipment, staff, courses, students, area 7 m², room plan (redrawn as a small SVG data URL), developed by / agreed by.
 - Plain JSON in dollar quotes (no base64). Written only when the lab has no saved passport doc for 2026. Migration `20261111190000_sitam_v33_cv_lab_passport.sql`, `update-to-v33.sql` (after v32).
+
+## SITAM SPACE v34 — Awards & Wall of Fame (PERMISSIONS rows 47–48)
+- `/awards` (sidebar "Awards" with a trophy, after Events; open to guests): PageHero (wins this year, spotlights) → Spotlight of the month (Student of the Month · Top Research Lab · Research Topic of the Month = the latest entry of each kind) → Weekly Wins & News (filters All / Hackathons / Research / Projects / News, 2-column cards) → Hall of Fame (earlier spotlights). `routes/awards.tsx`, CSS block "v34".
+- Data: `public.awards` (kind student | lab | topic | win; category only for wins; title, subtitle, body, lab_id, photo_url, link_url, tags, happened_on). Everyone reads; only `is_admin()` adds / edits / removes on the page itself (Choose / Add a win or news / pencil / trash = click twice). Photos go to the coordinator's folder in `avatars` (`uploadAwardPhoto`). Starts empty: no made-up winners.
+- Database: migration `20261116120000_sitam_v34_awards.sql`, `update-to-v34.sql` (after v33). Tests: block "v34" in permissions_tests.sql.

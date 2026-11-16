@@ -200,6 +200,22 @@ select pg_temp.as_super();
 \i ../migrations/20261104120000_sitam_v30_lab_passports_official.sql
 select 'v30 a lead cannot overwrite another lab passport: ' || case when (select doc->'general'->>'name' from lab_passports p join labs l on l.id=p.lab_id where l.slug='robotics-lab')='Robotics Lab' then 'PASS' else 'FAIL' end;
 select 'v30 running the migration again keeps the edits: ' || case when (select doc->'general'->>'name' from lab_passports p join labs l on l.id=p.lab_id where l.slug='cloud-computing')='Cloud Lab X' then 'PASS' else 'FAIL' end;
+\echo '── v34: awards'
+select pg_temp.as_user('00000000-0000-0000-0000-00000000c095');
+insert into awards (kind, title, subtitle, body) values ('topic', 'Low-resource Kazakh NLP', 'Test authors', 'Test');
+insert into awards (kind, category, title) values ('win', 'hackathon', 'Test win');
+select 'v34 the coordinator publishes awards: ' || case when (select count(*) from awards)=2 then 'PASS' else 'FAIL' end;
+do $$ begin insert into awards (kind, title) values ('win', 'No category'); raise notice 'v34 win without category: FAIL'; exception when others then null; end $$;
+select pg_temp.as_user((select id from profiles where email='s.manbay@sdu.edu.kz'));
+do $$ begin insert into awards (kind, title) values ('student', 'Me'); exception when others then null; end $$;
+update awards set title = 'Hacked' where kind = 'win';
+delete from awards;
+select 'v34 a lab head cannot add, edit or remove awards: ' || case when (select count(*) from awards)=2 and not exists (select 1 from awards where title='Hacked') then 'PASS' else 'FAIL' end;
+select pg_temp.as_super();
+set role anon;
+select 'v34 guests read the wall of fame: ' || case when (select count(*) from awards)=2 then 'PASS' else 'FAIL' end;
+reset role;
+delete from awards;
 -- the v10 / v17 checks below register s.manbay and dilnaz.suleimenova from scratch, so the v29 accounts are removed first
 update lab_members set user_id = null where user_id in (select id from auth.users where email in ('s.manbay@sdu.edu.kz', 'dilnaz.suleimenova@sdu.edu.kz'));
 delete from auth.identities where user_id in (select id from auth.users where email in ('s.manbay@sdu.edu.kz', 'dilnaz.suleimenova@sdu.edu.kz'));

@@ -2849,3 +2849,67 @@ html.dark .su-chip.is-tracker { background: rgba(245, 185, 66, .14); border-colo
 }
 .first-password > button.absolute { display: none; }
 .page-intro a.text-link { color: inherit; text-decoration: underline; text-underline-offset: 3px; word-break: break-all; }
+
+/* ── SITAM SPACE v34: Awards & Wall of Fame ── */
+.awards-page { --aw-student: #b45309; --aw-lab: #1d4ed8; --aw-topic: #6d28d9; }
+html.dark .awards-page { --aw-student: #f5a04e; --aw-lab: #8db4ff; --aw-topic: #c4a8ff; }
+.aw-section { margin-top: 36px; }
+.aw-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.aw-section-head h2 { display: inline-flex; align-items: center; gap: 10px; margin: 0; font-family: var(--font-head); font-size: clamp(22px, 2.4vw, 28px); font-weight: 400; }
+.aw-spot-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+@media (max-width: 960px) { .aw-spot-grid { grid-template-columns: 1fr; } }
+.aw-spot { --c: var(--aw-student); position: relative; display: flex; flex-direction: column; gap: 12px; padding: 22px; border: 1px solid var(--border); border-radius: 14px;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--c) 7%, var(--card)) 0%, var(--card) 55%); transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease; overflow: hidden; }
+.aw-spot::before { content: ''; position: absolute; inset: 0 0 auto 0; height: 3px; background: var(--c); opacity: .85; }
+.aw-spot:hover { transform: translateY(-3px); box-shadow: 0 14px 34px -18px color-mix(in oklab, var(--c) 55%, transparent); border-color: color-mix(in oklab, var(--c) 35%, var(--border)); }
+.aw-spot.aw-lab { --c: var(--aw-lab); }
+.aw-spot.aw-topic { --c: var(--aw-topic); }
+.aw-spot.is-empty { border-style: dashed; background: var(--card); justify-content: center; align-items: flex-start; min-height: 220px; }
+.aw-spot.is-empty::before { opacity: .35; }
+.aw-spot-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.aw-spot-badge { display: inline-flex; align-items: center; gap: 6px; width: fit-content; padding: 5px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: .02em;
+  color: var(--c); background: color-mix(in oklab, var(--c) 12%, transparent); }
+.aw-spot h3 { margin: 0; font-family: var(--font-head); font-weight: 400; font-size: 24px; line-height: 1.15; }
+.aw-spot-empty { margin: 0; color: var(--muted-foreground); font-size: 14px; }
+.aw-person { display: flex; align-items: center; gap: 14px; }
+.aw-person small { display: block; margin-top: 4px; color: var(--muted-foreground); font-size: 13px; }
+.aw-avatar { flex: none; width: 72px; height: 72px; border-radius: 50%; overflow: hidden; display: grid; place-items: center; font-weight: 700; font-size: 22px; color: #fff;
+  background: linear-gradient(135deg, var(--c), color-mix(in oklab, var(--c) 55%, #0a1930)); box-shadow: 0 0 0 3px var(--card), 0 0 0 5px color-mix(in oklab, var(--c) 40%, transparent); }
+.aw-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.aw-key { margin: 0; font-size: 14px; font-weight: 600; }
+.aw-key span { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted-foreground); margin-bottom: 2px; }
+.aw-text { margin: 0; font-size: 14px; line-height: 1.55; color: color-mix(in oklab, var(--foreground) 82%, transparent); white-space: pre-line; }
+.aw-spot-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.aw-date { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--muted-foreground); }
+.aw-more { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 600; color: var(--foreground); text-decoration: none; }
+.aw-more:hover { text-decoration: underline; text-underline-offset: 3px; }
+.aw-tools { display: inline-flex; gap: 2px; margin-left: auto; }
+.aw-admin-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
+.aw-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.aw-win-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 760px) { .aw-win-grid { grid-template-columns: 1fr; } }
+.aw-win { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 14px; background: var(--card); overflow: hidden; transition: transform .2s ease, box-shadow .2s ease; }
+.aw-win:hover { transform: translateY(-2px); box-shadow: 0 12px 28px -18px rgba(10, 25, 48, .45); }
+.aw-win-img { width: 100%; aspect-ratio: 16 / 7; object-fit: cover; background: var(--muted); }
+.aw-win-body { display: flex; flex-direction: column; gap: 10px; padding: 18px 20px 20px; }
+.aw-win-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.aw-win h3 { margin: 0; font-family: var(--font-ui, inherit); font-size: 17px; font-weight: 700; line-height: 1.3; }
+.aw-cat { padding: 4px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 700; letter-spacing: .02em; }
+.aw-cat.cat-hackathon { color: #047857; background: color-mix(in oklab, #047857 12%, transparent); }
+.aw-cat.cat-research { color: #1d4ed8; background: color-mix(in oklab, #1d4ed8 12%, transparent); }
+.aw-cat.cat-project { color: #6d28d9; background: color-mix(in oklab, #6d28d9 12%, transparent); }
+.aw-cat.cat-news { color: #475569; background: color-mix(in oklab, #475569 12%, transparent); }
+html.dark .aw-cat.cat-hackathon { color: #6ee7b7; } html.dark .aw-cat.cat-research { color: #93b4ff; }
+html.dark .aw-cat.cat-project { color: #c4a8ff; } html.dark .aw-cat.cat-news { color: #cbd5e1; }
+.aw-lab-tag { display: inline-flex; align-items: center; gap: 4px; text-decoration: none; color: inherit; }
+.aw-hall { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.aw-hall li { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); }
+.aw-hall strong { display: block; font-size: 14.5px; }
+.aw-hall small { display: block; font-size: 12.5px; color: var(--muted-foreground); }
+.aw-hall-icon { flex: none; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; color: var(--c, var(--aw-student)); background: color-mix(in oklab, var(--c, var(--aw-student)) 12%, transparent); }
+.aw-hall-icon.aw-lab { --c: var(--aw-lab); } .aw-hall-icon.aw-topic { --c: var(--aw-topic); } .aw-hall-icon.aw-student { --c: var(--aw-student); }
+.aw-photo-pick { display: flex; align-items: center; gap: 10px; }
+.aw-photo-pick img, .aw-photo-empty { width: 56px; height: 56px; border-radius: 10px; object-fit: cover; border: 1px solid var(--border); display: grid; place-items: center; color: var(--muted-foreground); }
+.btn-like { display: inline-flex; align-items: center; height: 36px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); font-size: 13.5px; font-weight: 600; cursor: pointer; }
+.btn-like:hover { border-color: var(--btn-bg); }
+@media (prefers-reduced-motion: reduce) { .aw-spot, .aw-win { transition: none; } .aw-spot:hover, .aw-win:hover { transform: none; } }

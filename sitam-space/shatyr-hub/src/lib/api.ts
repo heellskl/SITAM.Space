@@ -1794,3 +1794,56 @@ export function useStartupLinks() {
     },
   });
 }
+
+/* ───────────────────────────── v34: Awards & Wall of Fame ───────────────────────────── */
+export type AwardKind = 'student' | 'lab' | 'topic' | 'win';
+export type WinCategory = 'hackathon' | 'research' | 'project' | 'news';
+export type Award = {
+  id: string; kind: AwardKind; category: WinCategory | null;
+  title: string; subtitle: string | null; body: string | null;
+  lab_id: string | null; photo_url: string | null; link_url: string | null;
+  tags: string[]; happened_on: string;
+};
+export type AwardInput = Omit<Award, 'id'> & { id?: string | undefined };
+const AWARDS_KEY = ['awards'] as const;
+
+/** All awards, newest first. [] before the v34 SQL is run. */
+export function useAwards() {
+  return useQuery({
+    queryKey: AWARDS_KEY,
+    queryFn: async () => {
+      const { data, error } = await db.from('awards').select('id, kind, category, title, subtitle, body, lab_id, photo_url, link_url, tags, happened_on')
+        .order('happened_on', { ascending: false }).order('created_at', { ascending: false });
+      if (error) { if (/awards/.test(error.message ?? '') && /exist|schema cache/i.test(error.message ?? '')) return [] as Award[]; fail(error); }
+      return (data ?? []) as Award[];
+    },
+  });
+}
+export function useSaveAward() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, ...row }: AwardInput) => {
+      const clean = { ...row, subtitle: row.subtitle || null, body: row.body || null, photo_url: row.photo_url || null, link_url: row.link_url || null, lab_id: row.lab_id || null, category: row.kind === 'win' ? row.category : null };
+      const { error } = id ? await db.from('awards').update({ ...clean, updated_at: new Date().toISOString() }).eq('id', id) : await db.from('awards').insert(clean);
+      if (error) fail(error);
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: AWARDS_KEY }),
+  });
+}
+export function useDeleteAward() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => { const { error } = await db.from('awards').delete().eq('id', id); if (error) fail(error); },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: AWARDS_KEY }),
+  });
+}
+/** Photo for an award card, uploaded to the coordinator's own folder; returns its public link. */
+export async function uploadAwardPhoto(userId: string, file: File) {
+  if (!/^image\/(png|jpeg|webp)$/.test(file.type)) throw new Error('BAD_FILE: use a PNG, JPG or WebP image');
+  if (file.size > 3 * 1024 * 1024) throw new Error('TOO_BIG: the image must be 3 MB or smaller');
+  const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg';
+  const path = `${userId}/award-${Date.now()}.${ext}`;
+  const { error } = await db.storage.from('avatars').upload(path, file, { upsert: false, contentType: file.type });
+  if (error) fail(error);
+  return db.storage.from('avatars').getPublicUrl(path).data.publicUrl as string;
+}
